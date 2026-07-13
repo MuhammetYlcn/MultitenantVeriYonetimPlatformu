@@ -6,6 +6,10 @@
 # dotenv files
 .env
 
+# Staj raporları (kişisel, repoya girmesin)
+*rapor.docx
+~$*.docx
+
 # User-specific files
 *.rsuser
 *.suo
