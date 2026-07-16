@@ -13,6 +13,9 @@ public record LoginRequest(
     [Required, EmailAddress] string Email,
     [Required] string Password);
 
-public record AuthResponse(Guid UserId, Guid TenantId, string Email, string Role, string Token);
+public record RefreshRequest([Required] string RefreshToken);
+
+public record AuthResponse(Guid UserId, Guid TenantId, string Email, string Role,
+    string Token, string RefreshToken);
 
 public record AuthResult(bool Success, string Message, AuthResponse? Data = null);

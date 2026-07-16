@@ -37,6 +37,16 @@ public class AuthController : ControllerBase
         return Ok(result.Data);
     }
 
+    [HttpPost("refresh")]
+    public async Task<IActionResult> Refresh(RefreshRequest request)
+    {
+        var result = await _authService.RefreshAsync(request);
+        if (!result.Success)
+            return Unauthorized(new { message = result.Message });
+
+        return Ok(result.Data);
+    }
+
     [Authorize]
     [HttpGet("me")]
     public IActionResult Me()
