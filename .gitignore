@@ -10,6 +10,9 @@
 *rapor.docx
 ~$*.docx
 
+# Yerel geliştirme ayarları (gizli anahtar/şifre içerir, repoya girmesin)
+appsettings.Development.json
+
 # User-specific files
 *.rsuser
 *.suo
