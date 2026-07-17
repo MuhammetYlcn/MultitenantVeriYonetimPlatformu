@@ -14,6 +14,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<ITokenService, TokenService>();
+builder.Services.AddScoped<ITenantProvisioner, TenantProvisioner>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, TenantContext>();
 
@@ -54,5 +55,14 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+
+// Açılışta eksik tenant şemalarını tamamla (Spring ApplicationRunner karşılığı).
+// AppDbContext scoped olduğundan istek dışında elle scope açmak gerekir.
+using (var scope = app.Services.CreateScope())
+{
+    var provisioner = scope.ServiceProvider.GetRequiredService<ITenantProvisioner>();
+    var count = await provisioner.SyncAllSchemasAsync();
+    app.Logger.LogInformation("Tenant şema senkronizasyonu: {Count} tenant kontrol edildi.", count);
+}
 
 app.Run();

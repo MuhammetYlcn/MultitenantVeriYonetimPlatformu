@@ -19,12 +19,15 @@ public class AuthService : IAuthService
     private readonly AppDbContext _db;
     private readonly ITokenService _tokenService;
     private readonly IConfiguration _config;
+    private readonly ITenantProvisioner _provisioner;
 
-    public AuthService(AppDbContext db, ITokenService tokenService, IConfiguration config)
+    public AuthService(AppDbContext db, ITokenService tokenService, IConfiguration config,
+        ITenantProvisioner provisioner)
     {
         _db = db;
         _tokenService = tokenService;
         _config = config;
+        _provisioner = provisioner;
     }
 
     public async Task<AuthResult> RegisterAsync(RegisterRequest request)
@@ -37,7 +40,8 @@ public class AuthService : IAuthService
         {
             Id = Guid.NewGuid(),
             Name = request.TenantName,
-            Slug = request.TenantSlug
+            Slug = request.TenantSlug,
+            SchemaName = _provisioner.BuildSchemaName(request.TenantSlug)
         };
 
         var user = new User
@@ -52,7 +56,13 @@ public class AuthService : IAuthService
         _db.Tenants.Add(tenant);
         _db.Users.Add(user);
         var refreshRaw = CreateRefreshToken(user);
+
+        // Tenant kaydı ve şeması ya birlikte oluşur ya hiç oluşmaz.
+        // PostgreSQL'de DDL transactional olduğundan CREATE SCHEMA da rollback edilebilir.
+        await using var tx = await _db.Database.BeginTransactionAsync();
+        await _provisioner.CreateSchemaAsync(tenant.SchemaName);
         await _db.SaveChangesAsync();
+        await tx.CommitAsync();
 
         return new AuthResult(true, "Kayıt başarılı.", BuildResponse(user, refreshRaw));
     }

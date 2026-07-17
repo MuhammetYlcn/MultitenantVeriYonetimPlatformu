@@ -23,8 +23,10 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Tenant>(tenant =>
         {
             tenant.HasIndex(t => t.Slug).IsUnique();
+            tenant.HasIndex(t => t.SchemaName).IsUnique();
             tenant.Property(t => t.Name).HasMaxLength(200);
             tenant.Property(t => t.Slug).HasMaxLength(100);
+            tenant.Property(t => t.SchemaName).HasMaxLength(63); // PostgreSQL tanımlayıcı limiti
         });
 
         modelBuilder.Entity<User>(user =>
