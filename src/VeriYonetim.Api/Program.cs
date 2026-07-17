@@ -56,13 +56,20 @@ app.UseAuthorization();
 
 app.MapControllers();
 
-// Açılışta eksik tenant şemalarını tamamla (Spring ApplicationRunner karşılığı).
-// AppDbContext scoped olduğundan istek dışında elle scope açmak gerekir.
+// Açılışta migration + eksik tenant şemalarını tamamlama (Spring ApplicationRunner
+// karşılığı). AppDbContext scoped olduğundan istek dışında elle scope açmak gerekir.
 using (var scope = app.Services.CreateScope())
 {
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    await db.Database.MigrateAsync(); // taze DB'de (test dahil) tabloları kurar
+
     var provisioner = scope.ServiceProvider.GetRequiredService<ITenantProvisioner>();
     var count = await provisioner.SyncAllSchemasAsync();
     app.Logger.LogInformation("Tenant şema senkronizasyonu: {Count} tenant kontrol edildi.", count);
 }
 
 app.Run();
+
+// WebApplicationFactory<Program>'ın test projesinden erişebilmesi için —
+// top-level statement'ların ürettiği sınıf aksi halde internal kalır.
+public partial class Program { }

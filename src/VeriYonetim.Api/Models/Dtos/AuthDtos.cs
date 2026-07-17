@@ -20,6 +20,13 @@ public record LoginRequest(
 
 public record RefreshRequest([Required] string RefreshToken);
 
+public record CreateUserRequest(
+    [Required, EmailAddress, MaxLength(320)] string Email,
+    [Required, MinLength(8)] string Password,
+    [Required, RegularExpression("^(Admin|User)$",
+        ErrorMessage = "Rol 'Admin' veya 'User' olmalı.")]
+    string Role);
+
 public record AuthResponse(Guid UserId, Guid TenantId, string Email, string Role,
     string Token, string RefreshToken);
 

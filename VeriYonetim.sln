@@ -7,6 +7,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{5FB696F9-1F4
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VeriYonetim.Api", "src\VeriYonetim.Api\VeriYonetim.Api.csproj", "{F8DC6410-DE46-43BF-B41F-846789A21699}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{2F06839A-30C7-4AE0-BCDF-2698EDE1039F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VeriYonetim.Api.Tests", "tests\VeriYonetim.Api.Tests\VeriYonetim.Api.Tests.csproj", "{F1E36C84-30AF-4314-BE4C-49884FFD1DE6}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -20,8 +24,13 @@ Global
 		{F8DC6410-DE46-43BF-B41F-846789A21699}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F8DC6410-DE46-43BF-B41F-846789A21699}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{F8DC6410-DE46-43BF-B41F-846789A21699}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F1E36C84-30AF-4314-BE4C-49884FFD1DE6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F1E36C84-30AF-4314-BE4C-49884FFD1DE6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F1E36C84-30AF-4314-BE4C-49884FFD1DE6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F1E36C84-30AF-4314-BE4C-49884FFD1DE6}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{F8DC6410-DE46-43BF-B41F-846789A21699} = {5FB696F9-1F42-4E2C-96CF-807724403637}
+		{F1E36C84-30AF-4314-BE4C-49884FFD1DE6} = {2F06839A-30C7-4AE0-BCDF-2698EDE1039F}
 	EndGlobalSection
 EndGlobal
