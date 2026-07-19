@@ -39,5 +39,4 @@ Birden fazla firmanın (tenant) aynı platform üzerinde birbirinden tamamen izo
 ## Riskler (özet)
 Model kalitesi/donanım yetersizliği durumunda daha küçük/quantize model ya da prompt-engineering'e ağırlık verilecek; zaman sarkması durumunda önce OCR fine-tuning, sonra Flutter'da özel tasarım feda edilecek — çekirdek (auth/multi-tenancy/veri/NL-SQL) hiçbir koşulda feda edilmez.
 
----
-*Onay: __________________  Tarih: __________________*
+
