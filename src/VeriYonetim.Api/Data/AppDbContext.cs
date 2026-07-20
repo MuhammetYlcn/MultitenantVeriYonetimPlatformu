@@ -18,6 +18,7 @@ public class AppDbContext : DbContext
     public DbSet<User> Users => Set<User>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
     public DbSet<Dataset> Datasets => Set<Dataset>();
+    public DbSet<DatasetColumn> DatasetColumns => Set<DatasetColumn>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -56,6 +57,21 @@ public class AppDbContext : DbContext
 
             // İzolasyon: her sorgu otomatik olarak sadece aktif tenant'ın setlerini görür.
             dataset.HasQueryFilter(d => d.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<DatasetColumn>(column =>
+        {
+            column.Property(c => c.Name).HasMaxLength(200);
+            column.Property(c => c.Type).HasMaxLength(20);
+
+            // Bir dataset silinince kolonları da silinsin.
+            column.HasOne(c => c.Dataset)
+                .WithMany()
+                .HasForeignKey(c => c.DatasetId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // İzolasyon Dataset üzerinden (RefreshToken'ın User üzerinden filtrelenmesi gibi).
+            column.HasQueryFilter(c => c.Dataset.TenantId == _tenantContext.TenantId);
         });
     }
 }

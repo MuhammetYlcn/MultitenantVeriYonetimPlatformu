@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 
 namespace VeriYonetim.Api.Tests;
 
@@ -202,6 +203,104 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
         var response = await _client.SendAsync(
             WithToken(HttpMethod.Get, $"/api/datasets/{Guid.NewGuid()}", t.Token));
 
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // ---- Şema kaydet / oku / izolasyon (DatasetColumn) ----
+
+    private record SchemaColumn(string Name, string Type, int Ordinal);
+    private record SchemaResponse(Guid DatasetId, List<SchemaColumn> Columns);
+
+    // Bir CSV içeriğini multipart/form-data olarak /{id}/schema'ya yükler.
+    private async Task<HttpResponseMessage> UploadSchemaAsync(string token, Guid datasetId, string csv)
+    {
+        var content = new MultipartFormDataContent();
+        var file = new ByteArrayContent(Encoding.UTF8.GetBytes(csv));
+        file.Headers.ContentType = new MediaTypeHeaderValue("text/csv");
+        content.Add(file, "file", "test.csv");
+
+        var request = new HttpRequestMessage(HttpMethod.Post, $"/api/datasets/{datasetId}/schema")
+        {
+            Content = content
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return await _client.SendAsync(request);
+    }
+
+    [Fact]
+    public async Task SetSchema_SavesDetectedColumns()
+    {
+        var t = await RegisterTenantAsync("sch-save", "a@schsave.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+
+        var response = await UploadSchemaAsync(t.Token, id, "ad,yas\nAli,30\nAyse,25");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = (await response.Content.ReadFromJsonAsync<SchemaResponse>())!;
+        Assert.Equal(2, body.Columns.Count);
+        Assert.Equal("ad", body.Columns[0].Name);
+        Assert.Equal("text", body.Columns[0].Type);
+        Assert.Equal("number", body.Columns[1].Type);
+    }
+
+    [Fact]
+    public async Task GetSchema_ReturnsSavedColumnsInOrder()
+    {
+        var t = await RegisterTenantAsync("sch-get", "a@schget.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        await UploadSchemaAsync(t.Token, id, "ad,yas,tarih\nAli,30,2026-01-15");
+
+        var response = await _client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/datasets/{id}/schema", t.Token));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = (await response.Content.ReadFromJsonAsync<SchemaResponse>())!;
+        Assert.Equal(3, body.Columns.Count);
+        Assert.Equal(new[] { 0, 1, 2 }, body.Columns.Select(c => c.Ordinal).ToArray());
+        Assert.Equal("date", body.Columns[2].Type);   // kalıcı: ayrı istekte DB'den okundu
+    }
+
+    [Fact]
+    public async Task SetSchema_Reupload_ReplacesOldColumns()
+    {
+        var t = await RegisterTenantAsync("sch-re", "a@schre.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        await UploadSchemaAsync(t.Token, id, "ad,yas\nAli,30");
+
+        // Farklı kolonlu dosyayı tekrar yükle → eski kolonlar tümüyle değişmeli.
+        await UploadSchemaAsync(t.Token, id, "urun,fiyat,adet\nElma,5,10");
+
+        var response = await _client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/datasets/{id}/schema", t.Token));
+        var body = (await response.Content.ReadFromJsonAsync<SchemaResponse>())!;
+
+        Assert.Equal(3, body.Columns.Count);
+        Assert.Contains(body.Columns, c => c.Name == "urun");
+        Assert.DoesNotContain(body.Columns, c => c.Name == "ad");
+    }
+
+    [Fact]
+    public async Task CrossTenant_GetSchema_Returns404()
+    {
+        var a = await RegisterTenantAsync("sch-x-a", "a@schxa.com");
+        var b = await RegisterTenantAsync("sch-x-b", "b@schxb.com");
+        var id = (await CreateDatasetAsync(a.Token, "S")).Id;
+        await UploadSchemaAsync(a.Token, id, "ad,yas\nAli,30");
+
+        var response = await _client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/datasets/{id}/schema", b.Token));
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CrossTenant_SetSchema_Returns404()
+    {
+        var a = await RegisterTenantAsync("sch-xs-a", "a@schxsa.com");
+        var b = await RegisterTenantAsync("sch-xs-b", "b@schxsb.com");
+        var id = (await CreateDatasetAsync(a.Token, "S")).Id;
+
+        // B, A'nın datasetine şema yazamaz.
+        var response = await UploadSchemaAsync(b.Token, id, "ad,yas\nAli,30");
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 }
