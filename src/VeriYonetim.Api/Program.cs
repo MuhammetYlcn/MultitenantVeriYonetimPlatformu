@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using VeriYonetim.Api.Data;
+using VeriYonetim.Api.Middleware;
 using VeriYonetim.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -35,12 +36,20 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 
+// Merkezi hata yönetimi: tüm hataları tek tip ProblemDetails'e oturtur.
+builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+
 builder.Services.AddControllers();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
+
+// Pipeline'ın en başı: sonraki her katmandan gelen yakalanmamış istisnaları
+// GlobalExceptionHandler'a yönlendirir.
+app.UseExceptionHandler();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())

@@ -17,6 +17,7 @@ public class AppDbContext : DbContext
     public DbSet<Tenant> Tenants => Set<Tenant>();
     public DbSet<User> Users => Set<User>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
+    public DbSet<Dataset> Datasets => Set<Dataset>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -46,6 +47,15 @@ public class AppDbContext : DbContext
             // User filtreli, RefreshToken filtresiz olamaz — refresh isteği token'sız
             // geldiğinden tenant context yok; sorgular bilinçli IgnoreQueryFilters kullanır.
             token.HasQueryFilter(t => t.User.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<Dataset>(dataset =>
+        {
+            dataset.Property(d => d.Name).HasMaxLength(200);
+            dataset.Property(d => d.Description).HasMaxLength(2000);
+
+            // İzolasyon: her sorgu otomatik olarak sadece aktif tenant'ın setlerini görür.
+            dataset.HasQueryFilter(d => d.TenantId == _tenantContext.TenantId);
         });
     }
 }

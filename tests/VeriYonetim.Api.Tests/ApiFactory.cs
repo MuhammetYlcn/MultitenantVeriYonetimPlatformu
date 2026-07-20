@@ -36,6 +36,6 @@ public class ApiFactory : WebApplicationFactory<Program>
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         await db.Database.ExecuteSqlRawAsync(
-            """TRUNCATE TABLE "RefreshTokens", "Users", "Tenants" CASCADE""");
+            """TRUNCATE TABLE "Datasets", "RefreshTokens", "Users", "Tenants" CASCADE""");
     }
 }
