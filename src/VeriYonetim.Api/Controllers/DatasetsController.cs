@@ -236,22 +236,14 @@ public class DatasetsController : ControllerBase
             .Where(c => c.DatasetId == id)
             .ToDictionaryAsync(c => c.Name, c => c.Type);
 
-        // "kolon:op:deger" ayrıştır. Değerin içinde ':' olabilir (tarih-saat) → en fazla 3 parça.
-        var filters = new List<RowFilter>();
-        foreach (var raw in filter ?? [])
-        {
-            var parts = raw.Split(':', 3);
-            if (parts.Length != 3)
-                return Problem(statusCode: StatusCodes.Status400BadRequest,
-                    title: $"Geçersiz filtre biçimi: '{raw}'. Beklenen: kolon:op:deger.");
-            filters.Add(new RowFilter(parts[0], parts[1], parts[2]));
-        }
+        var (filters, filterError) = ParseFilters(filter);
+        if (filterError is not null) return filterError;
 
         BuiltQuery built;
         try
         {
             built = DatasetRowQueryBuilder.Build(
-                new RowQuery(page, pageSize, sort, dir, filters), schema);
+                new RowQuery(page, pageSize, sort, dir, filters!), schema);
         }
         catch (InvalidQueryException ex)
         {
@@ -295,6 +287,94 @@ public class DatasetsController : ControllerBase
         foreach (var p in built.Parameters)
             list.Add(new NpgsqlParameter(p.ParameterName, p.NpgsqlDbType) { Value = p.Value });
         return list;
+    }
+
+    // "kolon:op:deger" biçimindeki filtreleri ayrıştırır. Değerin içinde ':' olabilir
+    // (tarih-saat) → en fazla 3 parça. Hatalı biçim → 400. GetRows ve Aggregate paylaşır.
+    private (List<RowFilter>? Filters, IActionResult? Error) ParseFilters(string[]? filter)
+    {
+        var filters = new List<RowFilter>();
+        foreach (var raw in filter ?? [])
+        {
+            var parts = raw.Split(':', 3);
+            if (parts.Length != 3)
+                return (null, Problem(statusCode: StatusCodes.Status400BadRequest,
+                    title: $"Geçersiz filtre biçimi: '{raw}'. Beklenen: kolon:op:deger."));
+            filters.Add(new RowFilter(parts[0], parts[1], parts[2]));
+        }
+        return (filters, null);
+    }
+
+    // GET /api/datasets/{id}/aggregate — satırları gruplayıp özetler (grup özeti / top-N /
+    // zaman serisi). Örn: ?groupBy=sehir&op=avg&metric=yas  |  ?groupBy=tarih&bucket=month&op=sum&metric=tutar
+    // op ∈ {count,sum,avg,min,max}; sum/avg/min/max sayısal metric ister; count metric istemez.
+    [HttpGet("{id:guid}/aggregate")]
+    public async Task<IActionResult> Aggregate(
+        Guid id,
+        [FromQuery] string? groupBy = null,
+        [FromQuery] string? op = null,
+        [FromQuery] string? metric = null,
+        [FromQuery] string? bucket = null,
+        [FromQuery] string? sort = null,
+        [FromQuery] string? dir = null,
+        [FromQuery] int? limit = null,
+        [FromQuery(Name = "filter")] string[]? filter = null)
+    {
+        // Sahiplik doğrulaması: ham SQL global query filter'ı atladığından izolasyon dayanağı.
+        var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
+        if (dataset is null) return DatasetNotFound();
+
+        if (string.IsNullOrWhiteSpace(groupBy) || string.IsNullOrWhiteSpace(op))
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "groupBy ve op parametreleri zorunludur.");
+
+        var schema = await _db.DatasetColumns
+            .Where(c => c.DatasetId == id)
+            .ToDictionaryAsync(c => c.Name, c => c.Type);
+
+        var (filters, filterError) = ParseFilters(filter);
+        if (filterError is not null) return filterError;
+
+        BuiltAggregate built;
+        try
+        {
+            built = DatasetAggregateQueryBuilder.Build(
+                new AggregateQuery(groupBy, op, metric, bucket, sort, dir, limit, filters!), schema);
+        }
+        catch (InvalidQueryException ex)
+        {
+            return Problem(statusCode: StatusCodes.Status400BadRequest, title: ex.Message);
+        }
+
+        // Ham ADO ile çalıştırıyoruz: raporlama sorgusu, grup anahtarı tek tip değil (text'e
+        // cast'li) ve entity materializasyonuna ihtiyaç yok. Tenant güvenliği datasetId +
+        // yukarıdaki sahiplik kontrolüyle sağlı.
+        var buckets = new List<AggregateBucket>();
+        var conn = _db.Database.GetDbConnection();
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = built.Sql;
+            cmd.Parameters.Add(new NpgsqlParameter("datasetId", id));
+            foreach (var p in built.Parameters) cmd.Parameters.Add(p);
+
+            var wasClosed = conn.State != System.Data.ConnectionState.Open;
+            if (wasClosed) await conn.OpenAsync();
+            try
+            {
+                await using var reader = await cmd.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                    buckets.Add(new AggregateBucket(
+                        Key: reader.IsDBNull(0) ? null : reader.GetString(0),
+                        Value: reader.IsDBNull(1) ? null : reader.GetDecimal(1),
+                        Count: reader.GetInt32(2)));
+            }
+            finally
+            {
+                if (wasClosed) await conn.CloseAsync();
+            }
+        }
+
+        return Ok(new AggregateResponse(groupBy, op.ToLowerInvariant(), metric, bucket, buckets));
     }
 
     // PUT /api/datasets/{id} — güncelle.

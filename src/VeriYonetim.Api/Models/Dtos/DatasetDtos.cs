@@ -31,3 +31,14 @@ public record RowListResponse(
     int Total,
     int TotalPages,
     IReadOnlyList<RowItem> Rows);
+
+// Tek bir agregasyon grubu: anahtar (grup değeri, text), agregasyon sonucu, grup büyüklüğü.
+public record AggregateBucket(string? Key, decimal? Value, int Count);
+
+// Agregasyon yanıtı: hangi soru soruldu + grupların listesi.
+public record AggregateResponse(
+    string GroupBy,
+    string Op,
+    string? Metric,
+    string? Bucket,
+    IReadOnlyList<AggregateBucket> Buckets);

@@ -523,4 +523,131 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
+
+    // ---- Agregasyon (grup özeti / top-N / zaman serisi) ----
+
+    private record AggBucketDto(string? Key, decimal? Value, int Count);
+    private record AggResponseDto(string GroupBy, string Op, string? Metric, string? Bucket,
+        List<AggBucketDto> Buckets);
+
+    // Şehir/yaş/tarih/tutar içeren 4 satırlık bir dataset kurar.
+    private async Task<(string Token, Guid Id)> SeededAggDatasetAsync(string slug, string email)
+    {
+        var t = await RegisterTenantAsync(slug, email);
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        const string header = "ad,sehir,yas,tarih,tutar";
+        await UploadSchemaAsync(t.Token, id, $"{header}\nAli,Ankara,30,2026-01-10,100");
+        await ImportRowsAsync(t.Token, id,
+            $"{header}\nAli,Ankara,30,2026-01-10,100\nAyse,Izmir,25,2026-01-20,200\n" +
+            "Veli,Ankara,40,2026-02-05,150\nCem,Bursa,35,2026-02-15,300");
+        return (t.Token, id);
+    }
+
+    private async Task<AggResponseDto> AggregateAsync(string token, Guid id, string queryString)
+    {
+        var response = await _client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/datasets/{id}/aggregate?{queryString}", token));
+        response.EnsureSuccessStatusCode();
+        return (await response.Content.ReadFromJsonAsync<AggResponseDto>())!;
+    }
+
+    [Fact]
+    public async Task Aggregate_GroupAverage()
+    {
+        var (token, id) = await SeededAggDatasetAsync("agg-avg", "a@aggavg.com");
+
+        var body = await AggregateAsync(token, id, "groupBy=sehir&op=avg&metric=yas");
+
+        var ankara = body.Buckets.Single(b => b.Key == "Ankara");
+        Assert.Equal(35m, ankara.Value);   // (30+40)/2
+        Assert.Equal(2, ankara.Count);
+        Assert.Equal(25m, body.Buckets.Single(b => b.Key == "Izmir").Value);
+    }
+
+    [Fact]
+    public async Task Aggregate_TopN_BySumDescending()
+    {
+        var (token, id) = await SeededAggDatasetAsync("agg-top", "a@aggtop.com");
+
+        var body = await AggregateAsync(token, id,
+            "groupBy=sehir&op=sum&metric=tutar&sort=value&dir=desc&limit=2");
+
+        Assert.Equal(2, body.Buckets.Count);              // yalnız en yüksek 2 grup
+        Assert.Equal("Bursa", body.Buckets[0].Key);       // 300
+        Assert.Equal(300m, body.Buckets[0].Value);
+        Assert.Equal("Ankara", body.Buckets[1].Key);      // 100+150=250
+        Assert.Equal(250m, body.Buckets[1].Value);
+    }
+
+    [Fact]
+    public async Task Aggregate_TimeSeries_ByMonth()
+    {
+        var (token, id) = await SeededAggDatasetAsync("agg-ts", "a@aggts.com");
+
+        var body = await AggregateAsync(token, id,
+            "groupBy=tarih&bucket=month&op=sum&metric=tutar&sort=key&dir=asc");
+
+        Assert.Equal(2, body.Buckets.Count);              // Ocak, Şubat
+        Assert.StartsWith("2026-01", body.Buckets[0].Key);
+        Assert.Equal(300m, body.Buckets[0].Value);        // 100+200
+        Assert.StartsWith("2026-02", body.Buckets[1].Key);
+        Assert.Equal(450m, body.Buckets[1].Value);        // 150+300
+    }
+
+    [Fact]
+    public async Task Aggregate_Count_UsesGroupSize()
+    {
+        var (token, id) = await SeededAggDatasetAsync("agg-cnt", "a@aggcnt.com");
+
+        var body = await AggregateAsync(token, id, "groupBy=sehir&op=count");
+
+        Assert.Equal(2, body.Buckets.Single(b => b.Key == "Ankara").Count);
+        Assert.Equal(2m, body.Buckets.Single(b => b.Key == "Ankara").Value);
+    }
+
+    [Fact]
+    public async Task Aggregate_WithFilter_NarrowsRows()
+    {
+        var (token, id) = await SeededAggDatasetAsync("agg-flt", "a@aggflt.com");
+
+        // yas>=35 → Veli(Ankara) + Cem(Bursa); her grupta 1'er satır.
+        var body = await AggregateAsync(token, id, "groupBy=sehir&op=count&filter=yas:gte:35");
+
+        Assert.Equal(2, body.Buckets.Count);
+        Assert.All(body.Buckets, b => Assert.Equal(1, b.Count));
+    }
+
+    [Fact]
+    public async Task Aggregate_UnknownGroupColumn_Returns400()
+    {
+        var (token, id) = await SeededAggDatasetAsync("agg-unk", "a@aggunk.com");
+
+        var response = await _client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/datasets/{id}/aggregate?groupBy=yok&op=count", token));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Aggregate_SumOnTextColumn_Returns400()
+    {
+        var (token, id) = await SeededAggDatasetAsync("agg-txt", "a@aggtxt.com");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Get,
+            $"/api/datasets/{id}/aggregate?groupBy=sehir&op=sum&metric=ad", token));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CrossTenant_Aggregate_Returns404()
+    {
+        var (_, id) = await SeededAggDatasetAsync("agg-x-a", "a@aggxa.com");
+        var b = await RegisterTenantAsync("agg-x-b", "b@aggxb.com");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Get,
+            $"/api/datasets/{id}/aggregate?groupBy=sehir&op=count", b.Token));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
 }
