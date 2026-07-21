@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
+using System.Text.Json;
 
 namespace VeriYonetim.Api.Tests;
 
@@ -413,6 +414,113 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
         // B, A'nın datasetine satır import edemez.
         var response = await ImportRowsAsync(b.Token, id, "ad,yas\nHacker,99");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    // ---- Satır listeleme (sayfalama / sıralama / JSONB filtre) ----
+
+    private record RowItemDto(Guid Id, Dictionary<string, JsonElement> Data);
+    private record RowListDto(int Page, int PageSize, int Total, int TotalPages, List<RowItemDto> Rows);
+
+    // Ortak veri: 4 satırlık şemalı bir dataset kurup id'sini döndürür.
+    private async Task<(string Token, Guid Id)> SeededDatasetAsync(string slug, string email)
+    {
+        var t = await RegisterTenantAsync(slug, email);
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        await UploadSchemaAsync(t.Token, id, "ad,yas,sehir\nAli,30,Ankara");
+        await ImportRowsAsync(t.Token, id,
+            "ad,yas,sehir\nAli,30,Ankara\nAyse,25,Izmir\nVeli,40,Ankara\nCem,35,Bursa");
+        return (t.Token, id);
+    }
+
+    private async Task<RowListDto> GetRowsAsync(string token, Guid id, string queryString)
+    {
+        var response = await _client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/datasets/{id}/rows?{queryString}", token));
+        response.EnsureSuccessStatusCode();
+        return (await response.Content.ReadFromJsonAsync<RowListDto>())!;
+    }
+
+    [Fact]
+    public async Task GetRows_Paginates()
+    {
+        var (token, id) = await SeededDatasetAsync("lst-pg", "a@lstpg.com");
+
+        var body = await GetRowsAsync(token, id, "page=1&pageSize=2");
+
+        Assert.Equal(4, body.Total);          // toplam kayıt
+        Assert.Equal(2, body.TotalPages);     // 4 / 2
+        Assert.Equal(2, body.Rows.Count);     // sayfada 2 satır
+    }
+
+    [Fact]
+    public async Task GetRows_SortsByNumberDescending()
+    {
+        var (token, id) = await SeededDatasetAsync("lst-srt", "a@lstsrt.com");
+
+        var body = await GetRowsAsync(token, id, "sort=yas&dir=desc");
+
+        // En büyük yas ilk sırada olmalı (sayısal sıralama, metinsel değil).
+        Assert.Equal(40, body.Rows[0].Data["yas"].GetInt32());
+        Assert.Equal("Veli", body.Rows[0].Data["ad"].GetString());
+    }
+
+    [Fact]
+    public async Task GetRows_FiltersByNumberGte()
+    {
+        var (token, id) = await SeededDatasetAsync("lst-flt", "a@lstflt.com");
+
+        var body = await GetRowsAsync(token, id, "filter=yas:gte:35");
+
+        Assert.Equal(2, body.Total);          // Veli(40) + Cem(35)
+        Assert.All(body.Rows, r => Assert.True(r.Data["yas"].GetInt32() >= 35));
+    }
+
+    [Fact]
+    public async Task GetRows_FiltersByTextContains()
+    {
+        var (token, id) = await SeededDatasetAsync("lst-cnt", "a@lstcnt.com");
+
+        var body = await GetRowsAsync(token, id, "filter=ad:contains:li");
+
+        // "li" içerenler: Ali, Veli.
+        Assert.Equal(2, body.Total);
+        Assert.All(body.Rows, r => Assert.Contains("li", r.Data["ad"].GetString()!));
+    }
+
+    [Fact]
+    public async Task GetRows_CombinesFilterAndSort()
+    {
+        var (token, id) = await SeededDatasetAsync("lst-cmb", "a@lstcmb.com");
+
+        var body = await GetRowsAsync(token, id, "filter=sehir:eq:Ankara&sort=yas&dir=asc");
+
+        Assert.Equal(2, body.Total);          // Ali(30, Ankara) + Veli(40, Ankara)
+        Assert.Equal(30, body.Rows[0].Data["yas"].GetInt32());  // asc: önce Ali
+        Assert.Equal(40, body.Rows[1].Data["yas"].GetInt32());
+    }
+
+    [Fact]
+    public async Task GetRows_UnknownFilterColumn_Returns400()
+    {
+        var (token, id) = await SeededDatasetAsync("lst-unk", "a@lstunk.com");
+
+        var response = await _client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/datasets/{id}/rows?filter=yok:eq:1", token));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CrossTenant_GetRows_Returns404()
+    {
+        var (_, id) = await SeededDatasetAsync("lst-x-a", "a@lstxa.com");
+        var b = await RegisterTenantAsync("lst-x-b", "b@lstxb.com");
+
+        // B, A'nın satırlarını listeleyemez — ham SQL'e rağmen sahiplik kontrolü koruyor.
+        var response = await _client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/datasets/{id}/rows", b.Token));
+
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 }

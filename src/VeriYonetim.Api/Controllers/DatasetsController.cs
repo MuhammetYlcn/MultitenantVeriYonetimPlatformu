@@ -2,6 +2,7 @@ using CsvHelper;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using VeriYonetim.Api.Data;
 using VeriYonetim.Api.Models.Dtos;
 using VeriYonetim.Api.Models.Entities;
@@ -208,6 +209,92 @@ public class DatasetsController : ControllerBase
             errors = result.Errors.Take(maxErrors),
             errorsTruncated = result.Errors.Count > maxErrors
         });
+    }
+
+    // GET /api/datasets/{id}/rows — satırları sayfalayarak, sıralayarak ve JSONB üzerinden
+    // filtreleyerek döndür. Filtre formatı: ?filter=kolon:op:deger (birden çok olabilir),
+    // op ∈ {eq,ne,gt,gte,lt,lte,contains}. Örn: ?sort=yas&dir=desc&filter=yas:gte:30
+    [HttpGet("{id:guid}/rows")]
+    public async Task<IActionResult> GetRows(
+        Guid id,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 25,
+        [FromQuery] string? sort = null,
+        [FromQuery] string? dir = null,
+        [FromQuery(Name = "filter")] string[]? filter = null)
+    {
+        // Sahiplik doğrulaması: tenant-filtreli sorgu. Bu ham SQL'in izolasyon dayanağı —
+        // aşağıdaki FromSqlRaw global query filter'ı atlar, o yüzden burada doğrulanmalı.
+        var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
+        if (dataset is null) return DatasetNotFound();
+
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        // Whitelist + tip kaynağı: kayıtlı şema (kolon adı → tip).
+        var schema = await _db.DatasetColumns
+            .Where(c => c.DatasetId == id)
+            .ToDictionaryAsync(c => c.Name, c => c.Type);
+
+        // "kolon:op:deger" ayrıştır. Değerin içinde ':' olabilir (tarih-saat) → en fazla 3 parça.
+        var filters = new List<RowFilter>();
+        foreach (var raw in filter ?? [])
+        {
+            var parts = raw.Split(':', 3);
+            if (parts.Length != 3)
+                return Problem(statusCode: StatusCodes.Status400BadRequest,
+                    title: $"Geçersiz filtre biçimi: '{raw}'. Beklenen: kolon:op:deger.");
+            filters.Add(new RowFilter(parts[0], parts[1], parts[2]));
+        }
+
+        BuiltQuery built;
+        try
+        {
+            built = DatasetRowQueryBuilder.Build(
+                new RowQuery(page, pageSize, sort, dir, filters), schema);
+        }
+        catch (InvalidQueryException ex)
+        {
+            return Problem(statusCode: StatusCodes.Status400BadRequest, title: ex.Message);
+        }
+
+        // Toplam kayıt (sayfa metadata'sı için). Parametreleri her komut için taze üretiyoruz
+        // (bir NpgsqlParameter aynı anda iki komuta ait olamaz).
+        // COUNT(*) PostgreSQL'de bigint döner; ::int ile int32'ye indiriyoruz (SqlQueryRaw<int>).
+        var countSql = $"""SELECT COUNT(*)::int AS "Value" FROM "DatasetRows" WHERE "DatasetId" = @datasetId{built.WhereSql}""";
+        var total = (await _db.Database
+            .SqlQueryRaw<int>(countSql, Params(id, built).ToArray())
+            .ToListAsync())[0];
+
+        // Sayfa verisi. IgnoreQueryFilters: EF ham SQL'i sarmalayıp ORDER BY/LIMIT'i
+        // bozmasın diye — izolasyon zaten datasetId + yukarıdaki sahiplik kontrolüyle sağlı.
+        var offset = (page - 1) * pageSize;
+        var pageSql = $"""
+            SELECT "Id", "Data", "DatasetId" FROM "DatasetRows"
+            WHERE "DatasetId" = @datasetId{built.WhereSql}{built.OrderBySql}
+            LIMIT @limit OFFSET @offset
+            """;
+        var rowParams = Params(id, built);
+        rowParams.Add(new NpgsqlParameter("limit", pageSize));
+        rowParams.Add(new NpgsqlParameter("offset", offset));
+
+        var rows = await _db.DatasetRows
+            .FromSqlRaw(pageSql, rowParams.ToArray())
+            .IgnoreQueryFilters()
+            .Select(r => new RowItem(r.Id, r.Data))
+            .ToListAsync();
+
+        var totalPages = (int)Math.Ceiling(total / (double)pageSize);
+        return Ok(new RowListResponse(page, pageSize, total, totalPages, rows));
+    }
+
+    // datasetId + filtre parametrelerinden taze bir liste üretir (komutlar paylaşamadığı için).
+    private static List<NpgsqlParameter> Params(Guid datasetId, BuiltQuery built)
+    {
+        var list = new List<NpgsqlParameter> { new("datasetId", datasetId) };
+        foreach (var p in built.Parameters)
+            list.Add(new NpgsqlParameter(p.ParameterName, p.NpgsqlDbType) { Value = p.Value });
+        return list;
     }
 
     // PUT /api/datasets/{id} — güncelle.

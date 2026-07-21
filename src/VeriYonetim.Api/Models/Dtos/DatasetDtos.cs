@@ -20,3 +20,14 @@ public record DatasetResponse(
     int RowCount,
     DateTime CreatedAt,
     DateTime? UpdatedAt);
+
+// Tek bir satır: kimlik + JSONB değerleri.
+public record RowItem(Guid Id, Dictionary<string, object?> Data);
+
+// Sayfalanmış satır listesi yanıtı (toplam + sayfa metadata'sı ile).
+public record RowListResponse(
+    int Page,
+    int PageSize,
+    int Total,
+    int TotalPages,
+    IReadOnlyList<RowItem> Rows);
