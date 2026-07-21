@@ -138,4 +138,88 @@ public class DatasetImportServiceTests
         Assert.Equal("Ali", table.Rows[0][0]);
         Assert.Equal("30", table.Rows[0][1]);
     }
+
+    // ---- Satır validasyonu (ValidateRows) ----
+
+    private static ParsedTable Table(string[] headers, params string[][] rows) =>
+        new(headers, rows.ToList());
+
+    [Fact]
+    public void ValidateRows_AllValid_ConvertsTypesAndNoErrors()
+    {
+        var table = Table(new[] { "ad", "yas" }, new[] { "Ali", "30" }, new[] { "Ayse", "25" });
+        var schema = new[] { new ColumnSchema("ad", "text"), new ColumnSchema("yas", "number") };
+
+        var result = _sut.ValidateRows(table, schema);
+
+        Assert.Empty(result.Errors);
+        Assert.Equal(2, result.ValidRows.Count);
+        Assert.Equal("Ali", result.ValidRows[0]["ad"]);
+        Assert.Equal(30m, result.ValidRows[0]["yas"]);   // string "30" → decimal
+    }
+
+    [Fact]
+    public void ValidateRows_BadNumberCell_SkipsRowAndReportsError()
+    {
+        var table = Table(new[] { "ad", "yas" }, new[] { "Ali", "30" }, new[] { "Ayse", "abc" });
+        var schema = new[] { new ColumnSchema("ad", "text"), new ColumnSchema("yas", "number") };
+
+        var result = _sut.ValidateRows(table, schema);
+
+        Assert.Single(result.ValidRows);                 // sadece geçerli satır kaldı
+        var err = Assert.Single(result.Errors);
+        Assert.Equal(2, err.Row);                         // 1 tabanlı, başlık sayılmaz
+        Assert.Equal("yas", err.Column);
+        Assert.Equal("abc", err.Value);
+        Assert.Equal("number", err.ExpectedType);
+    }
+
+    [Fact]
+    public void ValidateRows_EmptyCell_StoredAsNull_RowStaysValid()
+    {
+        var table = Table(new[] { "ad", "yas" }, new[] { "Ali", "" });
+        var schema = new[] { new ColumnSchema("ad", "text"), new ColumnSchema("yas", "number") };
+
+        var result = _sut.ValidateRows(table, schema);
+
+        Assert.Empty(result.Errors);
+        Assert.Single(result.ValidRows);
+        Assert.Null(result.ValidRows[0]["yas"]);          // boş hücre → null, hata değil
+    }
+
+    [Fact]
+    public void ValidateRows_ColumnsInDifferentOrder_MappedByName()
+    {
+        // Dosyada kolonlar ters sırada; eşleme ADA göre yapıldığından doğru değer bulunur.
+        var table = Table(new[] { "yas", "ad" }, new[] { "30", "Ali" });
+        var schema = new[] { new ColumnSchema("ad", "text"), new ColumnSchema("yas", "number") };
+
+        var result = _sut.ValidateRows(table, schema);
+
+        Assert.Equal("Ali", result.ValidRows[0]["ad"]);
+        Assert.Equal(30m, result.ValidRows[0]["yas"]);
+    }
+
+    [Fact]
+    public void ValidateRows_DateColumn_ConvertsToDateTime()
+    {
+        var table = Table(new[] { "tarih" }, new[] { "2026-01-15" });
+        var schema = new[] { new ColumnSchema("tarih", "date") };
+
+        var result = _sut.ValidateRows(table, schema);
+
+        Assert.Equal(new DateTime(2026, 1, 15), result.ValidRows[0]["tarih"]);
+    }
+
+    [Fact]
+    public void ValidateRows_MultipleBadCellsInOneRow_ReportedSeparately()
+    {
+        var table = Table(new[] { "yas", "puan" }, new[] { "x", "y" });
+        var schema = new[] { new ColumnSchema("yas", "number"), new ColumnSchema("puan", "number") };
+
+        var result = _sut.ValidateRows(table, schema);
+
+        Assert.Empty(result.ValidRows);                   // satır tümüyle elendi
+        Assert.Equal(2, result.Errors.Count);             // iki hücre de raporlandı
+    }
 }

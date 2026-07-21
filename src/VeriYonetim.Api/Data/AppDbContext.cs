@@ -1,4 +1,7 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using VeriYonetim.Api.Models.Entities;
 using VeriYonetim.Api.Services;
 
@@ -19,6 +22,7 @@ public class AppDbContext : DbContext
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
     public DbSet<Dataset> Datasets => Set<Dataset>();
     public DbSet<DatasetColumn> DatasetColumns => Set<DatasetColumn>();
+    public DbSet<DatasetRow> DatasetRows => Set<DatasetRow>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -72,6 +76,38 @@ public class AppDbContext : DbContext
 
             // İzolasyon Dataset üzerinden (RefreshToken'ın User üzerinden filtrelenmesi gibi).
             column.HasQueryFilter(c => c.Dataset.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<DatasetRow>(row =>
+        {
+            // C# Dictionary  ⇄  JSON string. Kolon tipi gerçek jsonb olduğundan
+            // Postgres tarafında data->>'ad' ile sorgulanabilir (G14 filtre motoru).
+            var jsonOptions = new JsonSerializerOptions();
+            var converter = new ValueConverter<Dictionary<string, object?>, string>(
+                v => JsonSerializer.Serialize(v, jsonOptions),
+                v => JsonSerializer.Deserialize<Dictionary<string, object?>>(v, jsonOptions)
+                     ?? new Dictionary<string, object?>());
+
+            // Dictionary mutable referans tip: EF'in değişiklik takibini doğru yapması için
+            // içeriğe göre (structural) kıyaslayan bir ValueComparer şart, yoksa uyarı verir.
+            var comparer = new ValueComparer<Dictionary<string, object?>>(
+                (a, b) => JsonSerializer.Serialize(a, jsonOptions) == JsonSerializer.Serialize(b, jsonOptions),
+                v => JsonSerializer.Serialize(v, jsonOptions).GetHashCode(),
+                v => JsonSerializer.Deserialize<Dictionary<string, object?>>(
+                         JsonSerializer.Serialize(v, jsonOptions), jsonOptions)!);
+
+            row.Property(r => r.Data)
+                .HasColumnType("jsonb")
+                .HasConversion(converter, comparer);
+
+            // Bir dataset silinince satırları da silinsin.
+            row.HasOne(r => r.Dataset)
+                .WithMany()
+                .HasForeignKey(r => r.DatasetId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // İzolasyon Dataset üzerinden (DatasetColumn ile aynı desen).
+            row.HasQueryFilter(r => r.Dataset.TenantId == _tenantContext.TenantId);
         });
     }
 }

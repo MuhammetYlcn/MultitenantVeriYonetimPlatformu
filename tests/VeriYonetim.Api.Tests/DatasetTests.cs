@@ -303,4 +303,116 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
         var response = await UploadSchemaAsync(b.Token, id, "ad,yas\nAli,30");
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
+
+    // ---- Toplu import (DatasetRow / JSONB) ----
+
+    private record ImportError(int Row, string Column, string? Value, string ExpectedType);
+    private record ImportResult(Guid DatasetId, int TotalRows, int Imported, int Failed,
+        List<ImportError> Errors, bool ErrorsTruncated);
+
+    // Bir CSV içeriğini multipart/form-data olarak /{id}/rows'a yükler (import).
+    private async Task<HttpResponseMessage> ImportRowsAsync(string token, Guid datasetId, string csv)
+    {
+        var content = new MultipartFormDataContent();
+        var file = new ByteArrayContent(Encoding.UTF8.GetBytes(csv));
+        file.Headers.ContentType = new MediaTypeHeaderValue("text/csv");
+        content.Add(file, "file", "rows.csv");
+
+        var request = new HttpRequestMessage(HttpMethod.Post, $"/api/datasets/{datasetId}/rows")
+        {
+            Content = content
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return await _client.SendAsync(request);
+    }
+
+    [Fact]
+    public async Task Import_ValidRows_StoresAndUpdatesRowCount()
+    {
+        var t = await RegisterTenantAsync("imp-ok", "a@impok.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        await UploadSchemaAsync(t.Token, id, "ad,yas\nAli,30");   // şema: ad=text, yas=number
+
+        var response = await ImportRowsAsync(t.Token, id, "ad,yas\nAli,30\nAyse,25\nVeli,40");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = (await response.Content.ReadFromJsonAsync<ImportResult>())!;
+        Assert.Equal(3, body.Imported);
+        Assert.Equal(0, body.Failed);
+
+        // RowCount kalıcı olarak güncellendi mi? (ayrı istekte DB'den okunuyor)
+        var get = await _client.SendAsync(WithToken(HttpMethod.Get, $"/api/datasets/{id}", t.Token));
+        var ds = (await get.Content.ReadFromJsonAsync<DatasetRow>())!;
+        Assert.Equal(3, ds.RowCount);
+    }
+
+    [Fact]
+    public async Task Import_InvalidRow_SkippedAndReported()
+    {
+        var t = await RegisterTenantAsync("imp-bad", "a@impbad.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        await UploadSchemaAsync(t.Token, id, "ad,yas\nAli,30");
+
+        // İkinci veri satırında yas sayı değil → o satır elenir, raporlanır.
+        var response = await ImportRowsAsync(t.Token, id, "ad,yas\nAli,30\nAyse,sayidegil");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = (await response.Content.ReadFromJsonAsync<ImportResult>())!;
+        Assert.Equal(1, body.Imported);
+        Assert.Equal(1, body.Failed);
+        var err = Assert.Single(body.Errors);
+        Assert.Equal("yas", err.Column);
+        Assert.Equal("sayidegil", err.Value);
+    }
+
+    [Fact]
+    public async Task Import_WithoutSchema_Returns400()
+    {
+        var t = await RegisterTenantAsync("imp-nosch", "a@impnosch.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+
+        // Şema tanımlanmadan import edilemez.
+        var response = await ImportRowsAsync(t.Token, id, "ad,yas\nAli,30");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Import_HeaderMismatch_Returns400()
+    {
+        var t = await RegisterTenantAsync("imp-mism", "a@impmism.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        await UploadSchemaAsync(t.Token, id, "ad,yas\nAli,30");
+
+        // Dosyanın kolonları şemayla uyuşmuyor (yas yerine boy).
+        var response = await ImportRowsAsync(t.Token, id, "ad,boy\nAli,180");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Import_Reupload_ReplacesPreviousRows()
+    {
+        var t = await RegisterTenantAsync("imp-re", "a@impre.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        await UploadSchemaAsync(t.Token, id, "ad,yas\nAli,30");
+
+        await ImportRowsAsync(t.Token, id, "ad,yas\nAli,30\nAyse,25");   // 2 satır
+        await ImportRowsAsync(t.Token, id, "ad,yas\nVeli,40");           // değiştir → 1 satır
+
+        var get = await _client.SendAsync(WithToken(HttpMethod.Get, $"/api/datasets/{id}", t.Token));
+        var ds = (await get.Content.ReadFromJsonAsync<DatasetRow>())!;
+        Assert.Equal(1, ds.RowCount);   // eski 2 satır silindi, yerine 1 satır geldi
+    }
+
+    [Fact]
+    public async Task CrossTenant_Import_Returns404()
+    {
+        var a = await RegisterTenantAsync("imp-x-a", "a@impxa.com");
+        var b = await RegisterTenantAsync("imp-x-b", "b@impxb.com");
+        var id = (await CreateDatasetAsync(a.Token, "S")).Id;
+        await UploadSchemaAsync(a.Token, id, "ad,yas\nAli,30");
+
+        // B, A'nın datasetine satır import edemez.
+        var response = await ImportRowsAsync(b.Token, id, "ad,yas\nHacker,99");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
 }

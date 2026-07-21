@@ -11,11 +11,21 @@ public record ParsedTable(IReadOnlyList<string> Headers, IReadOnlyList<string[]>
 // Algılanan kolon: adı + tipi ("text" | "number" | "date").
 public record ColumnSchema(string Name, string Type);
 
+// Tek bir hücrenin şema tipine uymadığını raporlar (satır 1 tabanlı; başlık sayılmaz).
+public record RowError(int Row, string Column, string? Value, string ExpectedType);
+
+// Satır validasyonunun sonucu: import edilecek geçerli satırlar (kolon adı → tipli değer)
+// ve elenen hücrelerin hata listesi.
+public record RowValidationResult(
+    IReadOnlyList<Dictionary<string, object?>> ValidRows,
+    IReadOnlyList<RowError> Errors);
+
 public interface IDatasetImportService
 {
     Task<ParsedTable> ParseCsvAsync(Stream stream);
     Task<ParsedTable> ParseExcelAsync(Stream stream);
     IReadOnlyList<ColumnSchema> DetectSchema(ParsedTable table);
+    RowValidationResult ValidateRows(ParsedTable table, IReadOnlyList<ColumnSchema> schema);
 }
 
 public class DatasetImportService : IDatasetImportService
@@ -107,4 +117,85 @@ public class DatasetImportService : IDatasetImportService
 
     private static bool IsDate(string v) =>
         DateTime.TryParse(v, CultureInfo.InvariantCulture, DateTimeStyles.None, out _);
+
+    // Ham satırları kayıtlı şemaya göre doğrular. Kolonlar ADA göre eşlenir (pozisyona
+    // göre değil) — dosyadaki kolon sırası farklı olsa bile doğru hücre bulunur. Tek bir
+    // hücre tipine uymazsa o SATIR elenir ve hata listesine eklenir; kalan hücreler yine
+    // kontrol edilir (aynı satırın birden çok hatası raporlanabilir).
+    public RowValidationResult ValidateRows(ParsedTable table, IReadOnlyList<ColumnSchema> schema)
+    {
+        // Kolon adı → dosyadaki kolon index'i.
+        var headerIndex = new Dictionary<string, int>(table.Headers.Count);
+        for (var i = 0; i < table.Headers.Count; i++)
+            headerIndex[table.Headers[i]] = i;
+
+        var validRows = new List<Dictionary<string, object?>>(table.Rows.Count);
+        var errors = new List<RowError>();
+
+        for (var r = 0; r < table.Rows.Count; r++)
+        {
+            var raw = table.Rows[r];
+            var rowNumber = r + 1;          // 1 tabanlı veri satırı numarası (başlık hariç)
+            var data = new Dictionary<string, object?>(schema.Count);
+            var rowOk = true;
+
+            foreach (var col in schema)
+            {
+                // Başlık kümesi controller'da doğrulandığından ad normalde bulunur; yine de
+                // güvenli tarafta kal: yoksa hücreyi boş say.
+                var cell = headerIndex.TryGetValue(col.Name, out var idx) && idx < raw.Length
+                    ? raw[idx]
+                    : null;
+
+                if (string.IsNullOrWhiteSpace(cell))
+                {
+                    data[col.Name] = null;   // boş hücreye izin ver
+                    continue;
+                }
+
+                if (TryConvert(cell, col.Type, out var value))
+                {
+                    data[col.Name] = value;
+                }
+                else
+                {
+                    errors.Add(new RowError(rowNumber, col.Name, cell, col.Type));
+                    rowOk = false;
+                }
+            }
+
+            if (rowOk) validRows.Add(data);
+        }
+
+        return new RowValidationResult(validRows, errors);
+    }
+
+    // Hücreyi şema tipine dönüştürür. number → decimal, date → DateTime, text → string.
+    // Uymazsa false (satır elenir). Kültür: InvariantCulture (tip algılamayla aynı kural).
+    private static bool TryConvert(string cell, string type, out object? value)
+    {
+        switch (type)
+        {
+            case "number":
+                if (decimal.TryParse(cell, NumberStyles.Number, CultureInfo.InvariantCulture, out var d))
+                {
+                    value = d;
+                    return true;
+                }
+                break;
+            case "date":
+                if (DateTime.TryParse(cell, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+                {
+                    value = dt;
+                    return true;
+                }
+                break;
+            default: // "text" — her string geçerli
+                value = cell;
+                return true;
+        }
+
+        value = null;
+        return false;
+    }
 }

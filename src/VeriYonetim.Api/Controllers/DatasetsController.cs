@@ -140,6 +140,76 @@ public class DatasetsController : ControllerBase
         return Ok(new { datasetId = id, columns });
     }
 
+    // POST /api/datasets/{id}/rows — dosyadaki satırları kayıtlı şemaya göre doğrula ve
+    // geçerlileri JSONB olarak içeri al. Değiştir semantiği: her import eski satırların
+    // yerine geçer. Geçersiz satırlar elenir ve hata raporunda döner.
+    [HttpPost("{id:guid}/rows")]
+    public async Task<IActionResult> ImportRows(Guid id, IFormFile? file)
+    {
+        var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
+        if (dataset is null) return DatasetNotFound();
+
+        if (ValidateUpload(file, out var ext) is { } error) return error;
+
+        // Validasyonun dayatacağı tip tanımı: kayıtlı şema. Yoksa önce /schema çağrılmalı.
+        var schema = await _db.DatasetColumns
+            .Where(c => c.DatasetId == id)
+            .OrderBy(c => c.Ordinal)
+            .Select(c => new ColumnSchema(c.Name, c.Type))
+            .ToListAsync();
+
+        if (schema.Count == 0)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Bu veri seti için önce şema tanımlayın (POST /api/datasets/{id}/schema).");
+
+        var table = await TryParseAsync(file!, ext);
+        if (table is null)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Dosya okunamadı; biçimi geçersiz olabilir.");
+
+        // Başlık uyumu: dosyanın kolonları kayıtlı şemayla aynı kümede olmalı.
+        var schemaNames = schema.Select(c => c.Name).ToHashSet();
+        var fileNames = table.Headers.ToHashSet();
+        if (!schemaNames.SetEquals(fileNames))
+        {
+            var missing = schemaNames.Except(fileNames).ToList();
+            var extra = fileNames.Except(schemaNames).ToList();
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Yüklenen dosyanın kolonları kayıtlı şemayla uyuşmuyor.",
+                detail: $"Eksik: [{string.Join(", ", missing)}] | Fazladan: [{string.Join(", ", extra)}]");
+        }
+
+        var result = _importService.ValidateRows(table, schema);
+
+        // Değiştir semantiği (SetSchema deseni): eski satırları sil, geçerlileri ekle.
+        // Not: çok büyük import'larda ExecuteDeleteAsync + bulk insert daha verimli olurdu.
+        var existing = await _db.DatasetRows.Where(r => r.DatasetId == id).ToListAsync();
+        _db.DatasetRows.RemoveRange(existing);
+
+        foreach (var rowData in result.ValidRows)
+            _db.DatasetRows.Add(new DatasetRow
+            {
+                Id = Guid.NewGuid(),
+                DatasetId = id,
+                Data = rowData
+            });
+
+        dataset.RowCount = result.ValidRows.Count;
+        dataset.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+
+        const int maxErrors = 100; // yanıtı şişirmemek için hata listesini sınırla
+        return Ok(new
+        {
+            datasetId = id,
+            totalRows = table.Rows.Count,
+            imported = result.ValidRows.Count,
+            failed = result.Errors.Count,
+            errors = result.Errors.Take(maxErrors),
+            errorsTruncated = result.Errors.Count > maxErrors
+        });
+    }
+
     // PUT /api/datasets/{id} — güncelle.
     [HttpPut("{id:guid}")]
     public async Task<IActionResult> UpdateDataset(Guid id, UpdateDatasetRequest request)
