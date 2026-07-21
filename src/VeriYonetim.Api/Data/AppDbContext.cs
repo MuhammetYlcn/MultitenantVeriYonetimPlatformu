@@ -37,7 +37,9 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<User>(user =>
         {
-            user.HasIndex(u => new { u.TenantId, u.Email }).IsUnique();
+            // E-posta global benzersiz: bir e-posta yalnızca tek bir tenant'a ait olabilir
+            // (giriş yalnız e-posta+şifre ile yapılır, tenant bilgisi gerekmez).
+            user.HasIndex(u => u.Email).IsUnique();
             user.Property(u => u.Email).HasMaxLength(320);
             user.Property(u => u.Role).HasMaxLength(50);
 

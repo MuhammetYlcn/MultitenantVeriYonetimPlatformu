@@ -27,18 +27,20 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
     private record UserRow(Guid Id, string Email, string Role, Guid TenantId);
 
-    private async Task<TokenResponse> RegisterTenantAsync(string slug, string email)
+    private async Task<TokenResponse> RegisterTenantAsync(string name, string email)
     {
+        // Slug istemci tarafından gönderilmez; sunucu firma adından türetir.
         var response = await _client.PostAsJsonAsync("/api/auth/register",
-            new { tenantName = slug, tenantSlug = slug, email, password = "Sifre123!" });
+            new { tenantName = name, email, password = "Sifre123!" });
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<TokenResponse>())!;
     }
 
-    private async Task<TokenResponse> LoginAsync(string slug, string email)
+    private async Task<TokenResponse> LoginAsync(string email)
     {
+        // E-posta global benzersiz → giriş yalnız e-posta + şifre ile.
         var response = await _client.PostAsJsonAsync("/api/auth/login",
-            new { tenantSlug = slug, email, password = "Sifre123!" });
+            new { email, password = "Sifre123!" });
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<TokenResponse>())!;
     }
@@ -71,14 +73,15 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
     }
 
     [Fact]
-    public async Task SameEmail_CanRegisterInDifferentTenants()
+    public async Task SameEmail_CannotRegisterTwice()
     {
-        // E-posta benzersizliği tenant başına — (TenantId, Email) unique index'inin kanıtı.
-        var a = await RegisterTenantAsync("mail-a", "ortak@mail.com");
-        var b = await RegisterTenantAsync("mail-b", "ortak@mail.com");
+        // E-posta global benzersiz — aynı e-posta ikinci bir tenant'a kaydedilemez.
+        await RegisterTenantAsync("mail-a", "ortak@mail.com");
 
-        Assert.NotEqual(a.TenantId, b.TenantId);
-        Assert.NotEqual(a.UserId, b.UserId);
+        var second = await _client.PostAsJsonAsync("/api/auth/register",
+            new { tenantName = "Baska Firma", email = "ortak@mail.com", password = "Sifre123!" });
+
+        Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
     }
 
     [Fact]
@@ -117,7 +120,7 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
         await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
             admin.Token, new { email = "uye@rbacb.com", password = "Sifre123!", role = "User" }));
 
-        var member = await LoginAsync("rbac-b", "uye@rbacb.com");
+        var member = await LoginAsync("uye@rbacb.com");
         var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
             member.Token, new { email = "davetsiz@rbacb.com", password = "Sifre123!", role = "User" }));
 
@@ -133,16 +136,29 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
     }
 
     [Fact]
-    public async Task InjectionSlug_IsRejectedAtValidation()
+    public async Task MaliciousTenantName_IsSlugifiedSafely()
     {
+        // Slug artık firma adından türetiliyor; tehlikeli karakterler reddedilmek yerine
+        // slug'a indirgenirken atılıyor. Kötü niyetli bir ad güvenle zararsız hâle gelir.
         var response = await _client.PostAsJsonAsync("/api/auth/register", new
         {
-            tenantName = "Kotu",
-            tenantSlug = "kotu'; drop schema public; --",
+            tenantName = "Kotu'; DROP SCHEMA public; --",
             email = "kotu@evil.com",
             password = "Sifre123!"
         });
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        // Kayıt güvenle tamamlanır (injection yok) ve public şema hâlâ yerinde.
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var schemas = await db.Database
+            .SqlQuery<string>($"""
+                SELECT schema_name AS "Value" FROM information_schema.schemata
+                """)
+            .ToListAsync();
+
+        Assert.Contains("public", schemas);
+        Assert.Contains("tenant_kotu_drop_schema_public", schemas);
     }
 }

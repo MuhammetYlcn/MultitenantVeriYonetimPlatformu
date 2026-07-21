@@ -2,21 +2,26 @@ using System.ComponentModel.DataAnnotations;
 
 namespace VeriYonetim.Api.Models.Dtos;
 
+// Slug artık istemciden alınmaz; firma adından sunucuda otomatik türetilir (iç detay).
 public record RegisterRequest(
-    [Required, MaxLength(200)] string TenantName,
-    // Slug şema adına dönüşür (tenant_<slug>): sadece küçük harf/rakam/tire,
-    // harfle başlar — bu whitelist SQL injection'ı format seviyesinde imkansızlaştırır.
-    // 56 = 63 (PostgreSQL tanımlayıcı limiti) - 7 ("tenant_" öneki).
-    [Required, MaxLength(56), RegularExpression("^[a-z][a-z0-9-]*$",
-        ErrorMessage = "Slug küçük harfle başlamalı; sadece küçük harf, rakam ve tire içerebilir.")]
-    string TenantSlug,
-    [Required, EmailAddress, MaxLength(320)] string Email,
-    [Required, MinLength(8)] string Password);
+    [Required(ErrorMessage = "Firma adı gerekli.")]
+    [MaxLength(200, ErrorMessage = "Firma adı en fazla 200 karakter olabilir.")]
+    string TenantName,
+    [Required(ErrorMessage = "E-posta gerekli.")]
+    [EmailAddress(ErrorMessage = "Geçerli bir e-posta adresi girin.")]
+    [MaxLength(320, ErrorMessage = "E-posta en fazla 320 karakter olabilir.")]
+    string Email,
+    [Required(ErrorMessage = "Şifre gerekli.")]
+    [MinLength(8, ErrorMessage = "Şifre en az 8 karakter olmalı.")]
+    string Password);
 
+// E-posta artık global benzersiz olduğundan giriş için tenant bilgisi gerekmez.
 public record LoginRequest(
-    [Required] string TenantSlug,
-    [Required, EmailAddress] string Email,
-    [Required] string Password);
+    [Required(ErrorMessage = "E-posta gerekli.")]
+    [EmailAddress(ErrorMessage = "Geçerli bir e-posta adresi girin.")]
+    string Email,
+    [Required(ErrorMessage = "Şifre gerekli.")]
+    string Password);
 
 public record RefreshRequest([Required] string RefreshToken);
 

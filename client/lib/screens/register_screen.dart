@@ -13,7 +13,6 @@ class RegisterScreen extends StatefulWidget {
 
 class _RegisterScreenState extends State<RegisterScreen> {
   final _tenantName = TextEditingController();
-  final _tenantSlug = TextEditingController();
   final _email = TextEditingController();
   final _password = TextEditingController();
   bool _loading = false;
@@ -27,7 +26,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
     try {
       await ApiService.register(
         tenantName: _tenantName.text.trim(),
-        tenantSlug: _tenantSlug.text.trim(),
         email: _email.text.trim(),
         password: _password.text,
       );
@@ -47,7 +45,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
   @override
   void dispose() {
     _tenantName.dispose();
-    _tenantSlug.dispose();
     _email.dispose();
     _password.dispose();
     super.dispose();
@@ -69,15 +66,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   controller: _tenantName,
                   decoration: const InputDecoration(
                     labelText: 'Firma adı',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _tenantSlug,
-                  decoration: const InputDecoration(
-                    labelText: 'Firma kısa adı (slug)',
-                    helperText: 'küçük harf, örn: firma-a',
                     border: OutlineInputBorder(),
                   ),
                 ),

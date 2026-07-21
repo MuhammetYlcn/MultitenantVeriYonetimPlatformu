@@ -37,10 +37,9 @@ class ApiService {
   static void logout() => _token = null;
 
   // POST /api/auth/register — tenant + admin birlikte açılır, token döner.
-  // slug kuralı: küçük harfle başlar, [a-z0-9-] (backend RegularExpression ile doğrular).
+  // slug istemiyoruz; sunucu firma adından otomatik türetir.
   static Future<void> register({
     required String tenantName,
-    required String tenantSlug,
     required String email,
     required String password,
   }) async {
@@ -49,7 +48,6 @@ class ApiService {
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
         'tenantName': tenantName,
-        'tenantSlug': tenantSlug,
         'email': email,
         'password': password,
       }),
@@ -57,7 +55,8 @@ class ApiService {
     _storeToken(res);
   }
 
-  // POST /api/auth/login — token döner.
+  // POST /api/auth/login — token döner. E-posta global benzersiz olduğundan
+  // giriş için yalnızca e-posta + şifre yeterli.
   static Future<void> login(String email, String password) async {
     final res = await http.post(
       Uri.parse('$baseUrl/api/auth/login'),
@@ -91,11 +90,27 @@ class ApiService {
     }
   }
 
-  // Backend hataları ProblemDetails { title, detail } biçiminde döner — okunur mesaj çıkar.
+  // Okunur hata mesajı çıkar. Üç biçimi de ele alır:
+  //  - Doğrulama hatası (ValidationProblemDetails): { errors: { alan: [mesaj...] } }
+  //  - ProblemDetails (dataset controller): { detail, title }
+  //  - Auth endpoint'leri: { message }
   static String _message(http.Response res) {
     try {
       final j = jsonDecode(res.body) as Map<String, dynamic>;
-      return (j['detail'] ?? j['title'] ?? 'Hata: ${res.statusCode}') as String;
+
+      // Doğrulama hataları: generic "One or more validation errors" title'ı yerine
+      // alan-bazlı gerçek mesajları göster.
+      final errors = j['errors'];
+      if (errors is Map && errors.isNotEmpty) {
+        final msgs = <String>[];
+        for (final value in errors.values) {
+          if (value is List) msgs.addAll(value.map((e) => e.toString()));
+        }
+        if (msgs.isNotEmpty) return msgs.join('\n');
+      }
+
+      return (j['detail'] ?? j['title'] ?? j['message'] ?? 'Hata: ${res.statusCode}')
+          as String;
     } catch (_) {
       return 'Hata: ${res.statusCode}';
     }

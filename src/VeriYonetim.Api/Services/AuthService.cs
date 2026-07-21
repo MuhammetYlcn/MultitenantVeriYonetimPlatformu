@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using VeriYonetim.Api.Data;
 using VeriYonetim.Api.Models.Dtos;
@@ -32,16 +33,22 @@ public class AuthService : IAuthService
 
     public async Task<AuthResult> RegisterAsync(RegisterRequest request)
     {
-        var slugTaken = await _db.Tenants.AnyAsync(t => t.Slug == request.TenantSlug);
-        if (slugTaken)
-            return new AuthResult(false, "Bu tenant adresi (slug) zaten kullanımda.");
+        // E-posta global benzersiz olmalı. Kayıt sırasında tenant context yok, o yüzden
+        // IgnoreQueryFilters ile tüm tenant'lar arasında kontrol edilir.
+        var emailTaken = await _db.Users.IgnoreQueryFilters()
+            .AnyAsync(u => u.Email == request.Email);
+        if (emailTaken)
+            return new AuthResult(false, "Bu e-posta zaten kayıtlı.");
+
+        // Slug firma adından otomatik türetilir (iç detay); benzersiz olması sağlanır.
+        var slug = await MakeUniqueSlugAsync(Slugify(request.TenantName));
 
         var tenant = new Tenant
         {
             Id = Guid.NewGuid(),
             Name = request.TenantName,
-            Slug = request.TenantSlug,
-            SchemaName = _provisioner.BuildSchemaName(request.TenantSlug)
+            Slug = slug,
+            SchemaName = _provisioner.BuildSchemaName(slug)
         };
 
         var user = new User
@@ -69,11 +76,12 @@ public class AuthService : IAuthService
 
     public async Task<AuthResult> LoginAsync(LoginRequest request)
     {
+        // E-posta global benzersiz → tek başına kullanıcıyı bulmaya yeter. Login token
+        // öncesi olduğundan tenant context yok; IgnoreQueryFilters ile global aranır.
         var user = await _db.Users
             .IgnoreQueryFilters()
             .Include(u => u.Tenant)
-            .FirstOrDefaultAsync(u => u.Tenant.Slug == request.TenantSlug
-                                   && u.Email == request.Email);
+            .FirstOrDefaultAsync(u => u.Email == request.Email);
 
         if (user is null || !BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
             return new AuthResult(false, "E-posta veya şifre hatalı.");
@@ -117,6 +125,53 @@ public class AuthService : IAuthService
         await _db.SaveChangesAsync();
 
         return new AuthResult(true, "Token yenilendi.", BuildResponse(stored.User, refreshRaw));
+    }
+
+    // Firma adını BuildSchemaName'in beklediği güvenli slug formatına indirger
+    // (^[a-z][a-z0-9-]*$): Türkçe karakterler ASCII'ye, boşluk/ayraç tireye, gerisi atılır.
+    private static string Slugify(string name)
+    {
+        var lower = name.Trim().ToLowerInvariant();
+        var sb = new StringBuilder(lower.Length);
+
+        foreach (var ch in lower)
+        {
+            var c = ch switch
+            {
+                'ş' => 's', 'ğ' => 'g', 'ı' => 'i', 'ü' => 'u', 'ö' => 'o', 'ç' => 'c',
+                'â' => 'a', 'î' => 'i', 'û' => 'u',
+                _ => ch
+            };
+
+            if (c is >= 'a' and <= 'z' or >= '0' and <= '9')
+                sb.Append(c);
+            else if (c is ' ' or '-' or '_' or '.')
+                sb.Append('-');
+            // diğer tüm karakterler (noktalama, injection denemeleri vb.) atılır
+        }
+
+        // ardışık tireleri sadeleştir, baş/sondaki tireleri temizle
+        var slug = Regex.Replace(sb.ToString(), "-+", "-").Trim('-');
+
+        // şema kuralı: harfle başlamalı; boşsa veya rakamla başlıyorsa "t" öneki ekle
+        if (slug.Length == 0 || !char.IsLetter(slug[0]))
+            slug = "t" + slug;
+
+        // BuildSchemaName 56 sınırı — güvenli pay bırak, sondaki tireyi tekrar temizle
+        if (slug.Length > 40)
+            slug = slug[..40].TrimEnd('-');
+
+        return slug;
+    }
+
+    // Türetilen slug başka bir tenant'ta varsa sonuna -2, -3… ekleyerek benzersizleştirir.
+    private async Task<string> MakeUniqueSlugAsync(string baseSlug)
+    {
+        var slug = baseSlug;
+        var suffix = 2;
+        while (await _db.Tenants.AnyAsync(t => t.Slug == slug))
+            slug = $"{baseSlug}-{suffix++}";
+        return slug;
     }
 
     private string CreateRefreshToken(User user)

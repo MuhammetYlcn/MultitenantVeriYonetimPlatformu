@@ -28,10 +28,11 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
     private record DatasetRow(Guid Id, string Name, string? Description, int RowCount,
         DateTime CreatedAt, DateTime? UpdatedAt);
 
-    private async Task<TokenResponse> RegisterTenantAsync(string slug, string email)
+    private async Task<TokenResponse> RegisterTenantAsync(string name, string email)
     {
+        // Slug istemci tarafından gönderilmez; sunucu firma adından türetir.
         var response = await _client.PostAsJsonAsync("/api/auth/register",
-            new { tenantName = slug, tenantSlug = slug, email, password = "Sifre123!" });
+            new { tenantName = name, email, password = "Sifre123!" });
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<TokenResponse>())!;
     }
