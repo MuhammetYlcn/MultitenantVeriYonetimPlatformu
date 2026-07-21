@@ -41,6 +41,13 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
+// CORS: Flutter web istemcisi ayrı bir origin'den (localhost:farklı-port) istek atar;
+// tarayıcı aksi halde engeller. Kimlik Bearer header ile taşındığından (cookie değil)
+// AllowAnyOrigin güvenli. Yalnızca geliştirme için gevşek tutuldu.
+builder.Services.AddCors(options =>
+    options.AddPolicy("dev", policy =>
+        policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
+
 builder.Services.AddControllers();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
@@ -60,6 +67,8 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+
+app.UseCors("dev");
 
 app.UseAuthentication();
 app.UseAuthorization();
