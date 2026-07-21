@@ -37,7 +37,7 @@ public record AggregateBucket(string? Key, decimal? Value, int Count);
 
 // Agregasyon yanıtı: hangi soru soruldu + grupların listesi.
 public record AggregateResponse(
-    string GroupBy,
+    string? GroupBy,
     string Op,
     string? Metric,
     string? Bucket,

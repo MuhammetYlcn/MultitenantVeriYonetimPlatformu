@@ -619,6 +619,20 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
     }
 
     [Fact]
+    public async Task Aggregate_NoGroupBy_ReturnsOverallTotal()
+    {
+        var (token, id) = await SeededAggDatasetAsync("agg-all", "a@aggall.com");
+
+        // groupBy yok → tüm satırların genel toplamı (tek grup, key null).
+        var body = await AggregateAsync(token, id, "op=sum&metric=tutar");
+
+        var bucket = Assert.Single(body.Buckets);
+        Assert.Null(bucket.Key);
+        Assert.Equal(750m, bucket.Value);   // 100+200+150+300
+        Assert.Equal(4, bucket.Count);
+    }
+
+    [Fact]
     public async Task Aggregate_UnknownGroupColumn_Returns400()
     {
         var (token, id) = await SeededAggDatasetAsync("agg-unk", "a@aggunk.com");

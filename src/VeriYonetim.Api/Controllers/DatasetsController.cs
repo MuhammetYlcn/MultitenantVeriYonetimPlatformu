@@ -324,9 +324,10 @@ public class DatasetsController : ControllerBase
         var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
         if (dataset is null) return DatasetNotFound();
 
-        if (string.IsNullOrWhiteSpace(groupBy) || string.IsNullOrWhiteSpace(op))
+        // op zorunlu; groupBy opsiyonel (verilmezse gruplamasız genel agregasyon = KPI).
+        if (string.IsNullOrWhiteSpace(op))
             return Problem(statusCode: StatusCodes.Status400BadRequest,
-                title: "groupBy ve op parametreleri zorunludur.");
+                title: "op parametresi zorunludur.");
 
         var schema = await _db.DatasetColumns
             .Where(c => c.DatasetId == id)

@@ -32,6 +32,28 @@ public class DatasetAggregateQueryBuilderTests
     }
 
     [Fact]
+    public void Build_NoGroupBy_OverallAggregate_HasNoGroupByClause()
+    {
+        // groupBy verilmezse gruplamasız genel agregasyon: GROUP BY yok, key NULL.
+        var built = DatasetAggregateQueryBuilder.Build(
+            new AggregateQuery(null, "sum", "tutar", null, null, null, null, Array.Empty<RowFilter>()),
+            Schema);
+
+        Assert.DoesNotContain("GROUP BY", built.Sql);
+        Assert.Contains("NULL::text AS \"Key\"", built.Sql);
+        Assert.Contains("SUM(", built.Sql);
+    }
+
+    [Fact]
+    public void Build_BucketWithoutGroupBy_Throws()
+    {
+        Assert.Throws<InvalidQueryException>(() =>
+            DatasetAggregateQueryBuilder.Build(
+                new AggregateQuery(null, "sum", "tutar", "month", null, null, null, Array.Empty<RowFilter>()),
+                Schema));
+    }
+
+    [Fact]
     public void Build_Count_NeedsNoMetric()
     {
         var built = DatasetAggregateQueryBuilder.Build(Q("sehir", "count"), Schema);

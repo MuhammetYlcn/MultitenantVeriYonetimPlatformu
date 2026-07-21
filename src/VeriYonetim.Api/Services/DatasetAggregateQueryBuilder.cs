@@ -5,7 +5,7 @@ namespace VeriYonetim.Api.Services;
 // Agregasyon isteğinin parçaları. groupBy + op zorunlu; metric sum/avg/min/max için gerekli.
 // bucket yalnızca tarih kolonlarında (date_trunc ile zaman serisi). sort: "key"|"value".
 public record AggregateQuery(
-    string GroupBy,
+    string? GroupBy,
     string Op,
     string? Metric,
     string? Bucket,
@@ -27,27 +27,35 @@ public static class DatasetAggregateQueryBuilder
 
     public static BuiltAggregate Build(AggregateQuery q, IReadOnlyDictionary<string, string> schema)
     {
-        if (!schema.TryGetValue(q.GroupBy, out var groupType))
-            throw new InvalidQueryException($"Bilinmeyen kolon: {q.GroupBy}");
-
         var op = (q.Op ?? "").ToLowerInvariant();
         if (!Ops.Contains(op))
             throw new InvalidQueryException($"Bilinmeyen işlem: {q.Op}. (count/sum/avg/min/max)");
 
-        // Grup ifadesi: bucket varsa date_trunc (zaman serisi), yoksa tipli değer.
-        string groupExpr;
-        if (!string.IsNullOrWhiteSpace(q.Bucket))
+        // Grup ifadesi OPSİYONEL. groupBy verilmezse gruplamasız genel agregasyon (tek satır,
+        // KPI kartları için). Verilirse: bucket varsa date_trunc (zaman serisi), yoksa tipli değer.
+        string? groupExpr = null;
+        if (!string.IsNullOrWhiteSpace(q.GroupBy))
         {
-            if (groupType != "date")
-                throw new InvalidQueryException("bucket yalnızca tarih kolonlarında kullanılır.");
-            var b = q.Bucket.ToLowerInvariant();
-            if (!Buckets.Contains(b))
-                throw new InvalidQueryException($"Bilinmeyen bucket: {q.Bucket}. (day/week/month/year)");
-            groupExpr = $"date_trunc('{b}', {DatasetSqlExpr.Typed(q.GroupBy, "date")})";
+            if (!schema.TryGetValue(q.GroupBy, out var groupType))
+                throw new InvalidQueryException($"Bilinmeyen kolon: {q.GroupBy}");
+
+            if (!string.IsNullOrWhiteSpace(q.Bucket))
+            {
+                if (groupType != "date")
+                    throw new InvalidQueryException("bucket yalnızca tarih kolonlarında kullanılır.");
+                var b = q.Bucket.ToLowerInvariant();
+                if (!Buckets.Contains(b))
+                    throw new InvalidQueryException($"Bilinmeyen bucket: {q.Bucket}. (day/week/month/year)");
+                groupExpr = $"date_trunc('{b}', {DatasetSqlExpr.Typed(q.GroupBy, "date")})";
+            }
+            else
+            {
+                groupExpr = DatasetSqlExpr.Typed(q.GroupBy, groupType);
+            }
         }
-        else
+        else if (!string.IsNullOrWhiteSpace(q.Bucket))
         {
-            groupExpr = DatasetSqlExpr.Typed(q.GroupBy, groupType);
+            throw new InvalidQueryException("bucket için groupBy (tarih kolonu) gerekli.");
         }
 
         // Agregasyon ifadesi. count metric istemez; diğerleri sayısal metric ister.
@@ -78,23 +86,29 @@ public static class DatasetAggregateQueryBuilder
 
         var (where, parameters) = DatasetSqlExpr.BuildWhere(q.Filters, schema);
 
-        // Sıralama: value → agregasyon değeri, key → grup anahtarı (tipli, doğru sıralama).
-        var sortBy = (q.Sort ?? "key").ToLowerInvariant();
-        if (sortBy is not ("key" or "value"))
-            throw new InvalidQueryException($"Bilinmeyen sıralama: {q.Sort}. (key/value)");
-        var dir = string.Equals(q.Dir, "desc", StringComparison.OrdinalIgnoreCase) ? "DESC" : "ASC";
-        var orderExpr = sortBy == "value" ? "\"Value\"" : groupExpr;
+        // Grup anahtarı text'e cast edilir (tek tip materializasyon); gruplamasızda NULL.
+        var keyExpr = groupExpr is null ? "NULL::text" : $"({groupExpr})::text";
 
-        // Limit doğrulanmış tamsayı → doğrudan gömmek güvenli (injection yok). Top-N için.
-        var limitSql = q.Limit is int lim ? $" LIMIT {Math.Clamp(lim, 1, 1000)}" : "";
+        // Gruplama varsa GROUP BY + ORDER BY (+ opsiyonel LIMIT). Gruplamasızda tek satır döner,
+        // bu yüzden ORDER BY/LIMIT gereksiz.
+        var groupBySql = groupExpr is null ? "" : $"\nGROUP BY {groupExpr}";
+        var orderLimitSql = "";
+        if (groupExpr is not null)
+        {
+            // Sıralama: value → agregasyon değeri, key → grup anahtarı (tipli, doğru sıralama).
+            var sortBy = (q.Sort ?? "key").ToLowerInvariant();
+            if (sortBy is not ("key" or "value"))
+                throw new InvalidQueryException($"Bilinmeyen sıralama: {q.Sort}. (key/value)");
+            var dir = string.Equals(q.Dir, "desc", StringComparison.OrdinalIgnoreCase) ? "DESC" : "ASC";
+            var orderExpr = sortBy == "value" ? "\"Value\"" : groupExpr;
+            var limitSql = q.Limit is int lim ? $" LIMIT {Math.Clamp(lim, 1, 1000)}" : "";
+            orderLimitSql = $"\nORDER BY {orderExpr} {dir}{limitSql}";
+        }
 
-        // Key text'e cast edilir → tek tip materializasyon; ORDER BY yine tipli groupExpr ile.
         var sql = $"""
-            SELECT ({groupExpr})::text AS "Key", {aggExpr} AS "Value", COUNT(*)::int AS "Count"
+            SELECT {keyExpr} AS "Key", {aggExpr} AS "Value", COUNT(*)::int AS "Count"
             FROM "DatasetRows"
-            WHERE "DatasetId" = @datasetId{where}
-            GROUP BY {groupExpr}
-            ORDER BY {orderExpr} {dir}{limitSql}
+            WHERE "DatasetId" = @datasetId{where}{groupBySql}{orderLimitSql}
             """;
 
         return new BuiltAggregate(sql, parameters);
