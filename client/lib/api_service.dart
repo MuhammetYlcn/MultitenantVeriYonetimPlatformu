@@ -257,6 +257,28 @@ class ApiService {
     throw ApiException(_message(res));
   }
 
+  // PUT /api/datasets/{id} — veri setini yeniden adlandır (açıklama korunur/verilebilir).
+  static Future<void> renameDataset(String datasetId, String name,
+      {String? description}) async {
+    await _ensureFreshToken();
+    final res = await http.put(
+      Uri.parse('$baseUrl/api/datasets/$datasetId'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode({'name': name, 'description': description}),
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+  }
+
+  // DELETE /api/datasets/{id} — veri setini (kolonlar+satırlar cascade) siler.
+  static Future<void> deleteDataset(String datasetId) async {
+    await _ensureFreshToken();
+    final res = await http.delete(
+      Uri.parse('$baseUrl/api/datasets/$datasetId'),
+      headers: _authHeader,
+    );
+    if (res.statusCode != 204) throw ApiException(_message(res));
+  }
+
   // GET /api/datasets/{id}/schema — kaydedilmiş kolon tanımları.
   static Future<List<SchemaColumn>> getSchema(String datasetId) async {
     await _ensureFreshToken();

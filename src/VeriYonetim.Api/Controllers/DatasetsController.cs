@@ -54,6 +54,7 @@ public class DatasetsController : ControllerBase
 
     // POST /api/datasets — yeni set. TenantId istekten değil token'dan gelir.
     [HttpPost]
+    [Authorize(Roles = "Editor,Admin")]
     public async Task<IActionResult> CreateDataset(CreateDatasetRequest request)
     {
         var dataset = new Dataset
@@ -73,6 +74,7 @@ public class DatasetsController : ControllerBase
     // POST /api/datasets/analyze — CSV/Excel yükle; kolonları ve tipleri algılayıp
     // önizleme döndür (kalıcı kayıt YOK). Dosya multipart/form-data ile gelir.
     [HttpPost("analyze")]
+    [Authorize(Roles = "Editor,Admin")]
     public async Task<IActionResult> AnalyzeFile(IFormFile? file)
     {
         if (ValidateUpload(file, out var ext) is { } error) return error;
@@ -90,6 +92,7 @@ public class DatasetsController : ControllerBase
     // POST /api/datasets/{id}/schema — dosyayı analiz et ve algılanan kolonları bu sete
     // KALICI kaydet (var olan kolonları değiştirir). Dün'ün analyze'ı artık kaydediyor.
     [HttpPost("{id:guid}/schema")]
+    [Authorize(Roles = "Editor,Admin")]
     public async Task<IActionResult> SetSchema(Guid id, IFormFile? file)
     {
         var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
@@ -145,6 +148,7 @@ public class DatasetsController : ControllerBase
     // geçerlileri JSONB olarak içeri al. Değiştir semantiği: her import eski satırların
     // yerine geçer. Geçersiz satırlar elenir ve hata raporunda döner.
     [HttpPost("{id:guid}/rows")]
+    [Authorize(Roles = "Editor,Admin")]
     public async Task<IActionResult> ImportRows(Guid id, IFormFile? file)
     {
         var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
@@ -215,6 +219,7 @@ public class DatasetsController : ControllerBase
     // Flutter'daki şemaya-göre dinamik "satır ekle" formu bunu çağırır. Değerler metin gelir,
     // sunucu şemaya göre tipli doğrular/dönüştürür (import ile birebir aynı kuralla).
     [HttpPost("{id:guid}/rows/add")]
+    [Authorize(Roles = "Editor,Admin")]
     public async Task<IActionResult> AddRow(Guid id, AddRowRequest request)
     {
         var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
@@ -422,6 +427,7 @@ public class DatasetsController : ControllerBase
 
     // PUT /api/datasets/{id} — güncelle.
     [HttpPut("{id:guid}")]
+    [Authorize(Roles = "Editor,Admin")]
     public async Task<IActionResult> UpdateDataset(Guid id, UpdateDatasetRequest request)
     {
         var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
@@ -439,6 +445,7 @@ public class DatasetsController : ControllerBase
 
     // DELETE /api/datasets/{id} — sil.
     [HttpDelete("{id:guid}")]
+    [Authorize(Roles = "Editor,Admin")]
     public async Task<IActionResult> DeleteDataset(Guid id)
     {
         var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);

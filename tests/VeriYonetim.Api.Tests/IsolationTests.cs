@@ -116,7 +116,7 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
         var admin = await RegisterTenantAsync("rbac-a", "admin@rbac.com");
 
         var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
-            admin.Token, new { email = "uye@rbac.com", password = "Sifre123!", role = "User" }));
+            admin.Token, new { email = "uye@rbac.com", password = "Sifre123!", role = "Viewer" }));
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         _output.WriteLine("✓ Kanıt: Admin token'ıyla yeni kullanıcı ekleme 201 Created döndü.");
@@ -127,7 +127,7 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
     {
         var admin = await RegisterTenantAsync("rbac-b", "admin@rbacb.com");
         await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
-            admin.Token, new { email = "uye@rbacb.com", password = "Sifre123!", role = "User" }));
+            admin.Token, new { email = "uye@rbacb.com", password = "Sifre123!", role = "Editor" }));
 
         var member = await LoginAsync("uye@rbacb.com");
         var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
@@ -172,5 +172,51 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
         Assert.Contains("public", schemas);
         Assert.Contains("tenant_kotu_drop_schema_public", schemas);
         _output.WriteLine("✓ Kanıt: Kötü niyetli ad güvenle 'tenant_kotu_drop_schema_public' slug'ına indirgendi; public şema hâlâ yerinde (SQL injection çalışmadı).");
+    }
+
+    // ---- 3'lü rol yetkilendirme (Viewer < Editor < Admin) ----
+
+    [Fact(DisplayName = "Viewer veri seti oluşturamaz — yazma yetkisi yok (403)")]
+    public async Task Viewer_CannotCreateDataset()
+    {
+        var admin = await RegisterTenantAsync("role-v", "admin@rolev.com");
+        await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users", admin.Token,
+            new { email = "viewer@rolev.com", password = "Sifre123!", role = "Viewer" }));
+        var viewer = await LoginAsync("viewer@rolev.com");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/datasets",
+            viewer.Token, new { name = "Deneme", description = (string?)null }));
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        _output.WriteLine("✓ Kanıt: Viewer rolü POST /api/datasets'e 403 aldı (yalnız okuyabilir).");
+    }
+
+    [Fact(DisplayName = "Editor veri seti oluşturabilir (201)")]
+    public async Task Editor_CanCreateDataset()
+    {
+        var admin = await RegisterTenantAsync("role-e", "admin@rolee.com");
+        await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users", admin.Token,
+            new { email = "editor@rolee.com", password = "Sifre123!", role = "Editor" }));
+        var editor = await LoginAsync("editor@rolee.com");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/datasets",
+            editor.Token, new { name = "Deneme", description = (string?)null }));
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        _output.WriteLine("✓ Kanıt: Editor rolü POST /api/datasets'e 201 aldı (veri yazabilir).");
+    }
+
+    [Fact(DisplayName = "Viewer veri setlerini listeleyebilir — okuma Viewer+ herkese açık (200)")]
+    public async Task Viewer_CanListDatasets()
+    {
+        var admin = await RegisterTenantAsync("role-vr", "admin@rolevr.com");
+        await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users", admin.Token,
+            new { email = "viewer@rolevr.com", password = "Sifre123!", role = "Viewer" }));
+        var viewer = await LoginAsync("viewer@rolevr.com");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Get, "/api/datasets", viewer.Token));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        _output.WriteLine("✓ Kanıt: Viewer rolü GET /api/datasets'i 200 ile okuyabildi.");
     }
 }
