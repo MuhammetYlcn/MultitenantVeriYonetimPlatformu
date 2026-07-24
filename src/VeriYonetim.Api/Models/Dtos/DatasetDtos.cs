@@ -24,6 +24,9 @@ public record DatasetResponse(
 // Tek bir satır: kimlik + JSONB değerleri.
 public record RowItem(Guid Id, Dictionary<string, object?> Data);
 
+// Tek satır ekleme isteği: kolon adı → değer (metin gelir; tip dönüşümü sunucuda şemaya göre).
+public record AddRowRequest(Dictionary<string, string?> Values);
+
 // Sayfalanmış satır listesi yanıtı (toplam + sayfa metadata'sı ile).
 public record RowListResponse(
     int Page,

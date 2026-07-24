@@ -418,6 +418,66 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    // ---- Tek satır ekleme (POST /rows/add — import gibi hepsini değiştirmez) ----
+
+    private async Task<HttpResponseMessage> AddRowAsync(string token, Guid datasetId, object values) =>
+        await _client.SendAsync(WithToken(HttpMethod.Post,
+            $"/api/datasets/{datasetId}/rows/add", token, new { values }));
+
+    [Fact(DisplayName = "Tek satır ekleme: değer tipli saklanır ve satır sayısı 1 artar")]
+    public async Task AddRow_Valid_StoresTypedAndIncrementsRowCount()
+    {
+        var t = await RegisterTenantAsync("addrow-ok", "a@addrowok.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        await UploadSchemaAsync(t.Token, id, "ad,yas\nAli,30");   // ad=text, yas=number
+
+        var response = await AddRowAsync(t.Token, id, new { ad = "Zeynep", yas = "42" });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var json = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var data = json.GetProperty("data");
+        Assert.Equal("Zeynep", data.GetProperty("ad").GetString());
+        Assert.Equal(42m, data.GetProperty("yas").GetDecimal());   // metin değil sayı olarak saklandı
+
+        var get = await _client.SendAsync(WithToken(HttpMethod.Get, $"/api/datasets/{id}", t.Token));
+        var ds = (await get.Content.ReadFromJsonAsync<DatasetRow>())!;
+        Assert.Equal(1, ds.RowCount);
+    }
+
+    [Fact(DisplayName = "Tek satır ekleme: şemaya uymayan tip 400 döndürür")]
+    public async Task AddRow_InvalidType_Returns400()
+    {
+        var t = await RegisterTenantAsync("addrow-bad", "a@addrowbad.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        await UploadSchemaAsync(t.Token, id, "ad,yas\nAli,30");   // yas=number
+
+        var response = await AddRowAsync(t.Token, id, new { ad = "X", yas = "sayidegil" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact(DisplayName = "Tek satır ekleme: şema yoksa 400 döndürür")]
+    public async Task AddRow_WithoutSchema_Returns400()
+    {
+        var t = await RegisterTenantAsync("addrow-nosch", "a@addrownosch.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+
+        var response = await AddRowAsync(t.Token, id, new { ad = "X" });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact(DisplayName = "Tek satır ekleme: başka tenant'ın setine eklenemez (404)")]
+    public async Task AddRow_CrossTenant_Returns404()
+    {
+        var a = await RegisterTenantAsync("addrow-x-a", "a@addrowxa.com");
+        var b = await RegisterTenantAsync("addrow-x-b", "b@addrowxb.com");
+        var id = (await CreateDatasetAsync(a.Token, "S")).Id;
+        await UploadSchemaAsync(a.Token, id, "ad,yas\nAli,30");
+
+        // B, A'nın setine satır ekleyemez (varlık sızdırılmaz → 404).
+        var response = await AddRowAsync(b.Token, id, new { ad = "X", yas = "1" });
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     // ---- Satır listeleme (sayfalama / sıralama / JSONB filtre) ----
 
     private record RowItemDto(Guid Id, Dictionary<string, JsonElement> Data);

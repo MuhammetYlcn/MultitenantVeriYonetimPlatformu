@@ -17,6 +17,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _email = TextEditingController();
   final _password = TextEditingController();
   bool _loading = false;
+  bool _rememberMe = true; // "oturumu açık tut" — varsayılan açık (kendi cihazı varsayımı)
   String? _error;
 
   // async/await burada C#'takiyle birebir aynı; ApiService.login bir Future döndürür.
@@ -26,7 +27,8 @@ class _LoginScreenState extends State<LoginScreen> {
       _error = null;
     });
     try {
-      await ApiService.login(_email.text.trim(), _password.text);
+      await ApiService.login(_email.text.trim(), _password.text,
+          rememberMe: _rememberMe);
       if (!mounted) return; // async sonrası widget hâlâ ekranda mı?
       Navigator.pushReplacement(
         context,
@@ -74,6 +76,14 @@ class _LoginScreenState extends State<LoginScreen> {
                     labelText: 'Şifre',
                     border: OutlineInputBorder(),
                   ),
+                ),
+                CheckboxListTile(
+                  value: _rememberMe,
+                  onChanged: (v) => setState(() => _rememberMe = v ?? false),
+                  title: const Text('Oturumu açık tut'),
+                  controlAffinity: ListTileControlAffinity.leading,
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
                 ),
                 const SizedBox(height: 20),
                 if (_error != null) ...[

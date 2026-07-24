@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import '../api_service.dart';
-import 'dashboard_screen.dart';
+import 'data_table_screen.dart';
 import 'login_screen.dart';
 
 // Giriş sonrası ana ekran: tenant'ın veri setlerini bir tabloda listeler.
@@ -22,8 +23,47 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
   }
 
   bool _seeding = false;
+  bool _uploading = false;
 
   void _refresh() => setState(() => _future = ApiService.getDatasets());
+
+  // Gerçek CSV/Excel yükleme: dosya seç → byte'ları uploadDataset'e ver → listeyi tazele.
+  Future<void> _uploadFile() async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['csv', 'xlsx'],
+      withData: true, // web dahil tüm platformlarda dosya byte'larını getir
+    );
+    if (result == null) return; // kullanıcı iptal etti
+    final file = result.files.single;
+    final bytes = file.bytes;
+    if (bytes == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Dosya okunamadı.')));
+      }
+      return;
+    }
+    // Veri seti adını dosya adından türet (uzantıyı at). İsimlendirme/yönetim ayrı adımda.
+    final name =
+        file.name.replaceAll(RegExp(r'\.(csv|xlsx)$', caseSensitive: false), '');
+    setState(() => _uploading = true);
+    try {
+      await ApiService.uploadDataset(name: name, bytes: bytes, filename: file.name);
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('"$name" yüklendi.')));
+      }
+      _refresh();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Yüklenemedi: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
+  }
 
   // Örnek veri seti oluşturur (şema + satırlar) ki dashboard denenebilsin.
   Future<void> _seedSample() async {
@@ -41,17 +81,19 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
     }
   }
 
-  void _openDashboard(Dataset d) {
+  void _openData(Dataset d) {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => DashboardScreen(datasetId: d.id, datasetName: d.name),
+        builder: (_) => DataTableScreen(datasetId: d.id, datasetName: d.name),
       ),
     );
   }
 
-  void _logout() {
-    ApiService.logout();
+  Future<void> _logout() async {
+    await ApiService.logout();
+    // await'ten sonra bu ekran hâlâ ağaçta mı? Değilse context'i kullanmak hatalı olur.
+    if (!mounted) return;
     Navigator.pushAndRemoveUntil(
       context,
       MaterialPageRoute(builder: (_) => const LoginScreen()),
@@ -66,6 +108,14 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
         title: const Text('Veri Setleri'),
         actions: [
           IconButton(
+            onPressed: _seeding ? null : _seedSample,
+            icon: _seeding
+                ? const SizedBox(
+                    height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.science_outlined),
+            tooltip: 'Örnek veri ekle',
+          ),
+          IconButton(
             onPressed: _refresh,
             icon: const Icon(Icons.refresh),
             tooltip: 'Yenile',
@@ -78,12 +128,12 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _seeding ? null : _seedSample,
-        icon: _seeding
+        onPressed: (_uploading || _seeding) ? null : _uploadFile,
+        icon: _uploading
             ? const SizedBox(
                 height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
-            : const Icon(Icons.add),
-        label: const Text('Örnek veri seti'),
+            : const Icon(Icons.upload_file),
+        label: const Text('Veri seti yükle'),
       ),
       // FutureBuilder: bir Future'ın durumuna (bekliyor / hata / hazır) göre farklı
       // widget çizer. C#'ta await + üç duruma göre UI güncellemenin bildirimsel hâli.
@@ -109,7 +159,8 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
           final datasets = snapshot.data!;
           if (datasets.isEmpty) {
             return const Center(
-              child: Text('Henüz veri seti yok.\nBaşlamak için "Örnek veri seti" ekle.',
+              child: Text(
+                  'Henüz veri seti yok.\n"Veri seti yükle" ile bir CSV/Excel dosyası ekle.',
                   textAlign: TextAlign.center),
             );
           }
@@ -128,7 +179,7 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
                 // Satıra tıklayınca o setin dashboard'u açılır.
                 rows: datasets
                     .map((d) => DataRow(
-                          onSelectChanged: (_) => _openDashboard(d),
+                          onSelectChanged: (_) => _openData(d),
                           cells: [
                             DataCell(Text(d.name)),
                             DataCell(Text(d.description ?? '—')),

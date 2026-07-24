@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:web/web.dart' as web;
 
 // Backend'in DatasetResponse'una karşılık gelen basit model (C# record karşılığı).
 class Dataset {
@@ -39,6 +40,46 @@ class SchemaColumn {
       );
 }
 
+// Bir veri satırı: kimlik + kolon adı→değer haritası (backend'in JSONB 'data' alanı).
+class RowItem {
+  final String id;
+  final Map<String, dynamic> data;
+
+  RowItem({required this.id, required this.data});
+
+  factory RowItem.fromJson(Map<String, dynamic> j) => RowItem(
+        id: j['id'] as String,
+        data: (j['data'] as Map).cast<String, dynamic>(),
+      );
+}
+
+// Sayfalanmış satır listesi (toplam + sayfa metadata'sı ile).
+class RowPage {
+  final int page;
+  final int pageSize;
+  final int total;
+  final int totalPages;
+  final List<RowItem> rows;
+
+  RowPage({
+    required this.page,
+    required this.pageSize,
+    required this.total,
+    required this.totalPages,
+    required this.rows,
+  });
+
+  factory RowPage.fromJson(Map<String, dynamic> j) => RowPage(
+        page: j['page'] as int,
+        pageSize: j['pageSize'] as int,
+        total: j['total'] as int,
+        totalPages: j['totalPages'] as int,
+        rows: (j['rows'] as List)
+            .map((e) => RowItem.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
 // Bir agregasyon grubu: anahtar (grup değeri, null=genel), değer, grup büyüklüğü.
 class AggBucket {
   final String? key;
@@ -60,13 +101,113 @@ class ApiService {
   // Flutter web tarayıcıda çalışır; backend aynı makinede 5000 portunda dinler.
   static const String baseUrl = 'http://localhost:5000';
 
-  // Giriş sonrası saklanan JWT (bellek içi — iskelet için yeterli, kalıcı depo sonra).
+  // Access token (JWT, ~15 dk). Bellekte tutulur (hızlı erişim); kaynak doğruluk tarayıcı
+  // deposudur. Refresh token (uzun ömür) access dolunca yenileme için saklanır.
   static String? _token;
+  static String? _refreshToken;
+
+  static const String _accessKey = 'jwt';
+  static const String _refreshKey = 'refresh';
+
+  // İki tarayıcı deposu. localStorage: sekme/tarayıcı kapansa da kalır ("oturumu açık tut").
+  // sessionStorage: yenilemede kalır ama sekme kapanınca uçar (işaretsiz mod).
+  static web.Storage get _local => web.window.localStorage;
+  static web.Storage get _session => web.window.sessionStorage;
 
   static bool get isLoggedIn => _token != null;
-  static void logout() => _token = null;
 
   static Map<String, String> get _authHeader => {'Authorization': 'Bearer $_token'};
+
+  // Token'ları seçilen depoya yaz + belleğe al; diğer depodaki kalıntıyı sil (mod değişebilir).
+  static void _saveTokens(String access, String refresh, {required bool remember}) {
+    final target = remember ? _local : _session;
+    final other = remember ? _session : _local;
+    target.setItem(_accessKey, access);
+    target.setItem(_refreshKey, refresh);
+    other.removeItem(_accessKey);
+    other.removeItem(_refreshKey);
+    _token = access;
+    _refreshToken = refresh;
+  }
+
+  // Her iki depoyu ve belleği temizle.
+  static void _clearTokens() {
+    for (final s in [_local, _session]) {
+      s.removeItem(_accessKey);
+      s.removeItem(_refreshKey);
+    }
+    _token = null;
+    _refreshToken = null;
+  }
+
+  static String? _readAccess() => _local.getItem(_accessKey) ?? _session.getItem(_accessKey);
+  static String? _readRefresh() => _local.getItem(_refreshKey) ?? _session.getItem(_refreshKey);
+  // Refresh'i localStorage'da bulduysak "oturumu açık tut" modundayız → yenilemede aynı moda yaz.
+  static bool _isRemembered() => _local.getItem(_refreshKey) != null;
+
+  // Uygulama açılışında çağrılır. Access hâlâ geçerliyse onu kullan; süresi geçmişse ama
+  // refresh varsa sessizce yenile; ikisi de yoksa temizle (giriş ekranına düşülür).
+  static Future<void> loadToken() async {
+    final access = _readAccess();
+    if (access != null && _isTokenValid(access)) {
+      _token = access;
+      _refreshToken = _readRefresh();
+      return;
+    }
+    final refresh = _readRefresh();
+    if (refresh != null && await _tryRefresh(refresh)) return;
+    _clearTokens();
+  }
+
+  // Yetkili bir istekten ÖNCE çağrılır: access süresi dolduysa refresh ile yeniler (aktif
+  // kullanımda 15 dk'da bir atılmamak için). Refresh yoksa dokunmaz; istek 401 alırsa çağıran görür.
+  static Future<void> _ensureFreshToken() async {
+    if (_token != null && _isTokenValid(_token!)) return;
+    final refresh = _refreshToken ?? _readRefresh();
+    if (refresh != null) await _tryRefresh(refresh);
+  }
+
+  // Refresh token ile /api/auth/refresh'e gider, yeni access+refresh alır. Backend rotation
+  // uygular (yeni refresh gelir, eskisi geçersizleşir) → yeni refresh'i de saklamak ŞART.
+  // Başarılıysa aynı modda (kalıcı/oturumluk) saklar ve true döner.
+  static Future<bool> _tryRefresh(String refresh) async {
+    try {
+      final remember = _isRemembered();
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/auth/refresh'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'refreshToken': refresh}),
+      );
+      if (res.statusCode == 200) {
+        final j = jsonDecode(res.body) as Map<String, dynamic>;
+        _saveTokens(j['token'] as String, j['refreshToken'] as String, remember: remember);
+        return true;
+      }
+    } catch (_) {/* ağ hatası vb. → yenileme başarısız */}
+    return false;
+  }
+
+  // Çıkış: token'ları her yerden siler.
+  static Future<void> logout() async => _clearTokens();
+
+  // JWT'nin süresi geçmemişse true. Token 3 parça: header.payload.signature (noktayla ayrık).
+  // Ortadaki payload base64 kodlu bir JSON'dur; içindeki 'exp' (Unix saniye) son geçerlilik
+  // anını taşır. Bunu SUNUCUYA sormadan istemcide çözüp kontrol ederiz.
+  static bool _isTokenValid(String token) {
+    try {
+      final parts = token.split('.');
+      if (parts.length != 3) return false;
+      // base64url uzunluğu 4'ün katı olmalı; normalize eksik '=' dolgusunu tamamlar.
+      final payloadJson = utf8.decode(base64Url.decode(base64Url.normalize(parts[1])));
+      final exp = (jsonDecode(payloadJson) as Map<String, dynamic>)['exp'] as int?;
+      if (exp == null) return false;
+      final expiry = DateTime.fromMillisecondsSinceEpoch(exp * 1000, isUtc: true);
+      // 10 sn pay: tam sınırda "geçerli" deyip hemen 401 yememek için.
+      return DateTime.now().toUtc().isBefore(expiry.subtract(const Duration(seconds: 10)));
+    } catch (_) {
+      return false; // bozuk / çözülemeyen token → geçersiz say.
+    }
+  }
 
   // POST /api/auth/register — tenant + admin birlikte açılır, token döner.
   // slug istemiyoruz; sunucu firma adından otomatik türetir.
@@ -74,6 +215,7 @@ class ApiService {
     required String tenantName,
     required String email,
     required String password,
+    required bool rememberMe,
   }) async {
     final res = await http.post(
       Uri.parse('$baseUrl/api/auth/register'),
@@ -84,22 +226,24 @@ class ApiService {
         'password': password,
       }),
     );
-    _storeToken(res);
+    _storeAuth(res, rememberMe);
   }
 
   // POST /api/auth/login — token döner. E-posta global benzersiz olduğundan
   // giriş için yalnızca e-posta + şifre yeterli.
-  static Future<void> login(String email, String password) async {
+  static Future<void> login(String email, String password,
+      {required bool rememberMe}) async {
     final res = await http.post(
       Uri.parse('$baseUrl/api/auth/login'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'email': email, 'password': password}),
     );
-    _storeToken(res);
+    _storeAuth(res, rememberMe);
   }
 
   // GET /api/datasets — token ile korumalı; yalnız bu tenant'ın setleri (query filter).
   static Future<List<Dataset>> getDatasets() async {
+    await _ensureFreshToken();
     final res = await http.get(
       Uri.parse('$baseUrl/api/datasets'),
       headers: {'Authorization': 'Bearer $_token'},
@@ -115,6 +259,7 @@ class ApiService {
 
   // GET /api/datasets/{id}/schema — kaydedilmiş kolon tanımları.
   static Future<List<SchemaColumn>> getSchema(String datasetId) async {
+    await _ensureFreshToken();
     final res = await http.get(
       Uri.parse('$baseUrl/api/datasets/$datasetId/schema'),
       headers: _authHeader,
@@ -124,6 +269,32 @@ class ApiService {
       return cols.map((c) => SchemaColumn.fromJson(c as Map<String, dynamic>)).toList();
     }
     throw ApiException(_message(res));
+  }
+
+  // GET /api/datasets/{id}/rows — sayfalanmış ham satırlar (şemaya göre dinamik tablo için).
+  static Future<RowPage> getRows(String datasetId,
+      {int page = 1, int pageSize = 50}) async {
+    await _ensureFreshToken();
+    final res = await http.get(
+      Uri.parse('$baseUrl/api/datasets/$datasetId/rows?page=$page&pageSize=$pageSize'),
+      headers: _authHeader,
+    );
+    if (res.statusCode == 200) {
+      return RowPage.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+    }
+    throw ApiException(_message(res));
+  }
+
+  // POST /api/datasets/{id}/rows/add — tek satır ekler. Değerler metin gider; sunucu şemaya
+  // göre tipli doğrular (number/date). Uymayan değer → ApiException (400 mesajı).
+  static Future<void> addRow(String datasetId, Map<String, String> values) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/datasets/$datasetId/rows/add'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode({'values': values}),
+    );
+    if (res.statusCode != 201) throw ApiException(_message(res));
   }
 
   // GET /api/datasets/{id}/aggregate — gruplama/özet. groupBy null ise gruplamasız genel toplam.
@@ -138,6 +309,7 @@ class ApiService {
     int? limit,
     List<String> filters = const [],
   }) async {
+    await _ensureFreshToken();
     final qp = <String>['op=${Uri.encodeQueryComponent(op)}'];
     void add(String k, String? v) {
       if (v != null) qp.add('$k=${Uri.encodeQueryComponent(v)}');
@@ -164,10 +336,22 @@ class ApiService {
     throw ApiException(_message(res));
   }
 
-  // Örnek bir veri seti oluşturup şema + satırları yükler (dashboard'u denemek için pratik
-  // yol; gerçek CSV yükleme sonraki adımda file_picker ile eklenecek).
+  // Gerçek bir CSV/Excel dosyasını yükler: önce yeni veri seti oluşturur, sonra AYNI dosyayı
+  // hem /schema (kolon+tip algılama) hem /rows (satırları içe aktarma) uçlarına gönderir.
+  // Backend uzantıya (.csv/.xlsx) göre ayrıştırdığından gerçek dosya adı geçilir.
+  static Future<void> uploadDataset({
+    required String name,
+    required List<int> bytes,
+    required String filename,
+  }) async {
+    final id = await _createDataset(name);
+    await _uploadBytes(id, 'schema', bytes, filename);
+    await _uploadBytes(id, 'rows', bytes, filename);
+  }
+
+  // Örnek veri seti (dashboard'u hızlı denemek için). Gömülü CSV'yi byte'a çevirip gerçek
+  // upload yoluyla gönderir — artık file_picker akışıyla birebir aynı kodu kullanır.
   static Future<void> seedSampleDataset() async {
-    final id = await _createDataset('Örnek Satışlar');
     const csv = 'ad,sehir,tutar,tarih\n'
         'Ali,Ankara,1200,2026-01-10\n'
         'Ayse,Izmir,800,2026-01-22\n'
@@ -175,12 +359,13 @@ class ApiService {
         'Cem,Bursa,600,2026-02-18\n'
         'Deniz,Izmir,2100,2026-03-03\n'
         'Ece,Ankara,900,2026-03-20\n';
-    await _uploadCsv(id, 'schema', csv);
-    await _uploadCsv(id, 'rows', csv);
+    await uploadDataset(
+        name: 'Örnek Satışlar', bytes: utf8.encode(csv), filename: 'ornek.csv');
   }
 
   // POST /api/datasets — yeni set, id döner.
   static Future<String> _createDataset(String name) async {
+    await _ensureFreshToken();
     final res = await http.post(
       Uri.parse('$baseUrl/api/datasets'),
       headers: {..._authHeader, 'Content-Type': 'application/json'},
@@ -192,21 +377,25 @@ class ApiService {
     throw ApiException(_message(res));
   }
 
-  // CSV içeriğini multipart/form-data olarak /{id}/schema veya /{id}/rows'a yükler.
-  static Future<void> _uploadCsv(String datasetId, String endpoint, String csv) async {
+  // Dosya byte'larını multipart/form-data olarak /{id}/schema veya /{id}/rows'a yükler.
+  // Backend içerik tipine değil dosya uzantısına baktığından filename (uzantısıyla) önemli.
+  static Future<void> _uploadBytes(
+      String datasetId, String endpoint, List<int> bytes, String filename) async {
+    await _ensureFreshToken();
     final req = http.MultipartRequest(
         'POST', Uri.parse('$baseUrl/api/datasets/$datasetId/$endpoint'));
     req.headers['Authorization'] = 'Bearer $_token';
-    // İçerik tipi değil dosya uzantısı kontrol edildiğinden filename yeterli.
-    req.files.add(http.MultipartFile.fromString('file', csv, filename: 'ornek.csv'));
+    req.files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
     final res = await http.Response.fromStream(await req.send());
     if (res.statusCode != 200) throw ApiException(_message(res));
   }
 
-  // Başarılı auth yanıtından token'ı çıkar ve sakla; değilse hata fırlat.
-  static void _storeToken(http.Response res) {
+  // Başarılı auth yanıtından access + refresh token'ı çıkar ve seçilen moda göre sakla;
+  // başarısızsa hata fırlat.
+  static void _storeAuth(http.Response res, bool rememberMe) {
     if (res.statusCode >= 200 && res.statusCode < 300) {
-      _token = (jsonDecode(res.body) as Map<String, dynamic>)['token'] as String;
+      final j = jsonDecode(res.body) as Map<String, dynamic>;
+      _saveTokens(j['token'] as String, j['refreshToken'] as String, remember: rememberMe);
     } else {
       throw ApiException(_message(res));
     }

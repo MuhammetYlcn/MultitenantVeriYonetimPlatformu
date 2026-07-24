@@ -28,6 +28,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         tenantName: _tenantName.text.trim(),
         email: _email.text.trim(),
         password: _password.text,
+        rememberMe: true, // yeni hesap → kendi cihazı varsayımıyla oturumu açık tut
       );
       if (!mounted) return;
       Navigator.pushAndRemoveUntil(

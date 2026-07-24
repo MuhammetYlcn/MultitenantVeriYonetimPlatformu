@@ -211,6 +211,48 @@ public class DatasetsController : ControllerBase
         });
     }
 
+    // POST /api/datasets/{id}/rows/add — TEK bir satır ekler (import gibi hepsini DEĞİŞTİRMEZ).
+    // Flutter'daki şemaya-göre dinamik "satır ekle" formu bunu çağırır. Değerler metin gelir,
+    // sunucu şemaya göre tipli doğrular/dönüştürür (import ile birebir aynı kuralla).
+    [HttpPost("{id:guid}/rows/add")]
+    public async Task<IActionResult> AddRow(Guid id, AddRowRequest request)
+    {
+        var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
+        if (dataset is null) return DatasetNotFound();
+
+        var schema = await _db.DatasetColumns
+            .Where(c => c.DatasetId == id)
+            .OrderBy(c => c.Ordinal)
+            .Select(c => new ColumnSchema(c.Name, c.Type))
+            .ToListAsync();
+
+        if (schema.Count == 0)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Bu veri seti için önce şema tanımlayın (POST /api/datasets/{id}/schema).");
+
+        // Import doğrulamasını yeniden kullan: tek satırlık bir tablo kurup ValidateRows'a ver.
+        // Tip dönüşümü (number→decimal, date→DateTime) ve hata raporu import ile birebir aynı.
+        var values = request.Values ?? new Dictionary<string, string?>();
+        var headers = schema.Select(c => c.Name).ToList();
+        var singleRow = schema.Select(c => values.GetValueOrDefault(c.Name) ?? "").ToArray();
+        var table = new ParsedTable(headers, new[] { singleRow });
+
+        var result = _importService.ValidateRows(table, schema);
+        if (result.ValidRows.Count == 0)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Satır şemaya uymuyor.",
+                detail: string.Join(" | ", result.Errors.Select(e =>
+                    $"'{e.Column}' için '{e.Value}' geçerli bir {e.ExpectedType} değil.")));
+
+        var row = new DatasetRow { Id = Guid.NewGuid(), DatasetId = id, Data = result.ValidRows[0] };
+        _db.DatasetRows.Add(row);
+        dataset.RowCount += 1;
+        dataset.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+
+        return CreatedAtAction(nameof(GetRows), new { id }, new RowItem(row.Id, row.Data));
+    }
+
     // GET /api/datasets/{id}/rows — satırları sayfalayarak, sıralayarak ve JSONB üzerinden
     // filtreleyerek döndür. Filtre formatı: ?filter=kolon:op:deger (birden çok olabilir),
     // op ∈ {eq,ne,gt,gte,lt,lte,contains}. Örn: ?sort=yas&dir=desc&filter=yas:gte:30
