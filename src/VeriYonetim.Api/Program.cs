@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
@@ -85,6 +86,28 @@ using (var scope = app.Services.CreateScope())
     var provisioner = scope.ServiceProvider.GetRequiredService<ITenantProvisioner>();
     var count = await provisioner.SyncAllSchemasAsync();
     app.Logger.LogInformation("Tenant şema senkronizasyonu: {Count} tenant kontrol edildi.", count);
+}
+
+// Geliştirmede: uygulama ayağa kalkınca varsayılan tarayıcıyı Swagger'a aç.
+// (dotnet run, launchSettings'teki launchBrowser'ı dinlemez; bu o boşluğu doldurur.)
+// ApplicationStarted = "artık istek kabul ediyorum" anı. Testlerdeki TestServer
+// gerçek bir porta bağlanmadığından app.Urls boş kalır → tarayıcı açılmaz.
+if (app.Environment.IsDevelopment())
+{
+    app.Lifetime.ApplicationStarted.Register(() =>
+    {
+        // https sertifika uyarısını atlamak için http adresini tercih et.
+        var url = app.Urls.FirstOrDefault(u => u.StartsWith("http://"))
+                  ?? app.Urls.FirstOrDefault();
+        if (string.IsNullOrEmpty(url)) return; // adres yok (ör. test) → atla
+
+        try
+        {
+            // UseShellExecute = true → Windows'ta varsayılan tarayıcıyı çalıştırır.
+            Process.Start(new ProcessStartInfo { FileName = $"{url}/swagger", UseShellExecute = true });
+        }
+        catch { /* tarayıcı açılamazsa uygulamayı düşürme */ }
+    });
 }
 
 app.Run();

@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using VeriYonetim.Api.Data;
+using Xunit.Abstractions;
 
 namespace VeriYonetim.Api.Tests;
 
@@ -11,11 +12,15 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
 {
     private readonly ApiFactory _factory;
     private readonly HttpClient _client;
+    // xUnit her teste bunu enjekte eder; WriteLine ile yazdığımız satırlar o testin
+    // "output" panosunda görünür (VS Code'da testi seçince, CLI'da detaylı logger'da).
+    private readonly ITestOutputHelper _output;
 
-    public IsolationTests(ApiFactory factory)
+    public IsolationTests(ApiFactory factory, ITestOutputHelper output)
     {
         _factory = factory;
         _client = factory.CreateClient();
+        _output = output;
     }
 
     // @BeforeEach karşılığı: her test temiz veritabanıyla başlar.
@@ -57,7 +62,7 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
     // ---- İzolasyon ----
 
-    [Fact]
+    [Fact(DisplayName = "İzolasyon: kullanıcı listesi yalnız kendi tenant'ının kullanıcılarını döndürür")]
     public async Task UserListing_ReturnsOnlyOwnTenantsUsers()
     {
         var tenantA = await RegisterTenantAsync("iso-a", "ali@a.com");
@@ -70,9 +75,10 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
         Assert.All(users, u => Assert.Equal(tenantA.TenantId, u.TenantId));
         Assert.DoesNotContain(users, u => u.Email == "ayse@b.com");
         Assert.Contains(users, u => u.Email == "ali@a.com");
+        _output.WriteLine("✓ Kanıt: A tenant'ının kullanıcı listesinde yalnız kendi kullanıcıları var; B'nin e-postası (ayse@b.com) görünmüyor.");
     }
 
-    [Fact]
+    [Fact(DisplayName = "Aynı e-posta ikinci kez kaydolamaz (409 Conflict)")]
     public async Task SameEmail_CannotRegisterTwice()
     {
         // E-posta global benzersiz — aynı e-posta ikinci bir tenant'a kaydedilemez.
@@ -82,9 +88,10 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
             new { tenantName = "Baska Firma", email = "ortak@mail.com", password = "Sifre123!" });
 
         Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
+        _output.WriteLine("✓ Kanıt: Aynı e-posta (ortak@mail.com) ikinci bir firmaya kaydolmaya çalışınca 409 Conflict döndü.");
     }
 
-    [Fact]
+    [Fact(DisplayName = "Kayıt, tenant'a özel PostgreSQL şemasını oluşturur")]
     public async Task Register_CreatesTenantSchema()
     {
         await RegisterTenantAsync("sema-test", "sema@test.com");
@@ -98,11 +105,12 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
             .ToListAsync();
 
         Assert.Contains("tenant_sema_test", schemas);
+        _output.WriteLine("✓ Kanıt: Kayıt sonrası veritabanında 'tenant_sema_test' şeması oluştu.");
     }
 
     // ---- RBAC ----
 
-    [Fact]
+    [Fact(DisplayName = "Admin yeni kullanıcı ekleyebilir (201 Created)")]
     public async Task AdminRole_CanCreateUser()
     {
         var admin = await RegisterTenantAsync("rbac-a", "admin@rbac.com");
@@ -111,9 +119,10 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
             admin.Token, new { email = "uye@rbac.com", password = "Sifre123!", role = "User" }));
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        _output.WriteLine("✓ Kanıt: Admin token'ıyla yeni kullanıcı ekleme 201 Created döndü.");
     }
 
-    [Fact]
+    [Fact(DisplayName = "Yetkisiz kullanıcı (Admin değil) kullanıcı ekleyemez (403 Forbidden)")]
     public async Task UserRole_CannotCreateUser()
     {
         var admin = await RegisterTenantAsync("rbac-b", "admin@rbacb.com");
@@ -125,17 +134,19 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
             member.Token, new { email = "davetsiz@rbacb.com", password = "Sifre123!", role = "User" }));
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        _output.WriteLine("✓ Kanıt: Yetkisiz (Admin olmayan) kullanıcı kullanıcı eklemeye çalışınca 403 Forbidden döndü.");
     }
 
-    [Fact]
+    [Fact(DisplayName = "Token'sız (anonim) istek reddedilir (401 Unauthorized)")]
     public async Task Anonymous_CannotListUsers()
     {
         var response = await _client.GetAsync("/api/users");
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        _output.WriteLine("✓ Kanıt: Token'sız /api/users isteği 401 Unauthorized döndü.");
     }
 
-    [Fact]
+    [Fact(DisplayName = "Kötü niyetli firma adı güvenle slug'a indirgenir, public şema sağlam (SQL injection yok)")]
     public async Task MaliciousTenantName_IsSlugifiedSafely()
     {
         // Slug artık firma adından türetiliyor; tehlikeli karakterler reddedilmek yerine
@@ -160,5 +171,6 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
         Assert.Contains("public", schemas);
         Assert.Contains("tenant_kotu_drop_schema_public", schemas);
+        _output.WriteLine("✓ Kanıt: Kötü niyetli ad güvenle 'tenant_kotu_drop_schema_public' slug'ına indirgendi; public şema hâlâ yerinde (SQL injection çalışmadı).");
     }
 }
