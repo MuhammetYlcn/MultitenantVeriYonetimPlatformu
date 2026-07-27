@@ -1,20 +1,17 @@
 import 'package:flutter/material.dart';
 import '../api_service.dart';
+import '../theme/app_theme.dart';
+import '../widgets/ui.dart';
 
-// Bir veri setinin özet panosu: KPI kartları + grafik + tarih aralığı filtresi.
+// Bir veri setinin özet panosu: KPI kartları + dağılım grafiği + tarih aralığı filtresi.
 // Backend'in /aggregate endpoint'ini tüketir (grup özeti + gruplamasız genel toplam).
-class DashboardScreen extends StatefulWidget {
-  final String datasetId;
-  final String datasetName;
+class DashboardPage extends StatefulWidget {
+  final Dataset dataset;
 
-  const DashboardScreen({
-    super.key,
-    required this.datasetId,
-    required this.datasetName,
-  });
+  const DashboardPage({super.key, required this.dataset});
 
   @override
-  State<DashboardScreen> createState() => _DashboardScreenState();
+  State<DashboardPage> createState() => _DashboardPageState();
 }
 
 // Panonun ihtiyaç duyduğu her şeyi tek seferde toplayan sonuç nesnesi.
@@ -40,7 +37,7 @@ class _DashboardData {
   });
 }
 
-class _DashboardScreenState extends State<DashboardScreen> {
+class _DashboardPageState extends State<DashboardPage> {
   late Future<_DashboardData> _future;
   DateTime? _start;
   DateTime? _end;
@@ -57,16 +54,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
       });
 
   static String _fmtDate(DateTime d) =>
+      '${d.day.toString().padLeft(2, '0')}.${d.month.toString().padLeft(2, '0')}.${d.year}';
+
+  // Filtre değeri sunucuya ISO biçiminde gider (ekranda gösterim biçimi ayrı).
+  static String _isoDate(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
+  // Büyük sayıları binlik ayraçla yaz: 7100 → 7.100 (grafik ve kartlarda okunurluk).
   static String _fmtNum(double? v) {
     if (v == null) return '—';
-    return v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(1);
+    final rounded = v == v.roundToDouble();
+    final text = rounded ? v.toStringAsFixed(0) : v.toStringAsFixed(1);
+    final parts = text.split('.');
+    final intPart = parts.first.replaceAllMapped(
+      RegExp(r'(\d)(?=(\d{3})+$)'),
+      (m) => '${m[1]}.',
+    );
+    return parts.length > 1 ? '$intPart,${parts[1]}' : intPart;
   }
 
   Future<_DashboardData> _fetch() async {
-    final schema = await ApiService.getSchema(widget.datasetId);
-    final id = widget.datasetId;
+    final id = widget.dataset.id;
+    final schema = await ApiService.getSchema(id);
 
     // Kolonları tiplerine göre ayır; grafik/metrik için makul varsayılanlar seç.
     final textCols = schema.where((c) => c.type == 'text').toList();
@@ -82,8 +91,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     // Seçili tarih aralığı → filtre koşulları (tarih kolonu varsa).
     final filters = <String>[];
-    if (dateCol != null && _start != null) filters.add('$dateCol:gte:${_fmtDate(_start!)}');
-    if (dateCol != null && _end != null) filters.add('$dateCol:lte:${_fmtDate(_end!)}');
+    if (dateCol != null && _start != null) {
+      filters.add('$dateCol:gte:${_isoDate(_start!)}');
+    }
+    if (dateCol != null && _end != null) {
+      filters.add('$dateCol:lte:${_isoDate(_end!)}');
+    }
 
     // KPI: satır sayısı (filtreye duyarlı, gruplamasız count).
     final countBuckets = await ApiService.aggregate(id, op: 'count', filters: filters);
@@ -92,9 +105,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     // KPI: sayısal metrik varsa genel toplam ve ortalama (gruplamasız).
     double? total, average;
     if (metricCol != null) {
-      final sumB = await ApiService.aggregate(id, op: 'sum', metric: metricCol, filters: filters);
+      final sumB =
+          await ApiService.aggregate(id, op: 'sum', metric: metricCol, filters: filters);
       total = sumB.isNotEmpty ? sumB.first.value : 0;
-      final avgB = await ApiService.aggregate(id, op: 'avg', metric: metricCol, filters: filters);
+      final avgB =
+          await ApiService.aggregate(id, op: 'avg', metric: metricCol, filters: filters);
       average = avgB.isNotEmpty ? avgB.first.value : 0;
     }
 
@@ -150,186 +165,249 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.datasetName),
-        actions: [
-          IconButton(onPressed: _reload, icon: const Icon(Icons.refresh), tooltip: 'Yenile'),
-        ],
-      ),
-      body: FutureBuilder<_DashboardData>(
-        future: _future,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text('Yüklenemedi: ${snapshot.error}',
-                    style: const TextStyle(color: Colors.red), textAlign: TextAlign.center),
-              ),
-            );
-          }
+    return FutureBuilder<_DashboardData>(
+      future: _future,
+      builder: (context, snapshot) {
+        final d = snapshot.data;
+        final filtered = _start != null || _end != null;
 
-          final d = snapshot.data!;
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              if (d.dateColumn != null) _dateFilterBar(d.dateColumn!),
-              _kpiRow(d),
-              const SizedBox(height: 8),
-              _chartCard(d),
-            ],
-          );
-        },
-      ),
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            PageHeader(
+              title: widget.dataset.name,
+              subtitle: d == null
+                  ? 'Özet hesaplanıyor…'
+                  : filtered
+                      ? 'Seçili tarih aralığındaki ${d.rowCount} satırın özeti'
+                      : 'Tüm verinin özeti · ${d.rowCount} satır',
+              actions: [
+                IconButton(
+                  onPressed: _reload,
+                  icon: const Icon(Icons.refresh),
+                  tooltip: 'Yenile',
+                ),
+              ],
+            ),
+            Expanded(child: _body(snapshot)),
+          ],
+        );
+      },
     );
   }
 
+  Widget _body(AsyncSnapshot<_DashboardData> snapshot) {
+    if (snapshot.connectionState != ConnectionState.done) {
+      return const LoadingView(message: 'Özet hesaplanıyor…');
+    }
+    if (snapshot.hasError) {
+      return ErrorView(message: '${snapshot.error}', onRetry: _reload);
+    }
+
+    final d = snapshot.data!;
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 12),
+      children: [
+        if (d.dateColumn != null) ...[
+          _dateFilterBar(d.dateColumn!),
+          const SizedBox(height: 16),
+        ],
+        _kpis(d),
+        const SizedBox(height: 16),
+        _chartCard(d),
+      ],
+    );
+  }
+
+  // Tarih aralığı filtresi: iki tarih düğmesi + seçim varsa temizleme.
   Widget _dateFilterBar(String dateColumn) {
     final active = _start != null || _end != null;
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            const Icon(Icons.date_range, size: 20),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  OutlinedButton(
-                    onPressed: () => _pickDate(isStart: true),
-                    child: Text(_start == null ? 'Başlangıç' : _fmtDate(_start!)),
-                  ),
-                  OutlinedButton(
-                    onPressed: () => _pickDate(isStart: false),
-                    child: Text(_end == null ? 'Bitiş' : _fmtDate(_end!)),
-                  ),
-                  if (active)
-                    TextButton.icon(
-                      onPressed: _clearDates,
-                      icon: const Icon(Icons.clear, size: 18),
-                      label: const Text('Temizle'),
-                    ),
-                ],
-              ),
+            const IconBadge(
+                icon: Icons.date_range_outlined, color: AppColors.brand, size: 32),
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Text('$dateColumn aralığı',
+                  style: Theme.of(context).textTheme.titleSmall),
             ),
+            OutlinedButton.icon(
+              onPressed: () => _pickDate(isStart: true),
+              icon: const Icon(Icons.play_arrow_outlined, size: 16),
+              label: Text(_start == null ? 'Başlangıç' : _fmtDate(_start!)),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => _pickDate(isStart: false),
+              icon: const Icon(Icons.stop_outlined, size: 16),
+              label: Text(_end == null ? 'Bitiş' : _fmtDate(_end!)),
+            ),
+            if (active)
+              TextButton.icon(
+                onPressed: _clearDates,
+                icon: const Icon(Icons.close, size: 16),
+                label: const Text('Filtreyi kaldır'),
+              ),
           ],
         ),
       ),
     );
   }
 
-  Widget _kpiRow(_DashboardData d) {
+  // Özet kartları: dar ekranda alt alta, geniş ekranda yan yana akar.
+  Widget _kpis(_DashboardData d) {
     final tiles = <Widget>[
-      _kpi('Satır', '${d.rowCount}'),
+      StatTile(
+        label: 'Satır',
+        value: '${d.rowCount}',
+        hint: _start != null || _end != null ? 'seçili aralıkta' : 'tüm veri',
+        icon: Icons.table_rows_outlined,
+        color: AppColors.brand,
+      ),
       if (d.metricColumn != null) ...[
-        _kpi('Toplam ${d.metricColumn}', _fmtNum(d.total)),
-        _kpi('Ortalama ${d.metricColumn}', _fmtNum(d.average)),
+        StatTile(
+          label: 'Toplam ${d.metricColumn}',
+          value: _fmtNum(d.total),
+          hint: 'tüm satırların toplamı',
+          icon: Icons.functions,
+          color: AppColors.accent,
+        ),
+        StatTile(
+          label: 'Ortalama ${d.metricColumn}',
+          value: _fmtNum(d.average),
+          hint: 'satır başına',
+          icon: Icons.stacked_line_chart,
+          color: chartPalette[2],
+        ),
       ],
     ];
-    return Wrap(spacing: 12, runSpacing: 12, children: tiles);
-  }
 
-  Widget _kpi(String label, String value) {
-    return SizedBox(
-      width: 150,
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(label,
-                  style: TextStyle(color: Colors.grey[600], fontSize: 13),
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
-              const SizedBox(height: 6),
-              Text(value, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-            ],
-          ),
-        ),
-      ),
+    return LayoutBuilder(
+      builder: (context, c) {
+        // 3 karta yer varsa üçlü, yoksa tek sütun (ara genişliklerde ikili).
+        final perRow = c.maxWidth >= 760 ? 3 : (c.maxWidth >= 480 ? 2 : 1);
+        final width = (c.maxWidth - (perRow - 1) * 14) / perRow;
+        return Wrap(
+          spacing: 14,
+          runSpacing: 14,
+          children:
+              tiles.map((t) => SizedBox(width: width, child: t)).toList(),
+        );
+      },
     );
   }
 
   Widget _chartCard(_DashboardData d) {
-    final opLabel = d.op == 'sum' ? 'Toplam ${d.metricColumn}' : 'Adet';
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('${d.groupColumn ?? '—'} bazında $opLabel',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-            const SizedBox(height: 16),
-            if (d.chart.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 24),
-                child: Center(child: Text('Gösterilecek veri yok.')),
-              )
-            else
-              ..._bars(d.chart),
-          ],
-        ),
-      ),
+    final opLabel =
+        d.op == 'sum' ? 'toplam ${d.metricColumn}' : 'satır adedi';
+    return SectionCard(
+      title: '${d.groupColumn ?? '—'} bazında ${d.op == 'sum' ? 'toplam' : 'adet'}',
+      subtitle: 'En yüksek 10 grup · $opLabel',
+      trailing: d.chart.isEmpty
+          ? null
+          : Chip(
+              label: Text('${d.chart.length} grup'),
+              visualDensity: VisualDensity.compact,
+            ),
+      child: d.chart.isEmpty
+          ? const Padding(
+              padding: EdgeInsets.symmetric(vertical: 28),
+              child: Center(
+                child: Text('Bu aralıkta gösterilecek veri yok.',
+                    style: TextStyle(color: AppColors.muted)),
+              ),
+            )
+          : Column(children: _bars(d.chart)),
     );
   }
 
   // Bağımlılıksız yatay çubuk grafik: her grup için değeriyle orantılı bir çubuk.
+  // (Adım 5'te fl_chart'a geçilecek; renkler aynı paletten geleceği için görünüm korunur.)
   List<Widget> _bars(List<AggBucket> data) {
     final maxV = data
         .map((b) => (b.value ?? 0).abs())
         .fold<double>(0, (a, b) => a > b ? a : b);
 
-    return data.map((b) {
-      final frac = maxV > 0 ? ((b.value ?? 0) / maxV).clamp(0.0, 1.0) : 0.0;
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 90,
-              child: Text(b.key ?? '—', maxLines: 1, overflow: TextOverflow.ellipsis),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Stack(
-                children: [
-                  Container(
-                    height: 24,
-                    decoration: BoxDecoration(
-                      color: Colors.indigo.withValues(alpha: 0.10),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
-                  FractionallySizedBox(
-                    widthFactor: frac,
-                    child: Container(
-                      height: 24,
-                      decoration: BoxDecoration(
-                        color: Colors.indigo,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                    ),
-                  ),
-                ],
+    return [
+      for (var i = 0; i < data.length; i++)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 7),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 96,
+                child: Text(
+                  data[i].key ?? '—',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            SizedBox(
-              width: 64,
-              child: Text(_fmtNum(b.value), textAlign: TextAlign.right),
-            ),
-          ],
+              const SizedBox(width: 12),
+              Expanded(
+                child: _Bar(
+                  fraction: maxV > 0
+                      ? ((data[i].value ?? 0) / maxV).clamp(0.0, 1.0).toDouble()
+                      : 0,
+                  color: chartPalette[i % chartPalette.length],
+                ),
+              ),
+              const SizedBox(width: 12),
+              SizedBox(
+                width: 78,
+                child: Text(
+                  _fmtNum(data[i].value),
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(
+                      fontWeight: FontWeight.w600, fontSize: 13.5),
+                ),
+              ),
+            ],
+          ),
         ),
-      );
-    }).toList();
+    ];
+  }
+}
+
+// Tek çubuk: sönük bir yol + üzerinde değere orantılı, degrade dolgulu bölüm.
+class _Bar extends StatelessWidget {
+  final double fraction;
+  final Color color;
+
+  const _Bar({required this.fraction, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        Container(
+          height: 26,
+          decoration: BoxDecoration(
+            color: AppColors.surfaceAlt,
+            borderRadius: BorderRadius.circular(8),
+          ),
+        ),
+        // Değer değişince çubuk yumuşakça uzar/kısalır (filtre uygulandığında görünür).
+        FractionallySizedBox(
+          widthFactor: fraction,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeOutCubic,
+            height: 26,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [color.withValues(alpha: 0.75), color],
+              ),
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 }

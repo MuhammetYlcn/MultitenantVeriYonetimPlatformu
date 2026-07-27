@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'api_service.dart';
+import 'screens/home_shell.dart';
 import 'screens/login_screen.dart';
-import 'screens/datasets_screen.dart';
+import 'theme/app_theme.dart';
 
 // Uygulama girişi. runApp'tan ÖNCE kalıcı depodaki token'ı okuyoruz ki açılış ekranına
-// doğru karar verebilelim: token varsa oturum sürüyordur → doğrudan veri setleri.
+// doğru karar verebilelim: token varsa oturum sürüyordur → doğrudan uygulama kabuğu.
 Future<void> main() async {
   // runApp'tan önce asenkron iş (depo okuma) yapacağımız için Flutter altyapısını
   // elle başlatmamız gerekir; yoksa "binding not initialized" hatası alınır.
@@ -22,12 +23,10 @@ class VeriYonetimApp extends StatelessWidget {
     return MaterialApp(
       title: 'VeriYönetim',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorSchemeSeed: Colors.indigo,
-        useMaterial3: true,
-      ),
-      // Açılışta token yüklüyse oturum sürüyor demektir → doğrudan veri setleri; yoksa giriş.
-      home: ApiService.isLoggedIn ? const DatasetsScreen() : const LoginScreen(),
+      // Uygulama tek temalı: koyu. Tüm renk/tipografi kararları theme/app_theme.dart'ta.
+      theme: AppTheme.dark,
+      // Açılışta token yüklüyse oturum sürüyor demektir → doğrudan kabuk; yoksa giriş.
+      home: ApiService.isLoggedIn ? const HomeShell() : const LoginScreen(),
     );
   }
 }

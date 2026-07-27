@@ -1,24 +1,27 @@
 import 'package:flutter/material.dart';
 import '../api_service.dart';
-import 'dashboard_screen.dart';
+import '../theme/app_theme.dart';
+import '../widgets/ui.dart';
 
-// Bir veri setinin ham satırlarını gösterir. Kolonlar SABİT değil — şemadan üretilir;
-// böylece hangi CSV/Excel yüklendiyse tablo kendini ona göre kurar (dinamik render).
-class DataTableScreen extends StatefulWidget {
-  final String datasetId;
-  final String datasetName;
+// Bir veri setinin ham satırları. Kolonlar SABİT değil — şemadan üretilir; böylece
+// hangi CSV/Excel yüklendiyse tablo kendini ona göre kurar (dinamik render).
+class DataTablePage extends StatefulWidget {
+  final Dataset dataset;
+  final VoidCallback onBack;
+  final VoidCallback onOpenDashboard;
 
-  const DataTableScreen({
+  const DataTablePage({
     super.key,
-    required this.datasetId,
-    required this.datasetName,
+    required this.dataset,
+    required this.onBack,
+    required this.onOpenDashboard,
   });
 
   @override
-  State<DataTableScreen> createState() => _DataTableScreenState();
+  State<DataTablePage> createState() => _DataTablePageState();
 }
 
-class _DataTableScreenState extends State<DataTableScreen> {
+class _DataTablePageState extends State<DataTablePage> {
   late Future<_TableData> _future;
   // "Satır ekle" formunu şemaya göre kurmak için son yüklenen kolonları saklarız.
   List<SchemaColumn> _schema = [];
@@ -31,17 +34,22 @@ class _DataTableScreenState extends State<DataTableScreen> {
 
   // Şema (kolonlar) + ilk sayfa satırlar birlikte çekilir.
   Future<_TableData> _load() async {
-    final schema = await ApiService.getSchema(widget.datasetId);
-    final page = await ApiService.getRows(widget.datasetId);
+    final schema = await ApiService.getSchema(widget.dataset.id);
+    final page = await ApiService.getRows(widget.dataset.id);
     _schema = schema;
     return _TableData(schema, page);
   }
 
+  // Gövde blok `{}`: ok gövdeli closure atanan Future'ı döndürür, setState bunu reddeder.
+  void _reload() => setState(() {
+        _future = _load();
+      });
+
   // Şemaya göre dinamik form: her kolon için bir alan. Kaydedince tek satır eklenir.
   Future<void> _addRow() async {
     if (_schema.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Bu veri setinin şeması yok; önce dosya yükle.')));
+      showSnack(context, 'Bu veri setinin şeması yok; önce bir dosya yükle.',
+          isError: true);
       return;
     }
     final controllers = {for (final c in _schema) c.name: TextEditingController()};
@@ -50,32 +58,37 @@ class _DataTableScreenState extends State<DataTableScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Satır ekle'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: _schema
-                .map((c) => Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 6),
-                      child: TextField(
-                        controller: controllers[c.name],
-                        keyboardType: c.type == 'number'
-                            ? const TextInputType.numberWithOptions(decimal: true)
-                            : TextInputType.text,
-                        decoration: InputDecoration(
-                          labelText: c.name,
-                          helperText: _typeHint(c.type),
-                          border: const OutlineInputBorder(),
+        content: SizedBox(
+          width: 380,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: _schema
+                  .map((c) => Padding(
+                        padding: const EdgeInsets.only(bottom: 14),
+                        child: TextField(
+                          controller: controllers[c.name],
+                          keyboardType: c.type == 'number'
+                              ? const TextInputType.numberWithOptions(decimal: true)
+                              : TextInputType.text,
+                          decoration: InputDecoration(
+                            labelText: c.name,
+                            helperText: _typeHint(c.type),
+                            prefixIcon: Icon(_typeIcon(c.type), size: 18),
+                          ),
                         ),
-                      ),
-                    ))
-                .toList(),
+                      ))
+                  .toList(),
+            ),
           ),
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false), child: const Text('İptal')),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Vazgeç')),
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, true), child: const Text('Kaydet')),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Kaydet')),
         ],
       ),
     );
@@ -90,141 +103,163 @@ class _DataTableScreenState extends State<DataTableScreen> {
     if (ok != true) return;
 
     try {
-      await ApiService.addRow(widget.datasetId, values);
+      await ApiService.addRow(widget.dataset.id, values);
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('Satır eklendi.')));
-      // Gövde blok `{}`: ok gövdeli closure atanan Future'ı döndürür, setState bunu reddeder.
-      setState(() {
-        _future = _load();
-      });
+      showSnack(context, 'Satır eklendi.');
+      _reload();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Eklenemedi: $e')));
+      showSnack(context, 'Eklenemedi: $e', isError: true);
     }
   }
 
   // Alanın altında gösterilecek tip ipucu (kullanıcı doğru biçimde girsin).
   static String _typeHint(String type) => switch (type) {
         'number' => 'sayı (örn. 1500.50)',
-        'date' => 'tarih (YYYY-MM-DD)',
+        'date' => 'tarih (YYYY-AA-GG)',
         _ => 'metin',
       };
 
-  void _openDashboard() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => DashboardScreen(
-          datasetId: widget.datasetId,
-          datasetName: widget.datasetName,
+  static IconData _typeIcon(String type) => switch (type) {
+        'number' => Icons.tag,
+        'date' => Icons.event_outlined,
+        _ => Icons.text_fields,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<_TableData>(
+      future: _future,
+      builder: (context, snap) {
+        final data = snap.data;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            PageHeader(
+              leading: IconButton(
+                onPressed: widget.onBack,
+                icon: const Icon(Icons.arrow_back),
+                tooltip: 'Veri setlerine dön',
+              ),
+              title: widget.dataset.name,
+              subtitle: data == null
+                  ? 'Yükleniyor…'
+                  : '${data.page.total} satır · ${data.schema.length} kolon'
+                      '${data.page.total > data.page.rows.length ? " · ilk ${data.page.rows.length} tanesi gösteriliyor" : ""}',
+              actions: [
+                IconButton(
+                  onPressed: _reload,
+                  icon: const Icon(Icons.refresh),
+                  tooltip: 'Yenile',
+                ),
+                OutlinedButton.icon(
+                  onPressed: widget.onOpenDashboard,
+                  icon: const Icon(Icons.insights_outlined, size: 18),
+                  label: const Text('Panele bak'),
+                ),
+                // Viewer yalnız okur → satır ekleme butonu hiç gösterilmez. Bu sadece
+                // arayüz sadeliği; asıl koruma backend'de ([Authorize] → 403).
+                if (ApiService.canWrite)
+                  FilledButton.icon(
+                    onPressed: _addRow,
+                    icon: const Icon(Icons.add, size: 18),
+                    label: const Text('Satır ekle'),
+                  ),
+              ],
+            ),
+            Expanded(child: _table(snap)),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _table(AsyncSnapshot<_TableData> snap) {
+    if (snap.connectionState != ConnectionState.done) {
+      return const LoadingView(message: 'Satırlar getiriliyor…');
+    }
+    if (snap.hasError) {
+      return ErrorView(message: '${snap.error}', onRetry: _reload);
+    }
+
+    final cols = snap.data!.schema;
+    final rows = snap.data!.page.rows;
+
+    if (cols.isEmpty) {
+      return const EmptyState(
+        icon: Icons.view_column_outlined,
+        title: 'Bu veri setinin şeması yok',
+        message: 'Kolonlar bir CSV/Excel dosyası yüklendiğinde otomatik oluşur.',
+      );
+    }
+    if (rows.isEmpty) {
+      return EmptyState(
+        icon: Icons.inbox_outlined,
+        title: 'Henüz satır yok',
+        message: '${cols.length} kolon tanımlı ama içinde veri yok.',
+        action: ApiService.canWrite
+            ? FilledButton.icon(
+                onPressed: _addRow,
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('İlk satırı ekle'),
+              )
+            : null,
+      );
+    }
+
+    return Card(
+      child: Scrollbar(
+        child: SingleChildScrollView(
+          child: Scrollbar(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                // Kolonlar şemadan: adı başlık, tip simgesiyle; sayısal tipler sağa yaslı.
+                columns: cols
+                    .map((c) => DataColumn(
+                          numeric: c.type == 'number',
+                          label: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(_typeIcon(c.type),
+                                  size: 13, color: AppColors.muted),
+                              const SizedBox(width: 6),
+                              Text(c.name.toUpperCase()),
+                            ],
+                          ),
+                        ))
+                    .toList(),
+                // Her satır için, kolon sırasına göre değerleri diz. Çift satırlar hafif
+                // dolgulu: uzun tablolarda göz satırı kaybetmesin.
+                rows: [
+                  for (var i = 0; i < rows.length; i++)
+                    DataRow(
+                      color: WidgetStatePropertyAll(i.isEven
+                          ? Colors.transparent
+                          : AppColors.surfaceAlt.withValues(alpha: 0.45)),
+                      cells: cols
+                          .map((c) => DataCell(_cell(rows[i].data[c.name])))
+                          .toList(),
+                    ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.datasetName),
-        actions: [
-          IconButton(
-            onPressed: _openDashboard,
-            icon: const Icon(Icons.bar_chart),
-            tooltip: 'Panel',
-          ),
-          IconButton(
-            onPressed: () => setState(() {
-              _future = _load();
-            }),
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Yenile',
-          ),
-        ],
-      ),
-      // Viewer yalnız okur → satır ekleme butonu hiç gösterilmez. Bu sadece arayüz
-      // sadeliği için; asıl koruma backend'de ([Authorize(Roles="Editor,Admin")] → 403).
-      floatingActionButton: ApiService.canWrite
-          ? FloatingActionButton.extended(
-              onPressed: _addRow,
-              icon: const Icon(Icons.add),
-              label: const Text('Satır ekle'),
-            )
-          : null,
-      body: FutureBuilder<_TableData>(
-        future: _future,
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snap.hasError) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text('Yüklenemedi: ${snap.error}',
-                    style: const TextStyle(color: Colors.red),
-                    textAlign: TextAlign.center),
-              ),
-            );
-          }
-
-          final cols = snap.data!.schema;
-          final rows = snap.data!.page.rows;
-          if (cols.isEmpty) {
-            return const Center(
-                child: Text('Bu veri setinin şeması yok.\nÖnce bir dosya yükle.',
-                    textAlign: TextAlign.center));
-          }
-
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                child: Text(
-                  '${snap.data!.page.total} satır • ${cols.length} kolon'
-                  '${snap.data!.page.total > rows.length ? " (ilk ${rows.length} gösteriliyor)" : ""}',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ),
-              Expanded(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.vertical,
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: DataTable(
-                      // Kolonlar şemadan: adı başlık, sayısal tipler sağa yaslı.
-                      columns: cols
-                          .map((c) => DataColumn(
-                                label: Text(c.name),
-                                numeric: c.type == 'number',
-                              ))
-                          .toList(),
-                      // Her satır için, kolon sırasına göre değerleri diz.
-                      rows: rows
-                          .map((r) => DataRow(
-                                cells: cols
-                                    .map((c) =>
-                                        DataCell(Text(_fmt(r.data[c.name]))))
-                                    .toList(),
-                              ))
-                          .toList(),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
-      ),
-    );
+  // Boş değerler sönük bir tire ile gösterilir — hücre boş kalıp tablo delik delik durmasın.
+  Widget _cell(dynamic value) {
+    if (value == null) {
+      return const Text('—', style: TextStyle(color: AppColors.muted));
+    }
+    return Text(_fmt(value));
   }
 
-  // JSONB değerini okunur metne çevir: null → '—', ISO tarih ise yalnız gün kısmı.
+  // JSONB değerini okunur metne çevir: ISO tarih ise yalnız gün kısmı.
   static String _fmt(dynamic v) {
-    if (v == null) return '—';
     final s = v.toString();
     if (s.length >= 10 && RegExp(r'^\d{4}-\d{2}-\d{2}T').hasMatch(s)) {
       return s.substring(0, 10);

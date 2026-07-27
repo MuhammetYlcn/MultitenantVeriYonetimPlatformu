@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../api_service.dart';
-import 'datasets_screen.dart';
+import '../widgets/ui.dart';
+import 'home_shell.dart';
+import 'login_screen.dart';
 
 // Kayıt formu: tenant (firma) + admin kullanıcı birlikte açılır. Başarılı kayıt
 // doğrudan token döndürdüğünden, kayıt sonrası kullanıcı giriş yapmış sayılır.
@@ -16,6 +18,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _email = TextEditingController();
   final _password = TextEditingController();
   bool _loading = false;
+  bool _obscure = true;
   String? _error;
 
   Future<void> _submit() async {
@@ -33,8 +36,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
       if (!mounted) return;
       Navigator.pushAndRemoveUntil(
         context,
-        MaterialPageRoute(builder: (_) => const DatasetsScreen()),
-        (route) => false, // geçmişi temizle: geri tuşu login'e dönmesin
+        MaterialPageRoute(builder: (_) => const HomeShell()),
+        (route) => false, // geçmişi temizle: geri tuşu giriş ekranına dönmesin
       );
     } catch (e) {
       setState(() => _error = e.toString());
@@ -54,61 +57,75 @@ class _RegisterScreenState extends State<RegisterScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Kayıt ol')),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 400),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+      body: AuthLayout(
+        child: AuthCard(
+          title: 'Firmanı kaydet',
+          subtitle:
+              'Firmanı açan ilk kullanıcı yönetici olur; ekibini sonra sen eklersin.',
+          error: _error,
+          children: [
+            TextField(
+              controller: _tenantName,
+              textInputAction: TextInputAction.next,
+              decoration: const InputDecoration(
+                labelText: 'Firma adı',
+                helperText: 'Verilerin bu firmaya bağlı tutulur',
+                prefixIcon: Icon(Icons.apartment_outlined, size: 18),
+              ),
+            ),
+            const SizedBox(height: 18),
+            TextField(
+              controller: _email,
+              keyboardType: TextInputType.emailAddress,
+              textInputAction: TextInputAction.next,
+              decoration: const InputDecoration(
+                labelText: 'E-posta',
+                prefixIcon: Icon(Icons.alternate_email, size: 18),
+              ),
+            ),
+            const SizedBox(height: 18),
+            TextField(
+              controller: _password,
+              obscureText: _obscure,
+              onSubmitted: (_) => _loading ? null : _submit(),
+              decoration: InputDecoration(
+                labelText: 'Şifre',
+                helperText: 'En az 8 karakter',
+                prefixIcon: const Icon(Icons.lock_outline, size: 18),
+                suffixIcon: IconButton(
+                  onPressed: () => setState(() => _obscure = !_obscure),
+                  icon: Icon(
+                      _obscure
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                      size: 18),
+                  tooltip: _obscure ? 'Şifreyi göster' : 'Şifreyi gizle',
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: _loading ? null : _submit,
+                child: _loading
+                    ? const ButtonSpinner()
+                    : const Text('Firmayı oluştur'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                TextField(
-                  controller: _tenantName,
-                  decoration: const InputDecoration(
-                    labelText: 'Firma adı',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _email,
-                  keyboardType: TextInputType.emailAddress,
-                  decoration: const InputDecoration(
-                    labelText: 'E-posta',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _password,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Şifre',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 20),
-                if (_error != null) ...[
-                  Text(_error!, style: const TextStyle(color: Colors.red)),
-                  const SizedBox(height: 12),
-                ],
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: _loading ? null : _submit,
-                    child: _loading
-                        ? const SizedBox(
-                            height: 20,
-                            width: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('Kayıt ol'),
-                  ),
+                Text('Zaten hesabın var mı?',
+                    style: Theme.of(context).textTheme.bodySmall),
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Giriş yap'),
                 ),
               ],
             ),
-          ),
+          ],
         ),
       ),
     );

@@ -1,21 +1,26 @@
 import 'package:flutter/material.dart';
 import '../api_service.dart';
+import '../theme/app_theme.dart';
 import '../web_file_picker.dart';
-import 'data_table_screen.dart';
-import 'login_screen.dart';
-import 'users_screen.dart';
+import '../widgets/ui.dart';
+import 'home_shell.dart';
 
-// Giriş sonrası ana ekran: tenant'ın veri setlerini bir tabloda listeler.
-class DatasetsScreen extends StatefulWidget {
-  const DatasetsScreen({super.key});
+// Veri setleri bölümü. Artık kendi Scaffold'unu kurmuyor: kabuğun (AppShell) sağ
+// alanına yerleşen bir içerik parçası. Başlık ve eylem butonları PageHeader'da.
+class DatasetsPage extends StatefulWidget {
+  /// Bir veri setine tıklandığında kabuk onu açar (satır tablosu).
+  final void Function(Dataset dataset) onOpen;
+
+  const DatasetsPage({super.key, required this.onOpen});
 
   @override
-  State<DatasetsScreen> createState() => _DatasetsScreenState();
+  State<DatasetsPage> createState() => _DatasetsPageState();
 }
 
-class _DatasetsScreenState extends State<DatasetsScreen> {
-  // Future'ı bir kez oluşturup FutureBuilder'a veriyoruz; yenilemede yeniden kurulur.
+class _DatasetsPageState extends State<DatasetsPage> {
   late Future<List<Dataset>> _future;
+  bool _seeding = false;
+  bool _uploading = false;
 
   @override
   void initState() {
@@ -23,11 +28,8 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
     _future = ApiService.getDatasets();
   }
 
-  bool _seeding = false;
-  bool _uploading = false;
-
   // DİKKAT: gövde blok `{}` olmalı. `setState(() => _future = ...)` yazımında ok gövdeli
-  // closure atadığı değeri DÖNDÜRÜR; burada dönen şey bir Future olur ve setState bunu
+  // closure atadığı değeri DÖNDÜRÜR; dönen şey bir Future olur ve setState bunu
   // (async işin yanlışlıkla içine konmasını engellemek için) istisna fırlatarak reddeder.
   void _refresh() => setState(() {
         _future = ApiService.getDatasets();
@@ -37,51 +39,34 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
   Future<void> _uploadFile() async {
     final file = await pickCsvOrExcelFile();
     if (file == null) return; // kullanıcı iptal etti
-    final bytes = file.bytes;
-    // Veri seti adını dosya adından türet (uzantıyı at). İsimlendirme/yönetim ayrı adımda.
+    // Veri seti adını dosya adından türet (uzantıyı at).
     final name =
         file.name.replaceAll(RegExp(r'\.(csv|xlsx)$', caseSensitive: false), '');
     setState(() => _uploading = true);
     try {
-      await ApiService.uploadDataset(name: name, bytes: bytes, filename: file.name);
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('"$name" yüklendi.')));
-      }
+      await ApiService.uploadDataset(
+          name: name, bytes: file.bytes, filename: file.name);
+      if (mounted) showSnack(context, '"$name" yüklendi.');
       _refresh();
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Yüklenemedi: $e')));
-      }
+      if (mounted) showSnack(context, 'Yüklenemedi: $e', isError: true);
     } finally {
       if (mounted) setState(() => _uploading = false);
     }
   }
 
-  // Örnek veri seti oluşturur (şema + satırlar) ki dashboard denenebilsin.
+  // Örnek veri seti oluşturur (şema + satırlar) ki panel hemen denenebilsin.
   Future<void> _seedSample() async {
     setState(() => _seeding = true);
     try {
       await ApiService.seedSampleDataset();
+      if (mounted) showSnack(context, 'Örnek veri seti eklendi.');
       _refresh();
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Örnek veri eklenemedi: $e')));
-      }
+      if (mounted) showSnack(context, 'Örnek veri eklenemedi: $e', isError: true);
     } finally {
       if (mounted) setState(() => _seeding = false);
     }
-  }
-
-  void _openData(Dataset d) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => DataTableScreen(datasetId: d.id, datasetName: d.name),
-      ),
-    );
   }
 
   // Yeniden adlandırma: mevcut adı dolu bir alanla sor, PUT ile güncelle (açıklama korunur).
@@ -94,12 +79,15 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
         content: TextField(
           controller: controller,
           autofocus: true,
-          decoration: const InputDecoration(
-              labelText: 'Veri seti adı', border: OutlineInputBorder()),
+          decoration: const InputDecoration(labelText: 'Veri seti adı'),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('İptal')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Kaydet')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Vazgeç')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Kaydet')),
         ],
       ),
     );
@@ -109,11 +97,13 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
     try {
       await ApiService.renameDataset(d.id, name, description: d.description);
       if (!mounted) return;
+      // Seçili veri setinin adı değiştiyse kabuktaki başlık eskiyi göstermesin.
+      DatasetScope.of(context)?.onDatasetGone(d.id);
+      showSnack(context, 'Ad "$name" olarak güncellendi.');
       _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Yeniden adlandırılamadı: $e')));
+      showSnack(context, 'Yeniden adlandırılamadı: $e', isError: true);
     }
   }
 
@@ -123,11 +113,15 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Veri setini sil'),
-        content: Text('"${d.name}" ve tüm satırları kalıcı olarak silinecek. Emin misin?'),
+        content: Text(
+            '"${d.name}" ve içindeki ${d.rowCount} satır kalıcı olarak silinecek. '
+            'Bu işlem geri alınamaz.'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('İptal')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Vazgeç')),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(backgroundColor: AppColors.danger),
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('Sil'),
           ),
@@ -138,31 +132,13 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
     try {
       await ApiService.deleteDataset(d.id);
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('"${d.name}" silindi.')));
+      DatasetScope.of(context)?.onDatasetGone(d.id);
+      showSnack(context, '"${d.name}" silindi.');
       _refresh();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Silinemedi: $e')));
+      showSnack(context, 'Silinemedi: $e', isError: true);
     }
-  }
-
-  Future<void> _logout() async {
-    await ApiService.logout();
-    // await'ten sonra bu ekran hâlâ ağaçta mı? Değilse context'i kullanmak hatalı olur.
-    if (!mounted) return;
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(builder: (_) => const LoginScreen()),
-      (route) => false,
-    );
-  }
-
-  void _openUsers() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const UsersScreen()),
-    );
   }
 
   @override
@@ -170,121 +146,184 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
     // Rol token'dan okunur. Yetkisi olmayan butonlar hiç çizilmez — backend zaten 403
     // döndürüyor, bu yalnız kullanıcının boşuna denememesi için (arayüz sadeliği).
     final canWrite = ApiService.canWrite;
-    final isAdmin = ApiService.isAdmin;
-    final role = ApiService.currentRole;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Veri Setleri'),
-        actions: [
-          // Rolü sürekli görünür kıl: kullanıcı neden bazı butonları görmediğini anlasın.
-          if (role != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 14),
-              child: Chip(
-                label: Text(roleLabels[role] ?? role, style: const TextStyle(fontSize: 12)),
-                visualDensity: VisualDensity.compact,
-              ),
+    return FutureBuilder<List<Dataset>>(
+      future: _future,
+      builder: (context, snapshot) {
+        final datasets = snapshot.data;
+        final totalRows =
+            datasets?.fold<int>(0, (sum, d) => sum + d.rowCount) ?? 0;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            PageHeader(
+              title: 'Veri setleri',
+              subtitle: datasets == null
+                  ? 'Yükleniyor…'
+                  : '${datasets.length} veri seti · toplam $totalRows satır',
+              actions: [
+                IconButton(
+                  onPressed: _refresh,
+                  icon: const Icon(Icons.refresh),
+                  tooltip: 'Yenile',
+                ),
+                if (canWrite)
+                  OutlinedButton.icon(
+                    onPressed: _seeding ? null : _seedSample,
+                    icon: _seeding
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.science_outlined, size: 18),
+                    label: const Text('Örnek veri'),
+                  ),
+                if (canWrite)
+                  FilledButton.icon(
+                    onPressed: (_uploading || _seeding) ? null : _uploadFile,
+                    icon: _uploading
+                        ? const ButtonSpinner()
+                        : const Icon(Icons.upload_file, size: 18),
+                    label: const Text('Veri seti yükle'),
+                  ),
+              ],
             ),
-          if (isAdmin)
-            IconButton(
-              onPressed: _openUsers,
-              icon: const Icon(Icons.group_outlined),
-              tooltip: 'Kullanıcılar',
-            ),
-          if (canWrite)
-            IconButton(
-              onPressed: _seeding ? null : _seedSample,
-              icon: _seeding
-                  ? const SizedBox(
-                      height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.science_outlined),
-              tooltip: 'Örnek veri ekle',
-            ),
-          IconButton(
-            onPressed: _refresh,
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Yenile',
-          ),
-          IconButton(
-            onPressed: _logout,
-            icon: const Icon(Icons.logout),
-            tooltip: 'Çıkış',
-          ),
-        ],
+            Expanded(child: _list(snapshot, canWrite)),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _list(AsyncSnapshot<List<Dataset>> snapshot, bool canWrite) {
+    if (snapshot.connectionState != ConnectionState.done) {
+      return const LoadingView(message: 'Veri setleri getiriliyor…');
+    }
+    if (snapshot.hasError) {
+      return ErrorView(message: '${snapshot.error}', onRetry: _refresh);
+    }
+
+    final datasets = snapshot.data!;
+    if (datasets.isEmpty) {
+      return EmptyState(
+        icon: Icons.folder_open_outlined,
+        title: 'Henüz veri seti yok',
+        message: canWrite
+            ? 'Bir CSV veya Excel dosyası yükle; kolonlar ve tipleri otomatik algılanır. '
+                'Denemek için örnek veri seti de ekleyebilirsin.'
+            : 'Veri ekleme yetkin yok. Firmandaki bir editör veya yönetici veri seti yüklemeli.',
+        action: canWrite
+            ? FilledButton.icon(
+                onPressed: _uploading ? null : _uploadFile,
+                icon: const Icon(Icons.upload_file, size: 18),
+                label: const Text('Veri seti yükle'),
+              )
+            : null,
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.only(bottom: 12),
+      itemCount: datasets.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 10),
+      itemBuilder: (_, i) => _DatasetCard(
+        dataset: datasets[i],
+        // Her karta paletten sırayla bir renk: liste tek renk bloğu gibi durmasın.
+        color: chartPalette[i % chartPalette.length],
+        canWrite: canWrite,
+        onOpen: () => widget.onOpen(datasets[i]),
+        onRename: () => _rename(datasets[i]),
+        onDelete: () => _delete(datasets[i]),
       ),
-      floatingActionButton: canWrite
-          ? FloatingActionButton.extended(
-              onPressed: (_uploading || _seeding) ? null : _uploadFile,
-              icon: _uploading
-                  ? const SizedBox(
-                      height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.upload_file),
-              label: const Text('Veri seti yükle'),
-            )
-          : null,
-      // FutureBuilder: bir Future'ın durumuna (bekliyor / hata / hazır) göre farklı
-      // widget çizer. C#'ta await + üç duruma göre UI güncellemenin bildirimsel hâli.
-      body: FutureBuilder<List<Dataset>>(
-        future: _future,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text(
-                  'Yüklenemedi: ${snapshot.error}',
-                  style: const TextStyle(color: Colors.red),
-                  textAlign: TextAlign.center,
+    );
+  }
+}
+
+class _DatasetCard extends StatelessWidget {
+  final Dataset dataset;
+  final Color color;
+  final bool canWrite;
+  final VoidCallback onOpen;
+  final VoidCallback onRename;
+  final VoidCallback onDelete;
+
+  const _DatasetCard({
+    required this.dataset,
+    required this.color,
+    required this.canWrite,
+    required this.onOpen,
+    required this.onRename,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    final desc = dataset.description;
+
+    return Card(
+      child: InkWell(
+        onTap: onOpen,
+        hoverColor: AppColors.brand.withValues(alpha: 0.05),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+          child: Row(
+            children: [
+              IconBadge(icon: Icons.table_chart_outlined, color: color),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(dataset.name,
+                        style: t.titleMedium,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${dataset.rowCount} satır'
+                      '${desc != null && desc.isNotEmpty ? " · $desc" : ""}',
+                      style: t.bodySmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
                 ),
               ),
-            );
-          }
-
-          final datasets = snapshot.data!;
-          if (datasets.isEmpty) {
-            return Center(
-              child: Text(
-                  canWrite
-                      ? 'Henüz veri seti yok.\n"Veri seti yükle" ile bir CSV/Excel dosyası ekle.'
-                      : 'Henüz veri seti yok.\nVeri ekleme yetkiniz yok; bir yönetici veri seti yüklemeli.',
-                  textAlign: TextAlign.center),
-            );
-          }
-
-          // Her veri seti bir kart: tıkla → verileri aç; sağdaki menü → yeniden adlandır / sil.
-          return ListView.separated(
-            padding: const EdgeInsets.all(12),
-            itemCount: datasets.length,
-            separatorBuilder: (_, _) => const SizedBox(height: 8),
-            itemBuilder: (_, i) {
-              final d = datasets[i];
-              final desc = d.description;
-              return Card(
-                child: ListTile(
-                  title: Text(d.name),
-                  subtitle: Text('${d.rowCount} satır'
-                      '${desc != null && desc.isNotEmpty ? " · $desc" : ""}'),
-                  onTap: () => _openData(d),
-                  // Yeniden adlandır/sil yalnız Editor ve Admin'e görünür.
-                  trailing: canWrite
-                      ? PopupMenuButton<String>(
-                          tooltip: 'İşlemler',
-                          onSelected: (v) => v == 'rename' ? _rename(d) : _delete(d),
-                          itemBuilder: (_) => const [
-                            PopupMenuItem(value: 'rename', child: Text('Yeniden adlandır')),
-                            PopupMenuItem(value: 'delete', child: Text('Sil')),
-                          ],
-                        )
-                      : null,
+              const SizedBox(width: 12),
+              const Icon(Icons.chevron_right, color: AppColors.muted, size: 20),
+              if (canWrite)
+                PopupMenuButton<String>(
+                  tooltip: 'İşlemler',
+                  icon: const Icon(Icons.more_vert, size: 20),
+                  onSelected: (v) => v == 'rename' ? onRename() : onDelete(),
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(
+                      value: 'rename',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.drive_file_rename_outline, size: 18),
+                        title: Text('Yeniden adlandır'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'delete',
+                      child: ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.delete_outline,
+                            size: 18, color: AppColors.danger),
+                        title: Text('Sil',
+                            style: TextStyle(color: AppColors.danger)),
+                      ),
+                    ),
+                  ],
                 ),
-              );
-            },
-          );
-        },
+            ],
+          ),
+        ),
       ),
     );
   }

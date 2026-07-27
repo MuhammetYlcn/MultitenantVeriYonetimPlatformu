@@ -7,7 +7,8 @@ void main() {
   testWidgets('Açılışta giriş ekranı gösterilir', (WidgetTester tester) async {
     await tester.pumpWidget(const VeriYonetimApp());
 
+    expect(find.text('Tekrar hoş geldin'), findsOneWidget);
     expect(find.text('Giriş yap'), findsOneWidget);
-    expect(find.text('Hesabın yok mu? Kayıt ol'), findsOneWidget);
+    expect(find.text('Firmanı kaydet'), findsOneWidget);
   });
 }
