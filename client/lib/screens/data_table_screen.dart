@@ -94,7 +94,10 @@ class _DataTableScreenState extends State<DataTableScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('Satır eklendi.')));
-      setState(() => _future = _load());
+      // Gövde blok `{}`: ok gövdeli closure atanan Future'ı döndürür, setState bunu reddeder.
+      setState(() {
+        _future = _load();
+      });
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
@@ -133,7 +136,9 @@ class _DataTableScreenState extends State<DataTableScreen> {
             tooltip: 'Panel',
           ),
           IconButton(
-            onPressed: () => setState(() => _future = _load()),
+            onPressed: () => setState(() {
+              _future = _load();
+            }),
             icon: const Icon(Icons.refresh),
             tooltip: 'Yenile',
           ),

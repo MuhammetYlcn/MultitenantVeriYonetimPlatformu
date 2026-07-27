@@ -51,7 +51,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _future = _fetch();
   }
 
-  void _reload() => setState(() => _future = _fetch());
+  // Gövde blok `{}`: ok gövdeli closure atanan Future'ı döndürür, setState bunu reddeder.
+  void _reload() => setState(() {
+        _future = _fetch();
+      });
 
   static String _fmtDate(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';

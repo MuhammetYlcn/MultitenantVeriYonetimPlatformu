@@ -19,7 +19,10 @@ class _UsersScreenState extends State<UsersScreen> {
     _future = ApiService.getUsers();
   }
 
-  void _refresh() => setState(() => _future = ApiService.getUsers());
+  // Gövde blok `{}` olmalı: ok gövdeli closure atanan Future'ı döndürür, setState bunu reddeder.
+  void _refresh() => setState(() {
+        _future = ApiService.getUsers();
+      });
 
   void _snack(String message) {
     if (!mounted) return;

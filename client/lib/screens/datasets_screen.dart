@@ -26,7 +26,12 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
   bool _seeding = false;
   bool _uploading = false;
 
-  void _refresh() => setState(() => _future = ApiService.getDatasets());
+  // DİKKAT: gövde blok `{}` olmalı. `setState(() => _future = ...)` yazımında ok gövdeli
+  // closure atadığı değeri DÖNDÜRÜR; burada dönen şey bir Future olur ve setState bunu
+  // (async işin yanlışlıkla içine konmasını engellemek için) istisna fırlatarak reddeder.
+  void _refresh() => setState(() {
+        _future = ApiService.getDatasets();
+      });
 
   // Gerçek CSV/Excel yükleme: dosya seç → byte'ları uploadDataset'e ver → listeyi tazele.
   Future<void> _uploadFile() async {
