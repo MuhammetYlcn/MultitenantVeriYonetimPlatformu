@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
 import '../api_service.dart';
+import '../web_file_picker.dart';
 import 'data_table_screen.dart';
 import 'login_screen.dart';
 import 'users_screen.dart';
@@ -35,21 +35,9 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
 
   // Gerçek CSV/Excel yükleme: dosya seç → byte'ları uploadDataset'e ver → listeyi tazele.
   Future<void> _uploadFile() async {
-    final result = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['csv', 'xlsx'],
-      withData: true, // web dahil tüm platformlarda dosya byte'larını getir
-    );
-    if (result == null) return; // kullanıcı iptal etti
-    final file = result.files.single;
+    final file = await pickCsvOrExcelFile();
+    if (file == null) return; // kullanıcı iptal etti
     final bytes = file.bytes;
-    if (bytes == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('Dosya okunamadı.')));
-      }
-      return;
-    }
     // Veri seti adını dosya adından türet (uzantıyı at). İsimlendirme/yönetim ayrı adımda.
     final name =
         file.name.replaceAll(RegExp(r'\.(csv|xlsx)$', caseSensitive: false), '');

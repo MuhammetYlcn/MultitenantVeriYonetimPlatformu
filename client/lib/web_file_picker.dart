@@ -1,0 +1,65 @@
+import 'dart:async';
+import 'dart:js_interop';
+import 'dart:typed_data';
+
+import 'package:web/web.dart' as web;
+
+// Seçilen dosya: adı (uzantısı sunucudaki ayrıştırıcı için önemli) + ham içeriği.
+class PickedFile {
+  final String name;
+  final Uint8List bytes;
+
+  PickedFile(this.name, this.bytes);
+}
+
+/// Tarayıcıda CSV/Excel dosyası seçtirir; iptal edilirse null döner.
+///
+/// Neden file_picker paketi değil: file_picker 11.0.2'nin web tarafı oluşturduğu
+/// `<input type="file">` öğesini belgeye EKLEMEDEN `click()` çağırıyor. Chrome,
+/// belgeye bağlı olmayan bir dosya girdisinin click'ini yok sayar; dosya penceresi
+/// hiç açılmaz ve buton çalışmıyormuş gibi görünür. Burada girdi gerçekten
+/// `document.body`'ye ekleniyor (`appendChild`), tıklanıyor ve iş bitince siliniyor.
+Future<PickedFile?> pickCsvOrExcelFile() async {
+  final input = web.HTMLInputElement()
+    ..type = 'file'
+    ..accept = '.csv,.xlsx'
+    ..multiple = false;
+  // Görünmez ama DOM'da: tarayıcının dosya penceresini açması için bağlı olmalı.
+  input.style.display = 'none';
+  web.document.body!.appendChild(input);
+
+  final completer = Completer<PickedFile?>();
+
+  void finish(PickedFile? result) {
+    if (completer.isCompleted) return;
+    if (input.isConnected) input.remove();
+    completer.complete(result);
+  }
+
+  input.addEventListener(
+      'change',
+      ((web.Event _) {
+        final files = input.files;
+        if (files == null || files.length == 0) {
+          finish(null);
+          return;
+        }
+        final file = files.item(0)!;
+        // Dosya içeriği asenkron okunur: FileReader bitince 'load' olayı gelir.
+        final reader = web.FileReader();
+        reader.addEventListener(
+            'load',
+            ((web.Event _) {
+              final buffer = reader.result as JSArrayBuffer;
+              finish(PickedFile(file.name, buffer.toDart.asUint8List()));
+            }).toJS);
+        reader.addEventListener('error', ((web.Event _) => finish(null)).toJS);
+        reader.readAsArrayBuffer(file);
+      }).toJS);
+
+  // Kullanıcı pencereyi kapatırsa 'change' hiç gelmez; 'cancel' olmadan sonsuz beklerdik.
+  input.addEventListener('cancel', ((web.Event _) => finish(null)).toJS);
+
+  input.click();
+  return completer.future;
+}
