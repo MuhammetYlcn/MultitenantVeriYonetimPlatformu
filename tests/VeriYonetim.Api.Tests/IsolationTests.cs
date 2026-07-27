@@ -131,7 +131,7 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
         var member = await LoginAsync("uye@rbacb.com");
         var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
-            member.Token, new { email = "davetsiz@rbacb.com", password = "Sifre123!", role = "User" }));
+            member.Token, new { email = "davetsiz@rbacb.com", password = "Sifre123!", role = "Viewer" }));
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         _output.WriteLine("✓ Kanıt: Yetkisiz (Admin olmayan) kullanıcı kullanıcı eklemeye çalışınca 403 Forbidden döndü.");
@@ -218,5 +218,123 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         _output.WriteLine("✓ Kanıt: Viewer rolü GET /api/datasets'i 200 ile okuyabildi.");
+    }
+
+    // ---- Rol değiştirme (PUT /api/users/{id}/role) ----
+
+    // Testlerde kullanıcı ekleyip rolünü öğrenmek için ortak yardımcı.
+    private async Task<UserRow> CreateUserAsync(string adminToken, string email, string role)
+    {
+        var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
+            adminToken, new { email, password = "Sifre123!", role }));
+        response.EnsureSuccessStatusCode();
+
+        var users = (await (await _client.SendAsync(
+            WithToken(HttpMethod.Get, "/api/users", adminToken)))
+            .Content.ReadFromJsonAsync<List<UserRow>>())!;
+        return users.Single(u => u.Email == email);
+    }
+
+    [Fact(DisplayName = "Admin bir kullanıcının rolünü değiştirebilir ve değişiklik kalıcıdır (200)")]
+    public async Task Admin_CanChangeUserRole()
+    {
+        var admin = await RegisterTenantAsync("rol-a", "admin@rola.com");
+        var viewer = await CreateUserAsync(admin.Token, "viewer@rola.com", "Viewer");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Put,
+            $"/api/users/{viewer.Id}/role", admin.Token, new { role = "Editor" }));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // Kalıcılık: ayrı bir istekte veritabanından okunan rol de değişmiş olmalı.
+        var users = (await (await _client.SendAsync(
+            WithToken(HttpMethod.Get, "/api/users", admin.Token)))
+            .Content.ReadFromJsonAsync<List<UserRow>>())!;
+        Assert.Equal("Editor", users.Single(u => u.Id == viewer.Id).Role);
+        _output.WriteLine("✓ Kanıt: Admin, Viewer'ı Editor yaptı (200) ve yeni rol ayrı bir istekte de Editor olarak okundu.");
+    }
+
+    [Fact(DisplayName = "Son yöneticinin rolü düşürülemez (409 Conflict)")]
+    public async Task LastAdmin_CannotBeDemoted()
+    {
+        var admin = await RegisterTenantAsync("rol-son", "admin@rolson.com");
+        // Tenant'ta başka kullanıcı var ama Admin yok → admin tek yönetici.
+        await CreateUserAsync(admin.Token, "editor@rolson.com", "Editor");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Put,
+            $"/api/users/{admin.UserId}/role", admin.Token, new { role = "Editor" }));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        _output.WriteLine("✓ Kanıt: Tenant'ın tek yöneticisini düşürme denemesi 409 Conflict ile reddedildi (kullanıcı yönetimi kilitlenmiyor).");
+    }
+
+    [Fact(DisplayName = "İkinci bir yönetici atandıktan sonra ilk yönetici düşürülebilir (200)")]
+    public async Task Admin_CanBeDemoted_WhenAnotherAdminExists()
+    {
+        var admin = await RegisterTenantAsync("rol-iki", "admin@roliki.com");
+        var ikinci = await CreateUserAsync(admin.Token, "admin2@roliki.com", "Admin");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Put,
+            $"/api/users/{admin.UserId}/role", admin.Token, new { role = "Viewer" }));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotEqual(Guid.Empty, ikinci.Id);
+        _output.WriteLine("✓ Kanıt: Tenant'ta ikinci bir Admin varken ilk Admin Viewer'a düşürülebildi (son-Admin kuralı yalnız gerçekten son Admin'i korur).");
+    }
+
+    [Fact(DisplayName = "Admin olmayan kullanıcı rol değiştiremez (403 Forbidden)")]
+    public async Task NonAdmin_CannotChangeRole()
+    {
+        var admin = await RegisterTenantAsync("rol-yetki", "admin@rolyetki.com");
+        var editor = await CreateUserAsync(admin.Token, "editor@rolyetki.com", "Editor");
+        var editorToken = (await LoginAsync("editor@rolyetki.com")).Token;
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Put,
+            $"/api/users/{editor.Id}/role", editorToken, new { role = "Admin" }));
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        _output.WriteLine("✓ Kanıt: Editor rolü kendini Admin yapmayı denedi ve 403 Forbidden aldı (yetki yükseltme engellendi).");
+    }
+
+    [Fact(DisplayName = "Başka tenant'ın kullanıcısının rolü değiştirilemez (404 Not Found)")]
+    public async Task CrossTenant_RoleChange_Returns404()
+    {
+        var tenantA = await RegisterTenantAsync("rol-capraz-a", "admin@rolcaprazA.com");
+        var tenantB = await RegisterTenantAsync("rol-capraz-b", "admin@rolcaprazB.com");
+
+        // A'nın Admin'i, B'nin kullanıcısının rolünü değiştirmeye çalışıyor.
+        var response = await _client.SendAsync(WithToken(HttpMethod.Put,
+            $"/api/users/{tenantB.UserId}/role", tenantA.Token, new { role = "Viewer" }));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        _output.WriteLine("✓ Kanıt: A tenant'ının Admin'i B tenant'ının kullanıcısına erişemedi — global query filter sayesinde 404 döndü (varlığı bile sızmıyor).");
+    }
+
+    [Fact(DisplayName = "Geçersiz rol adı reddedilir (400 Bad Request)")]
+    public async Task InvalidRole_IsRejected()
+    {
+        var admin = await RegisterTenantAsync("rol-gecersiz", "admin@rolgecersiz.com");
+        var viewer = await CreateUserAsync(admin.Token, "viewer@rolgecersiz.com", "Viewer");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Put,
+            $"/api/users/{viewer.Id}/role", admin.Token, new { role = "SuperAdmin" }));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        _output.WriteLine("✓ Kanıt: Tanımsız rol ('SuperAdmin') doğrulama katmanında 400 ile reddedildi.");
+    }
+
+    [Fact(DisplayName = "Başka tenant'ta kayıtlı e-postayla kullanıcı eklenemez (409 Conflict)")]
+    public async Task CreateUser_WithEmailFromAnotherTenant_Returns409()
+    {
+        // E-posta global benzersiz olduğundan, mükerrer kontrolü tenant sınırını aşmalı;
+        // aksi hâlde veritabanı unique index'i patlar ve istemci 500 alırdı.
+        await RegisterTenantAsync("mail-capraz-a", "ortak@capraz.com");
+        var tenantB = await RegisterTenantAsync("mail-capraz-b", "admin@caprazB.com");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
+            tenantB.Token, new { email = "ortak@capraz.com", password = "Sifre123!", role = "Viewer" }));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        _output.WriteLine("✓ Kanıt: Başka tenant'ta kayıtlı e-postayla kullanıcı ekleme 500 yerine düzgün 409 Conflict döndü.");
     }
 }

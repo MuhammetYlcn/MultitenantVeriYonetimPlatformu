@@ -3,6 +3,7 @@ import 'package:file_picker/file_picker.dart';
 import '../api_service.dart';
 import 'data_table_screen.dart';
 import 'login_screen.dart';
+import 'users_screen.dart';
 
 // Giriş sonrası ana ekran: tenant'ın veri setlerini bir tabloda listeler.
 class DatasetsScreen extends StatefulWidget {
@@ -164,20 +165,49 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
     );
   }
 
+  void _openUsers() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const UsersScreen()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Rol token'dan okunur. Yetkisi olmayan butonlar hiç çizilmez — backend zaten 403
+    // döndürüyor, bu yalnız kullanıcının boşuna denememesi için (arayüz sadeliği).
+    final canWrite = ApiService.canWrite;
+    final isAdmin = ApiService.isAdmin;
+    final role = ApiService.currentRole;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Veri Setleri'),
         actions: [
-          IconButton(
-            onPressed: _seeding ? null : _seedSample,
-            icon: _seeding
-                ? const SizedBox(
-                    height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.science_outlined),
-            tooltip: 'Örnek veri ekle',
-          ),
+          // Rolü sürekli görünür kıl: kullanıcı neden bazı butonları görmediğini anlasın.
+          if (role != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 14),
+              child: Chip(
+                label: Text(roleLabels[role] ?? role, style: const TextStyle(fontSize: 12)),
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+          if (isAdmin)
+            IconButton(
+              onPressed: _openUsers,
+              icon: const Icon(Icons.group_outlined),
+              tooltip: 'Kullanıcılar',
+            ),
+          if (canWrite)
+            IconButton(
+              onPressed: _seeding ? null : _seedSample,
+              icon: _seeding
+                  ? const SizedBox(
+                      height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.science_outlined),
+              tooltip: 'Örnek veri ekle',
+            ),
           IconButton(
             onPressed: _refresh,
             icon: const Icon(Icons.refresh),
@@ -190,14 +220,16 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: (_uploading || _seeding) ? null : _uploadFile,
-        icon: _uploading
-            ? const SizedBox(
-                height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
-            : const Icon(Icons.upload_file),
-        label: const Text('Veri seti yükle'),
-      ),
+      floatingActionButton: canWrite
+          ? FloatingActionButton.extended(
+              onPressed: (_uploading || _seeding) ? null : _uploadFile,
+              icon: _uploading
+                  ? const SizedBox(
+                      height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.upload_file),
+              label: const Text('Veri seti yükle'),
+            )
+          : null,
       // FutureBuilder: bir Future'ın durumuna (bekliyor / hata / hazır) göre farklı
       // widget çizer. C#'ta await + üç duruma göre UI güncellemenin bildirimsel hâli.
       body: FutureBuilder<List<Dataset>>(
@@ -221,9 +253,11 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
 
           final datasets = snapshot.data!;
           if (datasets.isEmpty) {
-            return const Center(
+            return Center(
               child: Text(
-                  'Henüz veri seti yok.\n"Veri seti yükle" ile bir CSV/Excel dosyası ekle.',
+                  canWrite
+                      ? 'Henüz veri seti yok.\n"Veri seti yükle" ile bir CSV/Excel dosyası ekle.'
+                      : 'Henüz veri seti yok.\nVeri ekleme yetkiniz yok; bir yönetici veri seti yüklemeli.',
                   textAlign: TextAlign.center),
             );
           }
@@ -242,14 +276,17 @@ class _DatasetsScreenState extends State<DatasetsScreen> {
                   subtitle: Text('${d.rowCount} satır'
                       '${desc != null && desc.isNotEmpty ? " · $desc" : ""}'),
                   onTap: () => _openData(d),
-                  trailing: PopupMenuButton<String>(
-                    tooltip: 'İşlemler',
-                    onSelected: (v) => v == 'rename' ? _rename(d) : _delete(d),
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'rename', child: Text('Yeniden adlandır')),
-                      PopupMenuItem(value: 'delete', child: Text('Sil')),
-                    ],
-                  ),
+                  // Yeniden adlandır/sil yalnız Editor ve Admin'e görünür.
+                  trailing: canWrite
+                      ? PopupMenuButton<String>(
+                          tooltip: 'İşlemler',
+                          onSelected: (v) => v == 'rename' ? _rename(d) : _delete(d),
+                          itemBuilder: (_) => const [
+                            PopupMenuItem(value: 'rename', child: Text('Yeniden adlandır')),
+                            PopupMenuItem(value: 'delete', child: Text('Sil')),
+                          ],
+                        )
+                      : null,
                 ),
               );
             },

@@ -139,11 +139,15 @@ class _DataTableScreenState extends State<DataTableScreen> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _addRow,
-        icon: const Icon(Icons.add),
-        label: const Text('Satır ekle'),
-      ),
+      // Viewer yalnız okur → satır ekleme butonu hiç gösterilmez. Bu sadece arayüz
+      // sadeliği için; asıl koruma backend'de ([Authorize(Roles="Editor,Admin")] → 403).
+      floatingActionButton: ApiService.canWrite
+          ? FloatingActionButton.extended(
+              onPressed: _addRow,
+              icon: const Icon(Icons.add),
+              label: const Text('Satır ekle'),
+            )
+          : null,
       body: FutureBuilder<_TableData>(
         future: _future,
         builder: (context, snap) {

@@ -95,6 +95,41 @@ class AggBucket {
       );
 }
 
+// Tenant'ın bir kullanıcısı (GET /api/users yanıtı).
+class AppUser {
+  final String id;
+  final String email;
+  final String role; // "Viewer" | "Editor" | "Admin"
+  final DateTime? createdAt;
+
+  AppUser({
+    required this.id,
+    required this.email,
+    required this.role,
+    this.createdAt,
+  });
+
+  factory AppUser.fromJson(Map<String, dynamic> j) => AppUser(
+        id: j['id'] as String,
+        email: j['email'] as String,
+        role: j['role'] as String,
+        createdAt: DateTime.tryParse(j['createdAt'] as String? ?? ''),
+      );
+}
+
+// Rollerin arayüzde görünen Türkçe adları (kodda İngilizce kalır).
+const Map<String, String> roleLabels = {
+  'Viewer': 'İzleyici',
+  'Editor': 'Editör',
+  'Admin': 'Yönetici',
+};
+
+const Map<String, String> roleDescriptions = {
+  'Viewer': 'Yalnız görüntüler',
+  'Editor': 'Veri ekler/düzenler',
+  'Admin': 'Veri + kullanıcı yönetimi',
+};
+
 // Backend ile tüm HTTP iletişimi tek yerde. Statik: iskelet için basit; ileride
 // gerçek bir state yönetimine (provider vb.) taşınabilir. C# HttpClient sarmalayıcısı gibi.
 class ApiService {
@@ -117,6 +152,41 @@ class ApiService {
   static bool get isLoggedIn => _token != null;
 
   static Map<String, String> get _authHeader => {'Authorization': 'Bearer $_token'};
+
+  // Giriş yapan kullanıcının rolü — token'ın payload'ından okunur (sunucuya sormadan).
+  // Yalnız ARAYÜZ içindir: yetkisiz butonları gizlemek için. Gerçek koruma backend'de
+  // ([Authorize(Roles=...)]) — istemcideki bu kontrol atlatılsa bile sunucu 403 döner.
+  static String? get currentRole => _claim([
+        'role',
+        'http://schemas.microsoft.com/ws/2008/06/identity/claims/role',
+      ]);
+
+  static String? get currentUserId => _claim(['sub', 'nameid']);
+  static String? get currentEmail => _claim(['email']);
+
+  static bool get isAdmin => currentRole == 'Admin';
+  // Editor ve Admin yazabilir; Viewer yalnız okur.
+  static bool get canWrite => currentRole == 'Editor' || currentRole == 'Admin';
+
+  // Token payload'ından ilk bulunan claim'i döndürür (claim adı sürüme göre kısa ad ya da
+  // uzun Microsoft URI'si olabilir; ikisini de deneriz).
+  static String? _claim(List<String> names) {
+    final token = _token;
+    if (token == null) return null;
+    try {
+      final parts = token.split('.');
+      if (parts.length != 3) return null;
+      final payload = jsonDecode(
+              utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))))
+          as Map<String, dynamic>;
+      for (final n in names) {
+        final v = payload[n];
+        if (v is String) return v;
+        if (v is List && v.isNotEmpty) return v.first.toString();
+      }
+    } catch (_) {/* bozuk token → null */}
+    return null;
+  }
 
   // Token'ları seçilen depoya yaz + belleğe al; diğer depodaki kalıntıyı sil (mod değişebilir).
   static void _saveTokens(String access, String refresh, {required bool remember}) {
@@ -239,6 +309,42 @@ class ApiService {
       body: jsonEncode({'email': email, 'password': password}),
     );
     _storeAuth(res, rememberMe);
+  }
+
+  // GET /api/users — bu tenant'ın kullanıcıları (izolasyonu global query filter sağlar).
+  static Future<List<AppUser>> getUsers() async {
+    await _ensureFreshToken();
+    final res = await http.get(Uri.parse('$baseUrl/api/users'), headers: _authHeader);
+    if (res.statusCode == 200) {
+      return (jsonDecode(res.body) as List<dynamic>)
+          .map((e) => AppUser.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+    throw ApiException(_message(res));
+  }
+
+  // POST /api/users — yeni kullanıcı (yalnız Admin). Tenant token'dan gelir, istemci seçemez.
+  static Future<void> createUser(
+      {required String email, required String password, required String role}) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/users'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode({'email': email, 'password': password, 'role': role}),
+    );
+    if (res.statusCode != 201) throw ApiException(_message(res));
+  }
+
+  // PUT /api/users/{id}/role — rol değiştirme (yalnız Admin). Son yönetici düşürülmek
+  // istenirse backend 409 döner; mesajı olduğu gibi kullanıcıya gösteririz.
+  static Future<void> updateUserRole(String userId, String role) async {
+    await _ensureFreshToken();
+    final res = await http.put(
+      Uri.parse('$baseUrl/api/users/$userId/role'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode({'role': role}),
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
   }
 
   // GET /api/datasets — token ile korumalı; yalnız bu tenant'ın setleri (query filter).

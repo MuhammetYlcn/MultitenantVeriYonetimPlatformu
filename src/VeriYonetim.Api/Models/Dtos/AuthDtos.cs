@@ -32,6 +32,13 @@ public record CreateUserRequest(
         ErrorMessage = "Rol 'Viewer', 'Editor' veya 'Admin' olmalı.")]
     string Role);
 
+// Var olan bir kullanıcının rolünü değiştirmek için (yalnız Admin).
+public record UpdateUserRoleRequest(
+    [Required(ErrorMessage = "Rol gerekli.")]
+    [RegularExpression("^(Viewer|Editor|Admin)$",
+        ErrorMessage = "Rol 'Viewer', 'Editor' veya 'Admin' olmalı.")]
+    string Role);
+
 public record AuthResponse(Guid UserId, Guid TenantId, string Email, string Role,
     string Token, string RefreshToken);
 
