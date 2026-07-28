@@ -134,6 +134,10 @@ class _DashboardPageState extends State<DashboardPage> {
     _metricCol ??= numCols.isNotEmpty ? numCols.first.name : null;
     _dateCol ??= dateCols.isNotEmpty ? dateCols.first.name : null;
 
+    // Sayısal kolonu olmayan veri setinde toplam/ortalama seçili kalamaz: seçici de
+    // "Toplam" yazıp grafik adet hesaplarsa ekran kendi kendisiyle çelişir.
+    if (numCols.isEmpty) _op = 'count';
+
     // Seçili tarih aralığı → filtre koşulları (tarih kolonu varsa).
     final filters = <String>[];
     if (_dateCol != null && _start != null) {
@@ -282,13 +286,9 @@ class _DashboardPageState extends State<DashboardPage> {
 
   // Ölçü seçimi + tarih aralığı: panonun bütün grafiklerini birlikte etkiler.
   Widget _controlBar(_DashboardData d) {
-    final textCols = d.schema
-        .where((c) => c.type == 'text')
-        .map((c) => c.name)
-        .toList();
-    final groupChoices = textCols.isNotEmpty
-        ? textCols
-        : d.schema.map((c) => c.name).toList();
+    // Gruplama her kolona açık: veri hep "şehir"e benzemez, kimi sette anlamlı ayrım
+    // bir kod/durum kolonunda, kimisinde sayısal bir kademede olur.
+    final groupChoices = d.schema.map((c) => c.name).toList();
     final numCols =
         d.schema.where((c) => c.type == 'number').map((c) => c.name).toList();
 
@@ -314,19 +314,20 @@ class _DashboardPageState extends State<DashboardPage> {
             _Picker<String>(
               label: 'Ölçü',
               value: _op,
-              items: _opLabels,
+              // Sayısal kolon yoksa toplanacak bir şey de yok: yalnız "Adet" sunulur.
+              items: numCols.isEmpty
+                  ? {'count': _opLabels['count']!}
+                  : _opLabels,
               onChanged: (v) {
                 _op = v!;
                 _reload();
               },
             ),
-            if (_needsMetric)
+            if (numCols.isNotEmpty && _needsMetric)
               _Picker<String>(
                 label: 'Kolon',
                 value: _metricCol,
                 items: {for (final c in numCols) c: c},
-                // Sayısal kolonu olmayan veri setinde toplam/ortalama anlamsız.
-                emptyHint: 'sayısal kolon yok',
                 onChanged: (v) {
                   _metricCol = v;
                   _reload();
@@ -416,6 +417,13 @@ class _DashboardPageState extends State<DashboardPage> {
         ChartDatum(b.key ?? '—', b.value ?? b.count.toDouble()),
     ];
 
+    // Her grupta tek satır varsa gruplama aslında hiçbir şeyi toplamamıştır: kolon
+    // benzersiz değerler taşıyor (ölçüm, kimlik, açıklama…). Grafik teknik olarak
+    // çizilir ama okunacak bir şey söylemez — kullanıcıyı boş yere düşündürmemek için
+    // durum açıkça yazılır.
+    final everyRowItsOwnGroup =
+        d.distribution.length > 1 && d.distribution.every((b) => b.count == 1);
+
     return SectionCard(
       title: '${_groupCol ?? '—'} bazında ${_opLabels[_effectiveOp]!.toLowerCase()}',
       subtitle: 'En yüksek $_limit grup · $_measureLabel',
@@ -438,9 +446,22 @@ class _DashboardPageState extends State<DashboardPage> {
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
       ),
-      child: _donut
-          ? AppDonutChart(data: data, centerLabel: _measureLabel)
-          : AppBarChart(data: data, valueLabel: _measureLabel),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (everyRowItsOwnGroup) ...[
+            _Notice(
+              '“$_groupCol” kolonunda her satır ayrı bir gruba düşüyor, '
+              'yani bu kolona göre özetlemek bir şey toplamıyor. '
+              'Grupla listesinden değerleri tekrar eden bir kolon seç.',
+            ),
+            const SizedBox(height: 16),
+          ],
+          _donut
+              ? AppDonutChart(data: data, centerLabel: _measureLabel)
+              : AppBarChart(data: data, valueLabel: _measureLabel),
+        ],
+      ),
     );
   }
 
@@ -464,6 +485,36 @@ class _DashboardPageState extends State<DashboardPage> {
         },
       ),
       child: AppLineChart(data: data, valueLabel: _measureLabel),
+    );
+  }
+}
+
+/// Grafiğin hatalı değil ama yanıltıcı olabileceği durumlarda gösterilen açıklama şeridi.
+class _Notice extends StatelessWidget {
+  final String message;
+
+  const _Notice(this.message);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withValues(alpha: 0.10),
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.35)),
+        borderRadius: BorderRadius.circular(AppRadius.control),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.info_outline, size: 18, color: AppColors.warning),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(message,
+                style: Theme.of(context).textTheme.bodySmall),
+          ),
+        ],
+      ),
     );
   }
 }
