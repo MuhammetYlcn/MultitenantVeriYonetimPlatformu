@@ -222,4 +222,156 @@ public class DatasetImportServiceTests
         Assert.Empty(result.ValidRows);                   // satır tümüyle elendi
         Assert.Equal(2, result.Errors.Count);             // iki hücre de raporlandı
     }
+
+    // ---- Ayraç sezme ----
+    // Türkçe Windows Excel "CSV olarak kaydet" dediğinde ";" yazar. Sezilmezse dosya
+    // TEK kolon olarak okunur, üstelik hata da vermez: veri sessizce kullanılamaz olur.
+
+    [Fact]
+    public async Task ParseCsv_SemicolonDelimited_SplitsColumns()
+    {
+        var table = await _sut.ParseCsvAsync(
+            ToStream("musteri;tarih;tutar\nAhmet;27.07.2026;1.500,50"));
+
+        Assert.Equal(new[] { "musteri", "tarih", "tutar" }, table.Headers);
+        Assert.Equal(new[] { "Ahmet", "27.07.2026", "1.500,50" }, table.Rows[0]);
+    }
+
+    [Fact]
+    public async Task ParseCsv_TabDelimited_SplitsColumns()
+    {
+        var table = await _sut.ParseCsvAsync(ToStream("ad\tyas\nAli\t30"));
+
+        Assert.Equal(new[] { "ad", "yas" }, table.Headers);
+        Assert.Equal(new[] { "Ali", "30" }, table.Rows[0]);
+    }
+
+    [Fact]
+    public async Task ParseCsv_CommaStillDefault_WhenNoOtherDelimiter()
+    {
+        // Virgül ayraçlı dosyada davranış değişmemeli (gerileme koruması).
+        var table = await _sut.ParseCsvAsync(ToStream("ad,yas\nAli,30"));
+
+        Assert.Equal(new[] { "ad", "yas" }, table.Headers);
+        Assert.Equal(new[] { "Ali", "30" }, table.Rows[0]);
+    }
+
+    // ---- Türkçe biçimli sayı ve tarih ----
+
+    [Fact]
+    public void DetectSchema_TurkishDecimal_IsNumber()
+    {
+        var schema = _sut.DetectSchema(OneColumn("tutar", "1.500,50", "2.750,00", "980,25"));
+        Assert.Equal("number", schema[0].Type);
+    }
+
+    [Fact]
+    public void DetectSchema_TurkishDate_IsDate()
+    {
+        var schema = _sut.DetectSchema(OneColumn("tarih", "27.07.2026", "28.07.2026"));
+        Assert.Equal("date", schema[0].Type);
+    }
+
+    [Fact]
+    public void DetectSchema_SlashDate_IsDate()
+    {
+        var schema = _sut.DetectSchema(OneColumn("tarih", "27/07/2026", "01/12/2026"));
+        Assert.Equal("date", schema[0].Type);
+    }
+
+    [Fact]
+    public void ValidateRows_TurkishDecimal_ConvertsToCorrectValue()
+    {
+        var table = Table(new[] { "tutar" }, new[] { "1.500,50" });
+        var schema = new[] { new ColumnSchema("tutar", "number") };
+
+        var result = _sut.ValidateRows(table, schema);
+
+        Assert.Equal(1500.50m, result.ValidRows[0]["tutar"]);
+    }
+
+    [Fact]
+    public void ValidateRows_TurkishDate_ConvertsDayBeforeMonth()
+    {
+        // 27.07 → 27 Temmuz. Ay-gün sırasıyla okunsaydı 27. ay diye elenirdi.
+        var table = Table(new[] { "tarih" }, new[] { "27.07.2026" });
+        var schema = new[] { new ColumnSchema("tarih", "date") };
+
+        var result = _sut.ValidateRows(table, schema);
+
+        Assert.Equal(new DateTime(2026, 7, 27), result.ValidRows[0]["tarih"]);
+    }
+
+    [Fact]
+    public void ValidateRows_AmbiguousDate_ReadAsDayFirst()
+    {
+        // "03.04.2026" tek başına belirsiz; ürün Türkçe olduğundan gün-ay sırası esas.
+        var table = Table(new[] { "tarih" }, new[] { "03.04.2026" });
+        var schema = new[] { new ColumnSchema("tarih", "date") };
+
+        var result = _sut.ValidateRows(table, schema);
+
+        Assert.Equal(new DateTime(2026, 4, 3), result.ValidRows[0]["tarih"]);
+    }
+
+    // ---- "1.500" tuzağı ----
+    // Bu değer iki türlü okunabilir: 1,5 (nokta ondalık) ya da 1500 (Türkçe binlik).
+    // Ayırt edici: noktadan sonra TAM üç hane varsa binlik ayıracıdır.
+
+    [Fact]
+    public void DetectSchema_DotWithThreeDigits_ReadAsThousands()
+    {
+        var table = OneColumn("tutar", "1.500", "12.345");
+        var schema = _sut.DetectSchema(table);
+        Assert.Equal("number", schema[0].Type);
+
+        var result = _sut.ValidateRows(table, new[] { new ColumnSchema("tutar", "number") });
+
+        Assert.Equal(1500m, result.ValidRows[0]["tutar"]);
+        Assert.Equal(12345m, result.ValidRows[1]["tutar"]);
+    }
+
+    [Fact]
+    public void DetectSchema_DotWithTwoDigits_StaysDecimal()
+    {
+        var table = OneColumn("oran", "1.25", "3.50");
+        var result = _sut.ValidateRows(table, new[] { new ColumnSchema("oran", "number") });
+
+        Assert.Equal(1.25m, result.ValidRows[0]["oran"]);
+    }
+
+    [Fact]
+    public void DetectSchema_MixedTurkishAndPlain_StaysText()
+    {
+        // Kolon tutarsızsa zorlamak yerine metin kalır — yanlış sayı üretmekten iyidir.
+        var schema = _sut.DetectSchema(OneColumn("karisik", "1.500,50", "abc"));
+        Assert.Equal("text", schema[0].Type);
+    }
+
+    // ---- Excel hücre tipi ----
+
+    [Fact]
+    public async Task ParseExcel_RealDateCell_IsDetectedAsDate()
+    {
+        // Gerçek tarih hücresi bölgesel biçimde görünür ("27.07.2026"), ama hücrenin
+        // KENDİ tipi tarihtir. Görüntü metnini tahmin etmek yerine o tip kullanılır.
+        using var wb = new XLWorkbook();
+        var ws = wb.AddWorksheet("Sayfa1");
+        ws.Cell(1, 1).Value = "tarih";
+        ws.Cell(2, 1).Value = new DateTime(2026, 7, 27);
+        ws.Cell(3, 1).Value = new DateTime(2026, 8, 1);
+        ws.Column(1).Style.DateFormat.Format = "dd.MM.yyyy";
+
+        using var ms = new MemoryStream();
+        wb.SaveAs(ms);
+        ms.Position = 0;
+
+        var table = await _sut.ParseExcelAsync(ms);
+        var schema = _sut.DetectSchema(table);
+
+        Assert.Equal("date", schema[0].Type);
+
+        var result = _sut.ValidateRows(table, schema);
+        Assert.Equal(new DateTime(2026, 7, 27), result.ValidRows[0]["tarih"]);
+    }
 }
