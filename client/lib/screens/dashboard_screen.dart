@@ -44,22 +44,51 @@ class DashboardPage extends StatefulWidget {
   State<DashboardPage> createState() => _DashboardPageState();
 }
 
+/// Tek bir sayısal kolonun uçtan uca özeti. Yalnız "boyutsuz" veri setlerinde
+/// (gruplanacak metin/tarih kolonu olmayan ölçüm tabloları) kullanılır.
+class _ColumnSummary {
+  final String name;
+  final double? total;
+  final double? average;
+  final double? min;
+  final double? max;
+
+  _ColumnSummary({
+    required this.name,
+    required this.total,
+    required this.average,
+    required this.min,
+    required this.max,
+  });
+}
+
 // Panonun ihtiyaç duyduğu her şeyi tek seferde toplayan sonuç nesnesi.
 class _DashboardData {
   final List<SchemaColumn> schema;
   final int rowCount;
+
+  /// Gruplanacak bir boyut (metin/tarih kolonu) var mı? Yoksa pano gruplama
+  /// düzeninden çıkıp kolon özetine geçer.
+  final bool hasDimension;
+
+  // Boyutlu düzen (gruplama) alanları.
   final double? total;
   final double? average;
   final List<AggBucket> distribution;
   final List<AggBucket> series;
 
+  // Boyutsuz düzen (kolon özeti) alanı.
+  final List<_ColumnSummary> columns;
+
   _DashboardData({
     required this.schema,
     required this.rowCount,
-    required this.total,
-    required this.average,
-    required this.distribution,
-    required this.series,
+    required this.hasDimension,
+    this.total,
+    this.average,
+    this.distribution = const [],
+    this.series = const [],
+    this.columns = const [],
   });
 }
 
@@ -127,6 +156,12 @@ class _DashboardPageState extends State<DashboardPage> {
     final numCols = schema.where((c) => c.type == 'number').toList();
     final dateCols = schema.where((c) => c.type == 'date').toList();
 
+    // Gruplanacak bir boyut var mı? Metin ve tarih kolonları tekrar eden değerler
+    // taşır, sayısal ölçümler taşımaz. Hiç boyut yoksa (sıcaklık/nem/basınç gibi saf
+    // ölçüm tabloları) "neye göre grupladık" sorusunun anlamlı bir cevabı yoktur —
+    // pano gruplamayı bırakıp her kolonu tek tek özetler.
+    final hasDimension = textCols.isNotEmpty || dateCols.isNotEmpty;
+
     // İlk yüklemede varsayılanları şemadan seç; kullanıcı sonra değiştirebilir.
     _groupCol ??= textCols.isNotEmpty
         ? textCols.first.name
@@ -151,6 +186,19 @@ class _DashboardPageState extends State<DashboardPage> {
     final countBuckets =
         await ApiService.aggregate(id, op: 'count', filters: filters);
     final rowCount = countBuckets.isNotEmpty ? countBuckets.first.count : 0;
+
+    if (!hasDimension) {
+      // Her sayısal kolon için dört özet; kolonlar birbirini beklemesin diye paralel.
+      final columns = await Future.wait(
+        numCols.map((c) => _summarize(id, c.name, filters)),
+      );
+      return _DashboardData(
+        schema: schema,
+        rowCount: rowCount,
+        hasDimension: false,
+        columns: columns,
+      );
+    }
 
     // KPI: sayısal metrik varsa genel toplam ve ortalama (gruplamasız).
     double? total, average;
@@ -193,10 +241,31 @@ class _DashboardPageState extends State<DashboardPage> {
     return _DashboardData(
       schema: schema,
       rowCount: rowCount,
+      hasDimension: true,
       total: total,
       average: average,
       distribution: distribution,
       series: series,
+    );
+  }
+
+  // Bir kolonun toplam/ortalama/en düşük/en yüksek değerleri — dördü de gruplamasız.
+  Future<_ColumnSummary> _summarize(
+      String datasetId, String column, List<String> filters) async {
+    Future<double?> one(String op) async {
+      final b = await ApiService.aggregate(datasetId,
+          op: op, metric: column, filters: filters);
+      return b.isNotEmpty ? b.first.value : null;
+    }
+
+    final results =
+        await Future.wait([one('sum'), one('avg'), one('min'), one('max')]);
+    return _ColumnSummary(
+      name: column,
+      total: results[0],
+      average: results[1],
+      min: results[2],
+      max: results[3],
     );
   }
 
@@ -268,6 +337,31 @@ class _DashboardPageState extends State<DashboardPage> {
     }
 
     final d = snapshot.data!;
+
+    // Boyutsuz veri seti: gruplama denemek yerine her kolonu tek tek özetle.
+    if (!d.hasDimension) {
+      return ListView(
+        padding: const EdgeInsets.only(bottom: 12),
+        children: [
+          _Notice(
+            'Bu veri setinde gruplanacak bir kolon yok — bütün kolonlar sayısal '
+            'ölçüm. Onun yerine her kolonun kendi özeti veriliyor.',
+            icon: Icons.straighten,
+          ),
+          const SizedBox(height: 16),
+          StatTile(
+            label: 'Satır',
+            value: formatNumber(d.rowCount.toDouble()),
+            hint: 'tüm veri',
+            icon: Icons.table_rows_outlined,
+            color: AppColors.brand,
+          ),
+          const SizedBox(height: 16),
+          _columnSummaries(d),
+        ],
+      );
+    }
+
     return ListView(
       padding: const EdgeInsets.only(bottom: 12),
       children: [
@@ -281,6 +375,30 @@ class _DashboardPageState extends State<DashboardPage> {
           _seriesCard(d),
         ],
       ],
+    );
+  }
+
+  // Her sayısal kolon için bir kart: toplam / ortalama / en düşük / en yüksek.
+  Widget _columnSummaries(_DashboardData d) {
+    return LayoutBuilder(
+      builder: (context, c) {
+        final perRow = c.maxWidth >= 1000 ? 3 : (c.maxWidth >= 640 ? 2 : 1);
+        final width = (c.maxWidth - (perRow - 1) * 14) / perRow;
+        return Wrap(
+          spacing: 14,
+          runSpacing: 14,
+          children: [
+            for (var i = 0; i < d.columns.length; i++)
+              SizedBox(
+                width: width,
+                child: _ColumnCard(
+                  summary: d.columns[i],
+                  color: chartPalette[i % chartPalette.length],
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 
@@ -311,8 +429,12 @@ class _DashboardPageState extends State<DashboardPage> {
                 _reload();
               },
             ),
+            // "Hesapla [Toplam] [tutar]" tek bir cümle gibi okunmalı. Önceden ikinci
+            // seçicinin etiketi "Kolon"du; Grupla da bir kolon seçtiğinden hangisinin
+            // ölçülen değer olduğu anlaşılmıyordu (kullanıcı Grupla'yı değiştirip
+            // KPI'ların değişmesini bekliyordu).
             _Picker<String>(
-              label: 'Ölçü',
+              label: 'Hesapla',
               value: _op,
               // Sayısal kolon yoksa toplanacak bir şey de yok: yalnız "Adet" sunulur.
               items: numCols.isEmpty
@@ -325,7 +447,7 @@ class _DashboardPageState extends State<DashboardPage> {
             ),
             if (numCols.isNotEmpty && _needsMetric)
               _Picker<String>(
-                label: 'Kolon',
+                // Etiketsiz: bir önceki seçicinin devamı olarak okunur.
                 value: _metricCol,
                 items: {for (final c in numCols) c: c},
                 onChanged: (v) {
@@ -489,11 +611,12 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 }
 
-/// Grafiğin hatalı değil ama yanıltıcı olabileceği durumlarda gösterilen açıklama şeridi.
+/// Panonun neden böyle davrandığını anlatan açıklama şeridi (hata değil, gerekçe).
 class _Notice extends StatelessWidget {
   final String message;
+  final IconData icon;
 
-  const _Notice(this.message);
+  const _Notice(this.message, {this.icon = Icons.info_outline});
 
   @override
   Widget build(BuildContext context) {
@@ -507,7 +630,7 @@ class _Notice extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.info_outline, size: 18, color: AppColors.warning),
+          Icon(icon, size: 18, color: AppColors.warning),
           const SizedBox(width: 10),
           Expanded(
             child: Text(message,
@@ -519,18 +642,81 @@ class _Notice extends StatelessWidget {
   }
 }
 
+/// Boyutsuz veri setlerinde tek bir sayısal kolonun dört özeti.
+class _ColumnCard extends StatelessWidget {
+  final _ColumnSummary summary;
+  final Color color;
+
+  const _ColumnCard({required this.summary, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(summary.name.toUpperCase(),
+                      style: t.labelSmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
+                ),
+                IconBadge(
+                    icon: Icons.straighten, color: color, size: 30),
+              ],
+            ),
+            const SizedBox(height: 14),
+            // Ortalama en çok bakılan değer olduğundan iri yazılır, diğerleri altında.
+            Text(formatNumber(summary.average),
+                style: t.headlineMedium,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
+            Text('ortalama', style: t.bodySmall?.copyWith(color: color)),
+            const SizedBox(height: 16),
+            const Divider(),
+            const SizedBox(height: 12),
+            _row(context, 'Toplam', summary.total),
+            _row(context, 'En düşük', summary.min),
+            _row(context, 'En yüksek', summary.max),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _row(BuildContext context, String label, double? value) => Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Row(
+          children: [
+            Expanded(
+                child: Text(label,
+                    style: Theme.of(context).textTheme.bodySmall)),
+            Text(formatNumber(value),
+                style: const TextStyle(
+                    fontSize: 13.5, fontWeight: FontWeight.w600)),
+          ],
+        ),
+      );
+}
+
 /// Grafik ayarları için küçük, etiketli açılır liste. Material'ın varsayılan
 /// DropdownButtonFormField'ı bir form alanı kadar yer kaplıyordu; bu kompakt sürüm
 /// tek satıra "etiket: değer" olarak sığar.
 class _Picker<T> extends StatelessWidget {
-  final String label;
+  /// Boş bırakılırsa yalnız değer görünür — bir önceki seçicinin devamı olarak okunur.
+  final String? label;
   final T? value;
   final Map<T, String> items;
   final ValueChanged<T?> onChanged;
   final String? emptyHint;
 
   const _Picker({
-    required this.label,
+    this.label,
     required this.value,
     required this.items,
     required this.onChanged,
@@ -540,7 +726,7 @@ class _Picker<T> extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.only(left: 12, right: 6),
+      padding: EdgeInsets.only(left: label == null ? 8 : 12, right: 6),
       decoration: BoxDecoration(
         color: AppColors.surfaceAlt,
         borderRadius: BorderRadius.circular(AppRadius.control),
@@ -549,8 +735,10 @@ class _Picker<T> extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(label, style: Theme.of(context).textTheme.labelMedium),
-          const SizedBox(width: 8),
+          if (label != null) ...[
+            Text(label!, style: Theme.of(context).textTheme.labelMedium),
+            const SizedBox(width: 8),
+          ],
           if (items.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
