@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 
@@ -31,13 +33,52 @@ String formatNumber(double? v) {
   return neg ? '-$body' : body;
 }
 
-/// Eksen etiketleri için kısaltılmış biçim: 7100 → "7,1 B", 2500000 → "2,5 Mn".
-String formatCompact(double v) {
-  final a = v.abs();
-  if (a >= 1e9) return '${formatNumber(v / 1e9)} Mr';
-  if (a >= 1e6) return '${formatNumber(v / 1e6)} Mn';
-  if (a >= 1e4) return '${formatNumber(v / 1e3)} B';
-  return formatNumber(v);
+/// Bir eksenin tavanı, aralık adımı ve etiket biçimi.
+///
+/// Ham en yüksek değeri doğrudan tavan yapmak iki soruna yol açıyordu: etiketler
+/// yuvarlaksız çıkıyordu ("6.957,5") ve her etiket kendi büyüklüğüne göre birim
+/// seçtiğinden aynı eksende "10 B" ile "8.000" yan yana düşüyordu. Bu yüzden tavan
+/// 1/2/2,5/5 × 10ⁿ adımlarına yuvarlanır ve birim eksenin tamamı için TEK kez seçilir.
+class AxisScale {
+  final double max;
+  final double interval;
+  final String Function(double) format;
+
+  const AxisScale(this.max, this.interval, this.format);
+
+  factory AxisScale.forMax(double rawMax) {
+    if (rawMax <= 0) return AxisScale(1, 0.25, formatNumber);
+
+    // ~4 aralık hedefle; kaba adımı "güzel" bir sayıya yuvarla.
+    final rough = rawMax / 4;
+    final mag = math.pow(10, (math.log(rough) / math.ln10).floor()).toDouble();
+    final norm = rough / mag;
+    final step = (norm <= 1
+            ? 1.0
+            : norm <= 2
+                ? 2.0
+                : norm <= 2.5
+                    ? 2.5
+                    : norm <= 5
+                        ? 5.0
+                        : 10.0) *
+        mag;
+
+    // En yüksek çubuk/nokta tavana yapışmasın diye tam denk gelirse bir adım eklenir.
+    var max = (rawMax / step).ceil() * step;
+    if (max <= rawMax) max += step;
+
+    // Birim tavana göre seçilir → eksendeki bütün etiketler aynı birimde okunur.
+    final format = max >= 1e9
+        ? (double v) => '${formatNumber(v / 1e9)} Mr'
+        : max >= 1e6
+            ? (double v) => '${formatNumber(v / 1e6)} Mn'
+            : max >= 1e5
+                ? (double v) => '${formatNumber(v / 1e3)} B'
+                : formatNumber;
+
+    return AxisScale(max, step, format);
+  }
 }
 
 /// Grafiklerin ortak yerleşimi: sabit yükseklik + veri yoksa açıklayıcı boşluk.
@@ -67,9 +108,11 @@ class _ChartFrame extends StatelessWidget {
 }
 
 // Izgara: yalnız yatay çizgiler, kart kenarıyla aynı sönük renkte — veri öne çıksın.
-FlGridData _grid() => FlGridData(
+// Aralık eksen ölçeğiyle aynı olmalı, yoksa çizgiler etiketlerle hizalanmaz.
+FlGridData _grid(double interval) => FlGridData(
       show: true,
       drawVerticalLine: false,
+      horizontalInterval: interval,
       getDrawingHorizontalLine: (_) =>
           const FlLine(color: AppColors.border, strokeWidth: 1),
     );
@@ -94,10 +137,9 @@ class AppBarChart extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final maxV = data.fold<double>(
-        0, (a, d) => d.value.abs() > a ? d.value.abs() : a);
-    // Üstte biraz boşluk bırak: en yüksek çubuk tavana yapışmasın.
-    final maxY = maxV == 0 ? 1.0 : maxV * 1.18;
+    final maxV =
+        data.fold<double>(0, (a, d) => d.value.abs() > a ? d.value.abs() : a);
+    final axis = AxisScale.forMax(maxV);
     // Çok grup varsa etiketler yan yana sığmaz → eğik yazılır.
     final tilt = data.length > 6;
 
@@ -107,8 +149,8 @@ class AppBarChart extends StatelessWidget {
       child: BarChart(
         BarChartData(
           alignment: BarChartAlignment.spaceAround,
-          maxY: maxY,
-          gridData: _grid(),
+          maxY: axis.max,
+          gridData: _grid(axis.interval),
           borderData: FlBorderData(show: false),
           barTouchData: BarTouchData(
             touchTooltipData: BarTouchTooltipData(
@@ -149,14 +191,12 @@ class AppBarChart extends StatelessWidget {
               sideTitles: SideTitles(
                 showTitles: true,
                 reservedSize: 52,
-                getTitlesWidget: (value, meta) =>
-                    value > maxY * 0.98 // tavandaki etiketi bastır
-                        ? const SizedBox.shrink()
-                        : Padding(
-                            padding: const EdgeInsets.only(right: 8),
-                            child: Text(formatCompact(value),
-                                style: _axisStyle, textAlign: TextAlign.right),
-                          ),
+                interval: axis.interval,
+                getTitlesWidget: (value, meta) => Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: Text(axis.format(value),
+                      style: _axisStyle, textAlign: TextAlign.right),
+                ),
               ),
             ),
             bottomTitles: AxisTitles(
@@ -208,7 +248,7 @@ class AppBarChart extends StatelessWidget {
                     ),
                     backDrawRodData: BackgroundBarChartRodData(
                       show: true,
-                      toY: maxY,
+                      toY: axis.max,
                       color: AppColors.surfaceAlt.withValues(alpha: 0.55),
                     ),
                   ),
@@ -240,10 +280,12 @@ class AppLineChart extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final maxV = data.fold<double>(0, (a, d) => d.value > a ? d.value : a);
-    final minV = data.fold<double>(
-        double.infinity, (a, d) => d.value < a ? d.value : a);
-    final low = data.isEmpty ? 0.0 : (minV > 0 ? 0.0 : minV * 1.1);
-    final high = maxV == 0 ? 1.0 : maxV * 1.15;
+    final minV =
+        data.fold<double>(double.infinity, (a, d) => d.value < a ? d.value : a);
+    // Değerler eksiye inmiyorsa taban sıfırdır — büyüklükler göz kararı karşılaştırılabilsin.
+    final negative = data.isNotEmpty && minV < 0;
+    final axis = AxisScale.forMax(negative ? maxV - minV : maxV);
+    final low = negative ? minV * 1.1 : 0.0;
 
     // En fazla ~6 tarih etiketi göster; gerisi atlanır.
     final step = (data.length / 6).ceil().clamp(1, 999);
@@ -254,8 +296,8 @@ class AppLineChart extends StatelessWidget {
       child: LineChart(
         LineChartData(
           minY: low,
-          maxY: high,
-          gridData: _grid(),
+          maxY: negative ? low + axis.max : axis.max,
+          gridData: _grid(axis.interval),
           borderData: FlBorderData(show: false),
           lineTouchData: LineTouchData(
             touchTooltipData: LineTouchTooltipData(
@@ -298,9 +340,10 @@ class AppLineChart extends StatelessWidget {
               sideTitles: SideTitles(
                 showTitles: true,
                 reservedSize: 52,
+                interval: axis.interval,
                 getTitlesWidget: (value, meta) => Padding(
                   padding: const EdgeInsets.only(right: 8),
-                  child: Text(formatCompact(value),
+                  child: Text(axis.format(value),
                       style: _axisStyle, textAlign: TextAlign.right),
                 ),
               ),
