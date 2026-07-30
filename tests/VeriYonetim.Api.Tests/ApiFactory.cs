@@ -5,6 +5,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using VeriYonetim.Api.Data;
+using VeriYonetim.Api.Services;
 
 namespace VeriYonetim.Api.Tests;
 
@@ -16,6 +17,13 @@ namespace VeriYonetim.Api.Tests;
 /// </summary>
 public class ApiFactory : WebApplicationFactory<Program>
 {
+    /// <summary>
+    /// Testlerdeki platform yöneticisi kimliği. Makinedeki appsettings.Development.json'a
+    /// bağlı kalmamak için burada sabitlenir — testler her ortamda aynı davranır.
+    /// </summary>
+    public const string PlatformAdminEmail = "platform-test@veriyonetim.local";
+    public const string PlatformAdminPassword = "PlatformSifre123!";
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.ConfigureAppConfiguration((context, config) =>
@@ -25,17 +33,30 @@ public class ApiFactory : WebApplicationFactory<Program>
 
             config.AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:DefaultConnection"] = csb.ConnectionString
+                ["ConnectionStrings:DefaultConnection"] = csb.ConnectionString,
+                ["PlatformAdmin:Email"] = PlatformAdminEmail,
+                ["PlatformAdmin:Password"] = PlatformAdminPassword
             });
         });
     }
 
-    /// <summary>Her testin temiz veriyle başlaması için tabloları boşaltır.</summary>
+    /// <summary>
+    /// Her testin temiz veriyle başlaması için tabloları boşaltır. Platform tabloları
+    /// da temizlenir (denetim kayıtları testler arasında sızmasın), ardından platform
+    /// yöneticisi yeniden tohumlanır — aksi hâlde tohumlama yalnız açılışta çalıştığı
+    /// için ilk testten sonra platform girişi yapılamazdı.
+    /// </summary>
     public async Task ResetDatabaseAsync()
     {
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         await db.Database.ExecuteSqlRawAsync(
-            """TRUNCATE TABLE "Datasets", "RefreshTokens", "Users", "Tenants" CASCADE""");
+            """
+            TRUNCATE TABLE "Datasets", "RefreshTokens", "AccountTokens", "Users", "Tenants",
+                           "PlatformAdmins", "PlatformAuditLogs" CASCADE
+            """);
+
+        var platformAuth = scope.ServiceProvider.GetRequiredService<IPlatformAuthService>();
+        await platformAuth.EnsureSeedAdminAsync();
     }
 }

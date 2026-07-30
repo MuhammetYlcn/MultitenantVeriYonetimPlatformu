@@ -17,6 +17,10 @@ public interface IAuthService
 
 public class AuthService : IAuthService
 {
+    // Askıya alınmış firma için tek tip mesaj (giriş ve yenilemede aynı).
+    private const string SuspendedMessage =
+        "Firmanızın erişimi askıya alınmış. Lütfen platform yöneticisiyle iletişime geçin.";
+
     private readonly AppDbContext _db;
     private readonly ITokenService _tokenService;
     private readonly IConfiguration _config;
@@ -86,6 +90,12 @@ public class AuthService : IAuthService
         if (user is null || !BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
             return new AuthResult(false, "E-posta veya şifre hatalı.");
 
+        // Firma platform yöneticisi tarafından askıya alınmışsa kimse giriş yapamaz.
+        // Kimlik doğrulamasından SONRA kontrol edilir: aksi hâlde yanlış şifre girenler
+        // de bu mesajı görüp hangi firmaların askıda olduğunu öğrenebilirdi.
+        if (!user.Tenant.IsActive)
+            return new AuthResult(false, SuspendedMessage);
+
         var refreshRaw = CreateRefreshToken(user);
         await _db.SaveChangesAsync();
 
@@ -99,6 +109,7 @@ public class AuthService : IAuthService
         var stored = await _db.RefreshTokens
             .IgnoreQueryFilters()
             .Include(r => r.User)
+            .ThenInclude(u => u.Tenant)
             .FirstOrDefaultAsync(r => r.TokenHash == hash);
 
         if (stored is null)
@@ -118,6 +129,12 @@ public class AuthService : IAuthService
 
         if (stored.ExpiresAt < DateTime.UtcNow)
             return new AuthResult(false, "Refresh token süresi dolmuş, yeniden giriş yapın.");
+
+        // Askı yalnız girişte değil YENİLEMEDE de kontrol edilmeli: aksi hâlde askıya
+        // alınmadan önce giriş yapmış bir kullanıcı, refresh token'ı süresince (7 gün)
+        // sessizce token yenileyip çalışmaya devam ederdi.
+        if (!stored.User.Tenant.IsActive)
+            return new AuthResult(false, SuspendedMessage);
 
         // Rotation: eski token iptal, yeni çift üretilir.
         stored.RevokedAt = DateTime.UtcNow;

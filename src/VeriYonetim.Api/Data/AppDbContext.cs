@@ -23,6 +23,11 @@ public class AppDbContext : DbContext
     public DbSet<Dataset> Datasets => Set<Dataset>();
     public DbSet<DatasetColumn> DatasetColumns => Set<DatasetColumn>();
     public DbSet<DatasetRow> DatasetRows => Set<DatasetRow>();
+    public DbSet<AccountToken> AccountTokens => Set<AccountToken>();
+
+    // Platform katmanı: tenant'ların üstünde durur, bu yüzden global query filter YOK.
+    public DbSet<PlatformAdmin> PlatformAdmins => Set<PlatformAdmin>();
+    public DbSet<PlatformAuditLog> PlatformAuditLogs => Set<PlatformAuditLog>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -33,6 +38,30 @@ public class AppDbContext : DbContext
             tenant.Property(t => t.Name).HasMaxLength(200);
             tenant.Property(t => t.Slug).HasMaxLength(100);
             tenant.Property(t => t.SchemaName).HasMaxLength(63); // PostgreSQL tanımlayıcı limiti
+
+            // Varsayılan AÇIK. Bunu burada bildirmek şart: yalnızca C#'taki
+            // "= true" başlatıcısı olsa migration üreticisi onu görmez ve kolonu
+            // defaultValue: false ile ekler — bu da var olan tüm firmaları
+            // askıya alınmış hâle düşürürdü.
+            tenant.Property(t => t.IsActive).HasDefaultValue(true);
+        });
+
+        // Platform yöneticisi ve denetim kaydı BİLİNÇLİ olarak filtresizdir: bunlar
+        // tenant'ların üstündeki işletmeci katmanı, bir tenant'a ait değiller.
+        modelBuilder.Entity<PlatformAdmin>(admin =>
+        {
+            admin.HasIndex(a => a.Email).IsUnique();
+            admin.Property(a => a.Email).HasMaxLength(320);
+        });
+
+        modelBuilder.Entity<PlatformAuditLog>(log =>
+        {
+            log.Property(l => l.PlatformAdminEmail).HasMaxLength(320);
+            log.Property(l => l.Action).HasMaxLength(50);
+            log.Property(l => l.TargetTenantName).HasMaxLength(200);
+
+            // En yeni kayıt en üstte listelendiği için tarihe göre indeks.
+            log.HasIndex(l => l.CreatedAt);
         });
 
         modelBuilder.Entity<User>(user =>
@@ -54,6 +83,23 @@ public class AppDbContext : DbContext
             // User filtreli, RefreshToken filtresiz olamaz — refresh isteği token'sız
             // geldiğinden tenant context yok; sorgular bilinçli IgnoreQueryFilters kullanır.
             token.HasQueryFilter(t => t.User.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<AccountToken>(token =>
+        {
+            token.HasIndex(t => t.TokenHash).IsUnique();
+            token.Property(t => t.TokenHash).HasMaxLength(64);
+            token.Property(t => t.Purpose).HasMaxLength(20);
+            token.Property(t => t.Email).HasMaxLength(320);
+            token.Property(t => t.Role).HasMaxLength(50);
+
+            // RefreshToken ile aynı gerekçe: token'ı doğrulayan istek GİRİŞ ÖNCESİ
+            // gelir (davet edilen kişinin henüz oturumu yoktur), yani tenant context
+            // yoktur. Filtre burada işe yaramaz; token'ın kendisi zaten hangi
+            // tenant'a ait olduğunu taşır. Admin'in listeleme sorguları filtreye
+            // ihtiyaç duyduğundan filtre yine de tanımlanır, doğrulama tarafı
+            // bilinçli olarak IgnoreQueryFilters kullanır.
+            token.HasQueryFilter(t => t.TenantId == _tenantContext.TenantId);
         });
 
         modelBuilder.Entity<Dataset>(dataset =>

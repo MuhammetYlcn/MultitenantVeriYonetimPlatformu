@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // Clipboard — bağlantıyı panoya kopyalamak için
 import '../api_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/ui.dart';
@@ -41,10 +42,11 @@ class _UsersPageState extends State<UsersPage> {
     }
   }
 
-  // Yeni kullanıcı: e-posta + şifre + rol. Tenant token'dan gelir, burada seçilmez.
-  Future<void> _addUser() async {
+  // Kullanıcı DAVET et: yalnız e-posta + rol. Şifre alanı bilinçli olarak YOK —
+  // şifreyi kullanıcı, davet bağlantısını açtığında kendisi belirler. Böylece Admin
+  // hiçbir aşamada başkasının şifresini bilmez.
+  Future<void> _inviteUser() async {
     final emailController = TextEditingController();
-    final passwordController = TextEditingController();
     var role = 'Viewer';
 
     final ok = await showDialog<bool>(
@@ -52,12 +54,35 @@ class _UsersPageState extends State<UsersPage> {
       builder: (ctx) => StatefulBuilder(
         // Diyalogun içindeki rol seçimi değişince yalnız diyalog yeniden çizilsin.
         builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('Kullanıcı ekle'),
+          title: const Text('Kullanıcı davet et'),
           content: SizedBox(
             width: 400,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.surfaceAlt,
+                    borderRadius: BorderRadius.circular(AppRadius.control),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.lock_outline,
+                          size: 17, color: AppColors.muted),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Şifreyi kullanıcı kendisi belirler. Siz yalnızca bir '
+                          'davet bağlantısı üretirsiniz.',
+                          style: Theme.of(ctx).textTheme.bodySmall,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
                 TextField(
                   controller: emailController,
                   autofocus: true,
@@ -65,16 +90,6 @@ class _UsersPageState extends State<UsersPage> {
                   decoration: const InputDecoration(
                     labelText: 'E-posta',
                     prefixIcon: Icon(Icons.alternate_email, size: 18),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                TextField(
-                  controller: passwordController,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Şifre',
-                    helperText: 'En az 8 karakter',
-                    prefixIcon: Icon(Icons.lock_outline, size: 18),
                   ),
                 ),
                 const SizedBox(height: 20),
@@ -100,27 +115,124 @@ class _UsersPageState extends State<UsersPage> {
                 child: const Text('Vazgeç')),
             FilledButton(
                 onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('Ekle')),
+                child: const Text('Davet oluştur')),
           ],
         ),
       ),
     );
 
     final email = emailController.text.trim();
-    final password = passwordController.text;
     emailController.dispose();
-    passwordController.dispose();
-    if (ok != true || email.isEmpty || password.isEmpty) return;
+    if (ok != true || email.isEmpty) return;
 
     try {
-      await ApiService.createUser(email: email, password: password, role: role);
+      final link = await ApiService.inviteUser(email: email, role: role);
       if (!mounted) return;
-      showSnack(context, '$email eklendi (${roleLabels[role]}).');
+      await _showLink(link);
+      if (!mounted) return;
       _refresh();
     } catch (e) {
       if (!mounted) return;
       showSnack(context, '$e', isError: true);
     }
+  }
+
+  // Var olan bir kullanıcı için şifre sıfırlama bağlantısı üretir. Admin yeni şifreyi
+  // GÖRMEZ; yalnızca tek kullanımlık bağlantıyı kullanıcıya iletir.
+  Future<void> _resetPassword(AppUser user) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Şifre sıfırlama bağlantısı'),
+        content: Text(
+          '${user.email} için tek kullanımlık bir bağlantı üretilecek. '
+          'Yeni şifreyi kullanıcı kendisi belirleyecek — siz görmeyeceksiniz.\n\n'
+          'Bağlantı 2 saat geçerlidir ve kullanılınca kullanıcının açık '
+          'oturumları kapanır.',
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Vazgeç')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Bağlantı üret')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      final link = await ApiService.createPasswordReset(user.id);
+      if (!mounted) return;
+      await _showLink(link);
+    } catch (e) {
+      if (!mounted) return;
+      showSnack(context, '$e', isError: true);
+    }
+  }
+
+  // Üretilen bağlantıyı gösterir. E-posta gönderimi (SMTP) kapsam dışı olduğundan
+  // bağlantı Admin'e ekranda verilir; Admin bunu kullanıcıya kendi kanalından iletir.
+  // Bağlantı YALNIZCA burada bir kez görünür — sunucuda yalnız özeti saklanıyor.
+  Future<void> _showLink(AccountLink link) async {
+    final url = link.url(Uri.base.origin);
+    final isInvite = link.purpose == 'Invite';
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(isInvite ? 'Davet bağlantısı hazır' : 'Sıfırlama bağlantısı hazır'),
+        content: SizedBox(
+          width: 460,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                isInvite
+                    ? '${link.email} adresine iletin. Kullanıcı bu bağlantıdan '
+                        'şifresini belirleyip hesabını açacak.'
+                    : '${link.email} adresine iletin. Kullanıcı bu bağlantıdan '
+                        'yeni şifresini belirleyecek.',
+                style: Theme.of(ctx).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 14),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceAlt,
+                  borderRadius: BorderRadius.circular(AppRadius.control),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: SelectableText(url,
+                    style: const TextStyle(fontSize: 12.5, height: 1.5)),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Bu bağlantı tek kullanımlıktır ve yalnız şimdi görünür — '
+                'sunucuda saklanmaz.',
+                style: Theme.of(ctx).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Kapat')),
+          FilledButton.icon(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: url));
+              Navigator.pop(ctx);
+              showSnack(context, 'Bağlantı panoya kopyalandı.');
+            },
+            icon: const Icon(Icons.copy, size: 16),
+            label: const Text('Kopyala'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -146,9 +258,9 @@ class _UsersPageState extends State<UsersPage> {
                   tooltip: 'Yenile',
                 ),
                 FilledButton.icon(
-                  onPressed: _addUser,
+                  onPressed: _inviteUser,
                   icon: const Icon(Icons.person_add_alt, size: 18),
-                  label: const Text('Kullanıcı ekle'),
+                  label: const Text('Kullanıcı davet et'),
                 ),
               ],
             ),
@@ -172,11 +284,11 @@ class _UsersPageState extends State<UsersPage> {
       return EmptyState(
         icon: Icons.group_outlined,
         title: 'Kullanıcı yok',
-        message: 'Firmana çalışma arkadaşı ekleyerek başlayabilirsin.',
+        message: 'Firmana çalışma arkadaşı davet ederek başlayabilirsin.',
         action: FilledButton.icon(
-          onPressed: _addUser,
+          onPressed: _inviteUser,
           icon: const Icon(Icons.person_add_alt, size: 18),
-          label: const Text('Kullanıcı ekle'),
+          label: const Text('Kullanıcı davet et'),
         ),
       );
     }
@@ -190,6 +302,7 @@ class _UsersPageState extends State<UsersPage> {
         user: users[i],
         isSelf: users[i].id == currentUserId,
         onChangeRole: (r) => _changeRole(users[i], r),
+        onResetPassword: () => _resetPassword(users[i]),
       ),
     );
   }
@@ -199,11 +312,13 @@ class _UserCard extends StatelessWidget {
   final AppUser user;
   final bool isSelf;
   final ValueChanged<String> onChangeRole;
+  final VoidCallback onResetPassword;
 
   const _UserCard({
     required this.user,
     required this.isSelf,
     required this.onChangeRole,
+    required this.onResetPassword,
   });
 
   static String _fmtDate(DateTime d) =>
@@ -267,6 +382,14 @@ class _UserCard extends StatelessWidget {
             ),
             const SizedBox(width: 12),
             RoleBadge(role: user.role),
+            // Şifre sıfırlama yalnız BAĞLANTI üretir; kendi şifreni buradan değil
+            // profil menüsündeki "Şifre değiştir"den değiştirirsin.
+            if (!isSelf)
+              IconButton(
+                tooltip: 'Şifre sıfırlama bağlantısı üret',
+                icon: const Icon(Icons.key_outlined, size: 19),
+                onPressed: onResetPassword,
+              ),
             PopupMenuButton<String>(
               tooltip: 'Rolü değiştir',
               icon: const Icon(Icons.edit_outlined, size: 19),

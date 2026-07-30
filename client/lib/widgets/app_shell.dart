@@ -28,6 +28,7 @@ class AppShell extends StatelessWidget {
   final int index;
   final ValueChanged<int> onSelect;
   final VoidCallback onLogout;
+  final VoidCallback onChangePassword;
 
   /// Üst çubukta gösterilen konum bilgisi ("Veri setleri / Satışlar 2026").
   final List<String> breadcrumb;
@@ -39,6 +40,7 @@ class AppShell extends StatelessWidget {
     required this.index,
     required this.onSelect,
     required this.onLogout,
+    required this.onChangePassword,
     required this.child,
     this.breadcrumb = const [],
   });
@@ -60,11 +62,16 @@ class AppShell extends StatelessWidget {
                       index: index,
                       onSelect: onSelect,
                       onLogout: onLogout,
+                      onChangePassword: onChangePassword,
                     ),
                     Expanded(
                       child: Column(
                         children: [
-                          _TopBar(breadcrumb: breadcrumb, showLogout: false, onLogout: onLogout),
+                          _TopBar(
+                              breadcrumb: breadcrumb,
+                              showLogout: false,
+                              onLogout: onLogout,
+                              onChangePassword: onChangePassword),
                           Expanded(child: _content(child)),
                         ],
                       ),
@@ -73,7 +80,11 @@ class AppShell extends StatelessWidget {
                 )
               : Column(
                   children: [
-                    _TopBar(breadcrumb: breadcrumb, showLogout: true, onLogout: onLogout),
+                    _TopBar(
+                        breadcrumb: breadcrumb,
+                        showLogout: true,
+                        onLogout: onLogout,
+                        onChangePassword: onChangePassword),
                     Expanded(child: _content(child)),
                   ],
                 ),
@@ -113,12 +124,14 @@ class _Sidebar extends StatelessWidget {
   final int index;
   final ValueChanged<int> onSelect;
   final VoidCallback onLogout;
+  final VoidCallback onChangePassword;
 
   const _Sidebar({
     required this.destinations,
     required this.index,
     required this.onSelect,
     required this.onLogout,
+    required this.onChangePassword,
   });
 
   @override
@@ -167,7 +180,8 @@ class _Sidebar extends StatelessWidget {
           // Alt blok: kim olarak girildiği + çıkış
           Padding(
             padding: const EdgeInsets.all(12),
-            child: _UserCard(onLogout: onLogout),
+            child: _UserCard(
+                onLogout: onLogout, onChangePassword: onChangePassword),
           ),
         ],
       ),
@@ -227,7 +241,8 @@ class _NavItem extends StatelessWidget {
 
 class _UserCard extends StatelessWidget {
   final VoidCallback onLogout;
-  const _UserCard({required this.onLogout});
+  final VoidCallback onChangePassword;
+  const _UserCard({required this.onLogout, required this.onChangePassword});
 
   @override
   Widget build(BuildContext context) {
@@ -257,6 +272,12 @@ class _UserCard extends StatelessWidget {
                       style: TextStyle(fontSize: 11, color: RoleBadge.colorOf(role))),
               ],
             ),
+          ),
+          IconButton(
+            onPressed: onChangePassword,
+            icon: const Icon(Icons.key_outlined, size: 18),
+            tooltip: 'Şifre değiştir',
+            visualDensity: VisualDensity.compact,
           ),
           IconButton(
             onPressed: onLogout,
@@ -296,11 +317,13 @@ class _TopBar extends StatelessWidget {
   final List<String> breadcrumb;
   final bool showLogout;
   final VoidCallback onLogout;
+  final VoidCallback onChangePassword;
 
   const _TopBar({
     required this.breadcrumb,
     required this.showLogout,
     required this.onLogout,
+    required this.onChangePassword,
   });
 
   @override
@@ -322,12 +345,19 @@ class _TopBar extends StatelessWidget {
           // Konum izi: son parça vurgulu, öncekiler sönük.
           Expanded(child: _Breadcrumb(parts: breadcrumb)),
           if (role != null) RoleBadge(role: role, compact: true),
-          if (showLogout)
+          // Dar ekranda sol menü yok → şifre ve çıkış üst çubuğa taşınır.
+          if (showLogout) ...[
+            IconButton(
+              onPressed: onChangePassword,
+              icon: const Icon(Icons.key_outlined, size: 19),
+              tooltip: 'Şifre değiştir',
+            ),
             IconButton(
               onPressed: onLogout,
               icon: const Icon(Icons.logout, size: 19),
               tooltip: 'Çıkış yap',
             ),
+          ],
         ],
       ),
     );

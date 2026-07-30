@@ -11,10 +11,12 @@ namespace VeriYonetim.Api.Controllers;
 public class AuthController : ControllerBase
 {
     private readonly IAuthService _authService;
+    private readonly IAccountTokenService _accountTokens;
 
-    public AuthController(IAuthService authService)
+    public AuthController(IAuthService authService, IAccountTokenService accountTokens)
     {
         _authService = authService;
+        _accountTokens = accountTokens;
     }
 
     [HttpPost("register")]
@@ -47,7 +49,25 @@ public class AuthController : ControllerBase
         return Ok(result.Data);
     }
 
-    [Authorize]
+    // Kullanıcı kendi şifresini değiştirir. Hedef istekten DEĞİL token'dan gelir:
+    // kimse başkasının şifresini değiştiremez. Başarılı olduğunda o kullanıcının
+    // tüm refresh token'ları iptal edilir → eski oturumlar kapanır.
+    [Authorize(Policy = AuthPolicies.TenantUser)]
+    [HttpPost("change-password")]
+    public async Task<IActionResult> ChangePassword(ChangePasswordRequest request)
+    {
+        var userId = Guid.TryParse(User.FindFirstValue("sub"), out var id) ? id : Guid.Empty;
+
+        var result = await _accountTokens.ChangePasswordAsync(userId, request);
+
+        return result.Success
+            ? Ok(new { message = result.Message })
+            : Problem(statusCode: result.StatusCode, title: result.Message);
+    }
+
+    // Tenant kullanıcısının kendi bilgisi — platform token'ı buraya da girmez
+    // (tenant_id claim'i şart), yoksa tenantId'si boş anlamsız bir yanıt dönerdi.
+    [Authorize(Policy = AuthPolicies.TenantUser)]
     [HttpGet("me")]
     public IActionResult Me()
     {

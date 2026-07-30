@@ -117,6 +117,60 @@ class AppUser {
       );
 }
 
+// Davet / şifre sıfırlama bağlantısı. Ham token YALNIZCA burada, bir kez görünür;
+// sunucuda yalnız SHA-256 özeti saklanır.
+class AccountLink {
+  final String token;
+  final String email;
+  final String? role;
+  final DateTime? expiresAt;
+  final String purpose; // "Invite" | "PasswordReset"
+
+  AccountLink({
+    required this.token,
+    required this.email,
+    this.role,
+    this.expiresAt,
+    required this.purpose,
+  });
+
+  factory AccountLink.fromJson(Map<String, dynamic> j) => AccountLink(
+        token: j['token'] as String,
+        email: j['email'] as String,
+        role: j['role'] as String?,
+        expiresAt: DateTime.tryParse(j['expiresAt'] as String? ?? ''),
+        purpose: j['purpose'] as String,
+      );
+
+  // Kullanıcıya iletilecek tam adres. Flutter web varsayılan olarak hash yönlendirme
+  // kullandığından yol '#/davet/<token>' biçiminde olur.
+  String url(String origin) => '$origin/#/davet/$token';
+}
+
+// Bağlantı açıldığında ekranda ne yazacağını belirleyen bilgi.
+class AccountLinkInfo {
+  final String purpose;
+  final String email;
+  final String? role;
+  final String tenantName;
+
+  AccountLinkInfo({
+    required this.purpose,
+    required this.email,
+    this.role,
+    required this.tenantName,
+  });
+
+  bool get isInvite => purpose == 'Invite';
+
+  factory AccountLinkInfo.fromJson(Map<String, dynamic> j) => AccountLinkInfo(
+        purpose: j['purpose'] as String,
+        email: j['email'] as String,
+        role: j['role'] as String?,
+        tenantName: j['tenantName'] as String,
+      );
+}
+
 // Rollerin arayüzde görünen Türkçe adları (kodda İngilizce kalır).
 const Map<String, String> roleLabels = {
   'Viewer': 'İzleyici',
@@ -323,16 +377,65 @@ class ApiService {
     throw ApiException(_message(res));
   }
 
-  // POST /api/users — yeni kullanıcı (yalnız Admin). Tenant token'dan gelir, istemci seçemez.
-  static Future<void> createUser(
-      {required String email, required String password, required String role}) async {
+  // POST /api/users/invite — kullanıcı DAVET eder (yalnız Admin). Şifre alanı YOK:
+  // Admin başkasının şifresini bilmemeli. Dönen tek kullanımlık bağlantı kullanıcıya
+  // iletilir, şifreyi o belirler.
+  static Future<AccountLink> inviteUser(
+      {required String email, required String role}) async {
     await _ensureFreshToken();
     final res = await http.post(
-      Uri.parse('$baseUrl/api/users'),
+      Uri.parse('$baseUrl/api/users/invite'),
       headers: {..._authHeader, 'Content-Type': 'application/json'},
-      body: jsonEncode({'email': email, 'password': password, 'role': role}),
+      body: jsonEncode({'email': email, 'role': role}),
     );
-    if (res.statusCode != 201) throw ApiException(_message(res));
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return AccountLink.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  // POST /api/users/{id}/reset-password — tek kullanımlık şifre sıfırlama bağlantısı
+  // üretir (yalnız Admin). Admin yeni şifreyi görmez.
+  static Future<AccountLink> createPasswordReset(String userId) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/users/$userId/reset-password'),
+      headers: _authHeader,
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return AccountLink.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  // POST /api/auth/change-password — kullanıcı kendi şifresini değiştirir.
+  // Başarılı olduğunda sunucu tüm refresh token'ları iptal eder, o yüzden yerel
+  // oturum da temizlenir: kullanıcı yeniden giriş yapar.
+  static Future<void> changePassword(
+      {required String currentPassword, required String newPassword}) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/auth/change-password'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode(
+          {'currentPassword': currentPassword, 'newPassword': newPassword}),
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    _clearTokens();
+  }
+
+  // GET /api/invitations/{token} — bağlantının geçerliliği ve bağlamı (giriş GEREKMEZ:
+  // davet edilen kişinin henüz hesabı yoktur). Token'ı harcamaz.
+  static Future<AccountLinkInfo> inspectInvitation(String token) async {
+    final res = await http.get(Uri.parse('$baseUrl/api/invitations/$token'));
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return AccountLinkInfo.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  // POST /api/invitations/{token}/accept — kullanıcı şifresini kendisi belirler.
+  static Future<void> acceptInvitation(String token, String password) async {
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/invitations/$token/accept'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'password': password}),
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
   }
 
   // PUT /api/users/{id}/role — rol değiştirme (yalnız Admin). Son yönetici düşürülmek

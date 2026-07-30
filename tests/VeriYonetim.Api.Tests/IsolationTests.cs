@@ -110,31 +110,53 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
     // ---- RBAC ----
 
-    [Fact(DisplayName = "Admin yeni kullanıcı ekleyebilir (201 Created)")]
-    public async Task AdminRole_CanCreateUser()
+    private record InviteDto(string Token, string Email, string? Role, DateTime ExpiresAt,
+        string Purpose);
+
+    // Admin davet eder (şifre GİRMEZ), davet edilen kişi şifresini kendisi belirler.
+    private async Task<HttpResponseMessage> InviteAsync(string adminToken, string email,
+        string role) =>
+        await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users/invite",
+            adminToken, new { email, role }));
+
+    // İki adımlı gerçek akışı tek çağrıda çalıştırır (testlerin çoğu kurulumda kullanır).
+    private async Task InviteAndAcceptAsync(string adminToken, string email, string role)
+    {
+        var invite = await InviteAsync(adminToken, email, role);
+        invite.EnsureSuccessStatusCode();
+        var data = (await invite.Content.ReadFromJsonAsync<InviteDto>())!;
+
+        var accept = await _client.PostAsJsonAsync(
+            $"/api/invitations/{data.Token}/accept", new { password = "Sifre123!" });
+        accept.EnsureSuccessStatusCode();
+    }
+
+    [Fact(DisplayName = "Admin kullanıcı davet edebilir (şifre GİRMEDEN)")]
+    public async Task AdminRole_CanInviteUser()
     {
         var admin = await RegisterTenantAsync("rbac-a", "admin@rbac.com");
 
-        var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
-            admin.Token, new { email = "uye@rbac.com", password = "Sifre123!", role = "Viewer" }));
+        var response = await InviteAsync(admin.Token, "uye@rbac.com", "Viewer");
+        var data = (await response.Content.ReadFromJsonAsync<InviteDto>())!;
 
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        _output.WriteLine("✓ Kanıt: Admin token'ıyla yeni kullanıcı ekleme 201 Created döndü.");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("Invite", data.Purpose);
+        Assert.False(string.IsNullOrWhiteSpace(data.Token));
+        _output.WriteLine("✓ Kanıt: Admin yalnız e-posta+rol vererek davet oluşturdu; " +
+                          "istekte şifre alanı hiç yok — Admin kullanıcının şifresini bilmiyor.");
     }
 
-    [Fact(DisplayName = "Yetkisiz kullanıcı (Admin değil) kullanıcı ekleyemez (403 Forbidden)")]
-    public async Task UserRole_CannotCreateUser()
+    [Fact(DisplayName = "Yetkisiz kullanıcı (Admin değil) davet edemez (403 Forbidden)")]
+    public async Task UserRole_CannotInviteUser()
     {
         var admin = await RegisterTenantAsync("rbac-b", "admin@rbacb.com");
-        await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
-            admin.Token, new { email = "uye@rbacb.com", password = "Sifre123!", role = "Editor" }));
+        await InviteAndAcceptAsync(admin.Token, "uye@rbacb.com", "Editor");
 
         var member = await LoginAsync("uye@rbacb.com");
-        var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
-            member.Token, new { email = "davetsiz@rbacb.com", password = "Sifre123!", role = "Viewer" }));
+        var response = await InviteAsync(member.Token, "davetsiz@rbacb.com", "Viewer");
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-        _output.WriteLine("✓ Kanıt: Yetkisiz (Admin olmayan) kullanıcı kullanıcı eklemeye çalışınca 403 Forbidden döndü.");
+        _output.WriteLine("✓ Kanıt: Admin olmayan kullanıcı davet oluşturmaya çalışınca 403 Forbidden döndü.");
     }
 
     [Fact(DisplayName = "Token'sız (anonim) istek reddedilir (401 Unauthorized)")]
@@ -180,8 +202,7 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
     public async Task Viewer_CannotCreateDataset()
     {
         var admin = await RegisterTenantAsync("role-v", "admin@rolev.com");
-        await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users", admin.Token,
-            new { email = "viewer@rolev.com", password = "Sifre123!", role = "Viewer" }));
+        await InviteAndAcceptAsync(admin.Token, "viewer@rolev.com", "Viewer");
         var viewer = await LoginAsync("viewer@rolev.com");
 
         var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/datasets",
@@ -195,8 +216,7 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
     public async Task Editor_CanCreateDataset()
     {
         var admin = await RegisterTenantAsync("role-e", "admin@rolee.com");
-        await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users", admin.Token,
-            new { email = "editor@rolee.com", password = "Sifre123!", role = "Editor" }));
+        await InviteAndAcceptAsync(admin.Token, "editor@rolee.com", "Editor");
         var editor = await LoginAsync("editor@rolee.com");
 
         var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/datasets",
@@ -210,8 +230,7 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
     public async Task Viewer_CanListDatasets()
     {
         var admin = await RegisterTenantAsync("role-vr", "admin@rolevr.com");
-        await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users", admin.Token,
-            new { email = "viewer@rolevr.com", password = "Sifre123!", role = "Viewer" }));
+        await InviteAndAcceptAsync(admin.Token, "viewer@rolevr.com", "Viewer");
         var viewer = await LoginAsync("viewer@rolevr.com");
 
         var response = await _client.SendAsync(WithToken(HttpMethod.Get, "/api/datasets", viewer.Token));
@@ -222,12 +241,11 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
     // ---- Rol değiştirme (PUT /api/users/{id}/role) ----
 
-    // Testlerde kullanıcı ekleyip rolünü öğrenmek için ortak yardımcı.
+    // Testlerde kullanıcı oluşturup kimliğini öğrenmek için ortak yardımcı
+    // (davet + kabul, yani gerçek akış).
     private async Task<UserRow> CreateUserAsync(string adminToken, string email, string role)
     {
-        var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
-            adminToken, new { email, password = "Sifre123!", role }));
-        response.EnsureSuccessStatusCode();
+        await InviteAndAcceptAsync(adminToken, email, role);
 
         var users = (await (await _client.SendAsync(
             WithToken(HttpMethod.Get, "/api/users", adminToken)))
@@ -323,18 +341,17 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
         _output.WriteLine("✓ Kanıt: Tanımsız rol ('SuperAdmin') doğrulama katmanında 400 ile reddedildi.");
     }
 
-    [Fact(DisplayName = "Başka tenant'ta kayıtlı e-postayla kullanıcı eklenemez (409 Conflict)")]
-    public async Task CreateUser_WithEmailFromAnotherTenant_Returns409()
+    [Fact(DisplayName = "Başka tenant'ta kayıtlı e-postaya davet gönderilemez (409 Conflict)")]
+    public async Task Invite_WithEmailFromAnotherTenant_Returns409()
     {
         // E-posta global benzersiz olduğundan, mükerrer kontrolü tenant sınırını aşmalı;
         // aksi hâlde veritabanı unique index'i patlar ve istemci 500 alırdı.
         await RegisterTenantAsync("mail-capraz-a", "ortak@capraz.com");
         var tenantB = await RegisterTenantAsync("mail-capraz-b", "admin@caprazB.com");
 
-        var response = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users",
-            tenantB.Token, new { email = "ortak@capraz.com", password = "Sifre123!", role = "Viewer" }));
+        var response = await InviteAsync(tenantB.Token, "ortak@capraz.com", "Viewer");
 
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-        _output.WriteLine("✓ Kanıt: Başka tenant'ta kayıtlı e-postayla kullanıcı ekleme 500 yerine düzgün 409 Conflict döndü.");
+        _output.WriteLine("✓ Kanıt: Başka tenant'ta kayıtlı e-postaya davet 500 yerine düzgün 409 Conflict döndü.");
     }
 }

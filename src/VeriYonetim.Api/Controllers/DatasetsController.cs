@@ -12,7 +12,11 @@ namespace VeriYonetim.Api.Controllers;
 
 [ApiController]
 [Route("api/datasets")]
-[Authorize]
+// Sınıf düzeyinde: token'da tenant_id claim'i ŞART (bkz. AuthPolicies). Platform
+// yöneticisinin token'ında bu claim olmadığı için müşteri verisine hiç ulaşamaz —
+// "platformu işleten bile veriyi göremez" güvencesi burada zorunlu kılınıyor.
+// Metod düzeyindeki [Authorize(Roles=...)] bununla BİRLİKTE çalışır (VE koşulu).
+[Authorize(Policy = AuthPolicies.TenantUser)]
 public class DatasetsController : ControllerBase
 {
     private readonly AppDbContext _db;

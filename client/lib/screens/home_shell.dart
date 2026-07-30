@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../api_service.dart';
 import '../widgets/app_shell.dart';
+import '../widgets/change_password_dialog.dart';
 import '../widgets/ui.dart';
 import 'dashboard_screen.dart';
 import 'data_table_screen.dart';
@@ -54,6 +55,23 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _logout() async {
     await ApiService.logout();
     if (!mounted) return;
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+      (route) => false,
+    );
+  }
+
+  // Kullanıcı kendi şifresini değiştirir. Sunucu başarılı olduğunda o kullanıcının
+  // TÜM refresh token'larını iptal ettiği için oturum burada da kapanır ve giriş
+  // ekranına dönülür — "değiştirdim ama eski oturumlar yaşıyor" durumu oluşmasın.
+  Future<void> _changePassword() async {
+    final changed = await showDialog<bool>(
+      context: context,
+      builder: (_) => const ChangePasswordDialog(),
+    );
+    if (changed != true || !mounted) return;
+
     Navigator.pushAndRemoveUntil(
       context,
       MaterialPageRoute(builder: (_) => const LoginScreen()),
@@ -128,6 +146,7 @@ class _HomeShellState extends State<HomeShell> {
       index: _index,
       onSelect: (i) => setState(() => _index = i),
       onLogout: _logout,
+      onChangePassword: _changePassword,
       breadcrumb: _breadcrumb,
       child: DatasetScope(
         onDatasetGone: _onDatasetGone,

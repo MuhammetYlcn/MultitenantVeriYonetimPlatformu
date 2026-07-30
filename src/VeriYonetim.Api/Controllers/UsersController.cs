@@ -10,16 +10,23 @@ namespace VeriYonetim.Api.Controllers;
 
 [ApiController]
 [Route("api/users")]
-[Authorize]
+// Politika, düz [Authorize]'ın yerini alır: token'da tenant_id claim'i ŞART.
+// Platform yöneticisinin token'ında bu claim yoktur → 403. Aksi hâlde platform
+// token'ı buraya girer ve global query filter'a tenant_id gelmediği için sorgu
+// sessizce boş liste dönerdi; hatayı gizlemek yerine açıkça reddediyoruz.
+[Authorize(Policy = AuthPolicies.TenantUser)]
 public class UsersController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly ITenantContext _tenantContext;
+    private readonly IAccountTokenService _accountTokens;
 
-    public UsersController(AppDbContext db, ITenantContext tenantContext)
+    public UsersController(AppDbContext db, ITenantContext tenantContext,
+        IAccountTokenService accountTokens)
     {
         _db = db;
         _tenantContext = tenantContext;
+        _accountTokens = accountTokens;
     }
 
     // Dikkat: hiçbir Where/tenant kontrolü yok — izolasyonu global query filter sağlıyor.
@@ -34,34 +41,39 @@ public class UsersController : ControllerBase
         return Ok(users);
     }
 
-    // Sadece Admin yeni kullanıcı ekleyebilir. TenantId istekten değil token'dan
-    // gelir — kullanıcı hangi tenant'a ekleneceğini seçemez.
-    [HttpPost]
+    // Yalnız Admin kullanıcı DAVET eder. Şifre alanı bilinçli olarak YOKTUR:
+    // Admin bir davet bağlantısı üretir, şifreyi kullanıcı kendisi belirler.
+    // (Önceki sürümde Admin başkasının şifresini giriyordu — o akış "şifreyi yalnız
+    //  sahibi bilir" ilkesini bozduğu için tamamen kaldırıldı.)
+    // TenantId istekten değil token'dan gelir: davetin hangi firmaya olduğu seçilemez.
+    [HttpPost("invite")]
     [Authorize(Roles = "Admin")]
-    public async Task<IActionResult> CreateUser(CreateUserRequest request)
+    public async Task<IActionResult> InviteUser(InviteUserRequest request)
     {
-        // E-posta GLOBAL benzersiz (unique index). Global query filter sorguyu kendi
-        // tenant'ıyla sınırlar; IgnoreQueryFilters olmadan başka bir tenant'taki mükerrer
-        // e-posta görülemez ve 409 yerine DB unique index hatası (500) alınırdı.
-        var emailTaken = await _db.Users.IgnoreQueryFilters()
-            .AnyAsync(u => u.Email == request.Email);
-        if (emailTaken)
-            return Conflict(new { message = "Bu e-posta zaten kayıtlı." });
+        var result = await _accountTokens.InviteAsync(
+            _tenantContext.TenantId!.Value, CurrentUserId(), request);
 
-        var user = new User
-        {
-            Id = Guid.NewGuid(),
-            TenantId = _tenantContext.TenantId!.Value,
-            Email = request.Email,
-            PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
-            Role = request.Role
-        };
-
-        _db.Users.Add(user);
-        await _db.SaveChangesAsync();
-
-        return CreatedAtAction(nameof(GetUsers), new { user.Id, user.Email, user.Role });
+        return result.Success
+            ? Ok(result.Data)
+            : Problem(statusCode: result.StatusCode, title: result.Message);
     }
+
+    // Admin, bir kullanıcı için tek kullanımlık şifre sıfırlama bağlantısı üretir.
+    // Admin yeni şifreyi GÖRMEZ — yalnızca bağlantıyı iletir.
+    [HttpPost("{id:guid}/reset-password")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> CreatePasswordReset(Guid id)
+    {
+        var result = await _accountTokens.CreatePasswordResetAsync(
+            _tenantContext.TenantId!.Value, CurrentUserId(), id);
+
+        return result.Success
+            ? Ok(result.Data)
+            : Problem(statusCode: result.StatusCode, title: result.Message);
+    }
+
+    private Guid CurrentUserId() =>
+        Guid.TryParse(User.FindFirst("sub")?.Value, out var id) ? id : Guid.Empty;
 
     // Var olan bir kullanıcının rolünü değiştirir. Yalnız Admin çağırabilir; hedef
     // kullanıcı kendi tenant'ından olmak zorunda — bunu global query filter sağlıyor

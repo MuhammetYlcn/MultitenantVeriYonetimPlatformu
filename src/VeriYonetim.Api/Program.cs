@@ -15,7 +15,9 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddScoped<IPlatformAuthService, PlatformAuthService>();
 builder.Services.AddScoped<ITokenService, TokenService>();
+builder.Services.AddScoped<IAccountTokenService, AccountTokenService>();
 builder.Services.AddScoped<ITenantProvisioner, TenantProvisioner>();
 builder.Services.AddScoped<IDatasetImportService, DatasetImportService>();
 builder.Services.AddHttpContextAccessor();
@@ -37,6 +39,17 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt["Key"]!))
         };
     });
+
+// İki kimlik dünyasını birbirinden ayıran politikalar (bkz. AuthPolicies).
+// Düz [Authorize] "geçerli imzalı herhangi bir token" demek olduğundan yetmez:
+// platform token'ı da geçerli imzalıdır. Politikalar claim varlığını şart koşar.
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy(AuthPolicies.TenantUser, policy => policy
+        .RequireAuthenticatedUser()
+        .RequireClaim(AuthPolicies.TenantIdClaim))
+    .AddPolicy(AuthPolicies.PlatformAdmin, policy => policy
+        .RequireAuthenticatedUser()
+        .RequireClaim(AuthPolicies.PlatformAdminClaim, "true"));
 
 // Merkezi hata yönetimi: tüm hataları tek tip ProblemDetails'e oturtur.
 builder.Services.AddProblemDetails();
@@ -86,6 +99,13 @@ using (var scope = app.Services.CreateScope())
     var provisioner = scope.ServiceProvider.GetRequiredService<ITenantProvisioner>();
     var count = await provisioner.SyncAllSchemasAsync();
     app.Logger.LogInformation("Tenant şema senkronizasyonu: {Count} tenant kontrol edildi.", count);
+
+    // Platform yöneticisini ayarlardan tohumla. Bilinçli olarak PUBLIC bir kayıt ucu
+    // yok: platform kimliğini yalnızca sunucu ayarına (appsettings.Development.json ya
+    // da PlatformAdmin__Email / PlatformAdmin__Password ortam değişkenleri) erişebilen
+    // kişi belirler.
+    var platformAuth = scope.ServiceProvider.GetRequiredService<IPlatformAuthService>();
+    await platformAuth.EnsureSeedAdminAsync();
 }
 
 // Geliştirmede: uygulama ayağa kalkınca varsayılan tarayıcıyı Swagger'a aç.
