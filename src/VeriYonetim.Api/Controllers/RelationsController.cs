@@ -31,7 +31,8 @@ public class RelationsController : ControllerBase
             .Select(r => new RelationResponse(
                 r.Id,
                 r.FromDatasetId, r.FromDataset.Name, r.FromColumn,
-                r.ToDatasetId, r.ToDataset.Name, r.ToColumn))
+                r.ToDatasetId, r.ToDataset.Name, r.ToColumn,
+                r.IsAutoDetected))
             .ToListAsync();
 
         return Ok(relations);
@@ -74,7 +75,9 @@ public class RelationsController : ControllerBase
             FromDatasetId = request.FromDatasetId,
             FromColumn = request.FromColumn,
             ToDatasetId = request.ToDatasetId,
-            ToColumn = request.ToColumn
+            ToColumn = request.ToColumn,
+            // Elle tanımlandı: algılama bu kayda dokunmaz, kullanıcının kararı esastır.
+            IsAutoDetected = false
         };
 
         _db.DatasetRelations.Add(relation);
@@ -83,7 +86,7 @@ public class RelationsController : ControllerBase
         return CreatedAtAction(nameof(GetRelations), new { id = relation.Id },
             new RelationResponse(relation.Id,
                 from.Id, from.Name, relation.FromColumn,
-                to.Id, to.Name, relation.ToColumn));
+                to.Id, to.Name, relation.ToColumn, relation.IsAutoDetected));
     }
 
     // DELETE /api/relations/{id}

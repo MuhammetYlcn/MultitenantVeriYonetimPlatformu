@@ -8,6 +8,7 @@ import 'dashboard_screen.dart';
 import 'data_table_screen.dart';
 import 'datasets_screen.dart';
 import 'login_screen.dart';
+import 'relations_screen.dart';
 import 'users_screen.dart';
 
 // Giriş sonrası TEK ekran. Hangi bölümün ve hangi veri setinin açık olduğunu burası
@@ -31,6 +32,7 @@ class _HomeShellState extends State<HomeShell> {
   List<String> get _keys => [
         'ask',
         'datasets',
+        'relations',
         'dashboard',
         if (ApiService.isAdmin) 'users',
       ];
@@ -46,6 +48,11 @@ class _HomeShellState extends State<HomeShell> {
           icon: Icons.folder_outlined,
           activeIcon: Icons.folder,
           label: 'Veri setleri',
+        ),
+        const ShellDestination(
+          icon: Icons.link_outlined,
+          activeIcon: Icons.link,
+          label: 'İlişkiler',
         ),
         const ShellDestination(
           icon: Icons.insights_outlined,
@@ -107,6 +114,7 @@ class _HomeShellState extends State<HomeShell> {
     return switch (key) {
       'ask' => ['Soru sor'],
       'datasets' => ['Veri setleri', ?name],
+      'relations' => ['İlişkiler'],
       'dashboard' => ['Panel', ?name],
       _ => ['Kullanıcılar'],
     };
@@ -127,6 +135,9 @@ class _HomeShellState extends State<HomeShell> {
           onBack: _closeDataset,
           onOpenDashboard: _openDashboard,
         );
+
+      case 'relations':
+        return const RelationsPage();
 
       case 'dashboard':
         final selected = _selected;

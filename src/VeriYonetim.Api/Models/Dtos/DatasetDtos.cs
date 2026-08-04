@@ -33,10 +33,13 @@ public record CreateRelationRequest(
     [Required, MaxLength(200)] string ToColumn);
 
 // İlişki yanıtı — set adları da dönüyor ki istemci ayrıca sorgu atmasın.
+// IsAutoDetected: bağı sistem mi buldu, kullanıcı mı tanımladı. Arayüz bunu gösteriyor
+// ki yanlış bulunmuş bir bağ fark edilip silinebilsin.
 public record RelationResponse(
     Guid Id,
     Guid FromDatasetId, string FromDatasetName, string FromColumn,
-    Guid ToDatasetId, string ToDatasetName, string ToColumn);
+    Guid ToDatasetId, string ToDatasetName, string ToColumn,
+    bool IsAutoDetected);
 
 // Tek satır ekleme isteği: kolon adı → değer (metin gelir; tip dönüşümü sunucuda şemaya göre).
 public record AddRowRequest(Dictionary<string, string?> Values);

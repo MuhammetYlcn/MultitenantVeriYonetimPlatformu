@@ -23,12 +23,18 @@ public class DatasetsController : ControllerBase
     private readonly ITenantContext _tenantContext;
     private readonly IDatasetImportService _importService;
 
+    private readonly IRelationDetector _relationDetector;
+    private readonly ILogger<DatasetsController> _logger;
+
     public DatasetsController(AppDbContext db, ITenantContext tenantContext,
-        IDatasetImportService importService)
+        IDatasetImportService importService, IRelationDetector relationDetector,
+        ILogger<DatasetsController> logger)
     {
         _db = db;
         _tenantContext = tenantContext;
         _importService = importService;
+        _relationDetector = relationDetector;
+        _logger = logger;
     }
 
     // GET /api/datasets — tenant'ın tüm setleri. Where yok: izolasyonu query filter sağlar.
@@ -207,6 +213,22 @@ public class DatasetsController : ControllerBase
         dataset.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync();
 
+        // Satırlar yerine oturdu: şimdi bu setin diğerleriyle bağı var mı diye bak.
+        // Kullanıcıya "şu kolon şu sete işaret ediyor" diye sordurmuyoruz — dosyayı
+        // yükledi, gerisini sistem çözüyor (bkz. RelationDetector).
+        //
+        // Hata yutuluyor: algılama bir kolaylıktır, başarısız olması içeri almayı
+        // BOZMAMALI. Bulunamazsa kullanıcı ilişkiyi ekrandan elle tanımlayabilir.
+        var detected = 0;
+        try
+        {
+            detected = await _relationDetector.DetectAsync(id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "İlişki algılama başarısız (içeri alma etkilenmedi).");
+        }
+
         const int maxErrors = 100; // yanıtı şişirmemek için hata listesini sınırla
         return Ok(new
         {
@@ -215,7 +237,8 @@ public class DatasetsController : ControllerBase
             imported = result.ValidRows.Count,
             failed = result.Errors.Count,
             errors = result.Errors.Take(maxErrors),
-            errorsTruncated = result.Errors.Count > maxErrors
+            errorsTruncated = result.Errors.Count > maxErrors,
+            detectedRelations = detected
         });
     }
 

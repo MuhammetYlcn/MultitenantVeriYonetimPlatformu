@@ -20,4 +20,12 @@ public class DatasetRelation
     public string ToColumn { get; set; } = null!;
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    // Bu ilişkiyi sistem mi buldu, kullanıcı mı tanımladı?
+    //
+    // Ayrımın sebebi güven: otomatik algılama ölçüme dayanır ama yanılabilir (iki kolon
+    // tesadüfen örtüşebilir). Kullanıcı ekranda hangisinin makine işi olduğunu görmeli ki
+    // yanlış bulunmuş bir bağı silebilsin. Elle tanımlanan bir ilişkiye ise algılama
+    // dokunmaz — kullanıcının kararı makinenin kararını ezer.
+    public bool IsAutoDetected { get; set; }
 }

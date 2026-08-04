@@ -1130,6 +1130,10 @@ class DatasetRelation {
   final String toDatasetName;
   final String toColumn;
 
+  /// Bağı sistem mi buldu, kullanıcı mı tanımladı. Arayüzde ayırt edilir ki yanlış
+  /// bulunmuş bir bağ fark edilip silinebilsin.
+  final bool isAutoDetected;
+
   DatasetRelation({
     required this.id,
     required this.fromDatasetId,
@@ -1138,6 +1142,7 @@ class DatasetRelation {
     required this.toDatasetId,
     required this.toDatasetName,
     required this.toColumn,
+    required this.isAutoDetected,
   });
 
   factory DatasetRelation.fromJson(Map<String, dynamic> j) => DatasetRelation(
@@ -1148,6 +1153,7 @@ class DatasetRelation {
         toDatasetId: j['toDatasetId'] as String,
         toDatasetName: j['toDatasetName'] as String,
         toColumn: j['toColumn'] as String,
+        isAutoDetected: j['isAutoDetected'] as bool? ?? false,
       );
 
   String get label => '$fromDatasetName.$fromColumn = $toDatasetName.$toColumn';

@@ -22,6 +22,7 @@ builder.Services.AddScoped<IAccountTokenService, AccountTokenService>();
 builder.Services.AddScoped<ITenantProvisioner, TenantProvisioner>();
 builder.Services.AddScoped<IDatasetImportService, DatasetImportService>();
 builder.Services.AddScoped<IDatasetQueryExecutor, DatasetQueryExecutor>();
+builder.Services.AddScoped<IRelationDetector, RelationDetector>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, TenantContext>();
 
