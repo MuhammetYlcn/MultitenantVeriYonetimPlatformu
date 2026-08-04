@@ -1,9 +1,12 @@
 using System.Diagnostics;
+using System.Security.Claims;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using VeriYonetim.Api.Data;
 using VeriYonetim.Api.Models.Dtos;
+using VeriYonetim.Api.Models.Entities;
 using VeriYonetim.Api.Services;
 
 namespace VeriYonetim.Api.Controllers;
@@ -22,23 +25,119 @@ namespace VeriYonetim.Api.Controllers;
 public class AskController : ControllerBase
 {
     private readonly AppDbContext _db;
+    private readonly ITenantContext _tenantContext;
     private readonly IQueryPlannerService _planner;
     private readonly IDatasetQueryExecutor _executor;
+    private readonly IAskSuggestionService _suggestions;
     private readonly ILogger<AskController> _logger;
 
-    public AskController(AppDbContext db, IQueryPlannerService planner,
-        IDatasetQueryExecutor executor, ILogger<AskController> logger)
+    public AskController(AppDbContext db, ITenantContext tenantContext,
+        IQueryPlannerService planner, IDatasetQueryExecutor executor,
+        IAskSuggestionService suggestions, ILogger<AskController> logger)
     {
         _db = db;
+        _tenantContext = tenantContext;
         _planner = planner;
         _executor = executor;
+        _suggestions = suggestions;
         _logger = logger;
+    }
+
+    // GET /api/ask/models — kurulu modeller. Arayüzdeki model seçici bunu okur.
+    [HttpGet("api/ask/models")]
+    public async Task<IActionResult> GetModels(CancellationToken ct)
+    {
+        try
+        {
+            return Ok(await _planner.ListModelsAsync(ct));
+        }
+        catch (QueryPlannerException ex)
+        {
+            return Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: ex.Message);
+        }
+    }
+
+    // GET /api/ask/suggestions — firmanın kendi verisine göre örnek sorular.
+    //
+    // ready=false ise üretim arka planda sürüyor demektir; istemci biraz sonra tekrar sorar.
+    // Öneriler kullanıcıya gösterilmeden önce gerçekten çalıştırılıp doğrulanır — tıklanan
+    // bir örnek sorunun hata vermesi, sistemin kendi vitrinine güvenmediğini gösterirdi.
+    [HttpGet("api/ask/suggestions")]
+    public async Task<IActionResult> GetSuggestions(CancellationToken ct)
+    {
+        var catalog = await LoadCatalogAsync();
+        var tenantId = _tenantContext.TenantId ?? Guid.Empty;
+
+        return Ok(await _suggestions.GetAsync(tenantId, catalog, ct));
+    }
+
+    // GET /api/ask/conversations — kullanıcının KENDİ sohbetleri, en son konuşulan üstte.
+    [HttpGet("api/ask/conversations")]
+    public async Task<IActionResult> GetConversations(CancellationToken ct)
+    {
+        var userId = CurrentUserId;
+        if (userId is null) return Ok(Array.Empty<ConversationSummary>());
+
+        var conversations = await _db.AskConversations
+            .Where(c => c.UserId == userId)
+            .OrderByDescending(c => c.UpdatedAt)
+            .Select(c => new ConversationSummary(
+                c.Id, c.Title, c.UpdatedAt, c.Messages.Count))
+            .ToListAsync(ct);
+
+        return Ok(conversations);
+    }
+
+    // GET /api/ask/conversations/{id} — sohbetin turları.
+    [HttpGet("api/ask/conversations/{id:guid}")]
+    public async Task<IActionResult> GetConversation(Guid id, CancellationToken ct)
+    {
+        var userId = CurrentUserId;
+
+        var conversation = await _db.AskConversations
+            .Include(c => c.Messages.OrderBy(m => m.CreatedAt))
+            .FirstOrDefaultAsync(c => c.Id == id && c.UserId == userId, ct);
+
+        if (conversation is null)
+            return Problem(statusCode: StatusCodes.Status404NotFound, title: "Sohbet bulunamadı.");
+
+        // Yanıtlar kaydedildiği hâliyle döner; yeniden hesaplanmaz. Veri o günden beri
+        // değişmiş olabilir ve geçmiş bir cevabın sonradan değişmesi kafa karıştırırdı.
+        var turns = conversation.Messages
+            .Select(m => new ConversationTurn(
+                m.Question, JsonDocument.Parse(m.ResponseJson).RootElement, m.CreatedAt))
+            .ToList();
+
+        return Ok(new ConversationDetail(conversation.Id, conversation.Title, turns));
+    }
+
+    // DELETE /api/ask/conversations/{id}
+    [HttpDelete("api/ask/conversations/{id:guid}")]
+    public async Task<IActionResult> DeleteConversation(Guid id, CancellationToken ct)
+    {
+        var userId = CurrentUserId;
+
+        var conversation = await _db.AskConversations
+            .FirstOrDefaultAsync(c => c.Id == id && c.UserId == userId, ct);
+
+        if (conversation is null)
+            return Problem(statusCode: StatusCodes.Status404NotFound, title: "Sohbet bulunamadı.");
+
+        _db.AskConversations.Remove(conversation);
+        await _db.SaveChangesAsync(ct);
+
+        return NoContent();
     }
 
     // POST /api/ask — soru sor. Viewer da çağırabilir: sorgu salt okuma bir işlemdir.
     [HttpPost("api/ask")]
     public async Task<IActionResult> Ask(AskRequest request, CancellationToken ct)
     {
+        // Arka planda örnek soru üretiliyorsa DURDUR. Ollama istekleri sıraya koyduğundan
+        // kullanıcının sorusu o üretimin arkasına düşer ve dakikalarca bekleyebilirdi;
+        // süs niteliğindeki bir iş, asıl kullanıcıyı bekletemez.
+        _suggestions.NotifyUserActivity(_tenantContext.TenantId ?? Guid.Empty);
+
         var catalog = await LoadCatalogAsync();
 
         if (catalog.Datasets.Count == 0)
@@ -48,7 +147,7 @@ public class AskController : ControllerBase
         PlanResult planResult;
         try
         {
-            planResult = await _planner.PlanAsync(request.Question, catalog, ct);
+            planResult = await _planner.PlanAsync(request.Question, catalog, request.Model, ct);
         }
         catch (InvalidQueryException ex)
         {
@@ -63,7 +162,13 @@ public class AskController : ControllerBase
 
         try
         {
-            return await ExecuteAsync(request.Question, planResult, catalog, ct);
+            var response = await ExecuteAsync(request.Question, planResult, catalog, ct);
+
+            // Yanıt sohbete kaydedilir; kimliği istemciye dönüyor ki sonraki soru
+            // aynı sohbete eklensin.
+            var conversationId = await SaveTurnAsync(request.ConversationId, response, ct);
+
+            return Ok(response with { ConversationId = conversationId });
         }
         catch (InvalidQueryException ex)
         {
@@ -75,7 +180,7 @@ public class AskController : ControllerBase
         }
     }
 
-    private async Task<IActionResult> ExecuteAsync(
+    private async Task<AskResponse> ExecuteAsync(
         string question, PlanResult planResult, TenantCatalog catalog, CancellationToken ct)
     {
         var plan = planResult.Plan;
@@ -89,16 +194,23 @@ public class AskController : ControllerBase
             _logger.LogInformation("CEVAPLANAMADI. Soru: {Question}. Gerekçe: {Reason}",
                 question, plan.Reason);
 
-            return Ok(new AskResponse(
+            return new AskResponse(
                 Question: question,
                 Kind: kind,
                 Summary: PlanSummary.Describe(plan, datasetNames),
                 Datasets: Array.Empty<string>(),
+                Model: planResult.Model,
                 Reason: plan.Reason ?? "Bu soru mevcut verilerle cevaplanamıyor.",
-                PlanMs: planResult.DurationMs));
+                PlanMs: planResult.DurationMs);
         }
 
-        var scope = catalog.BuildScope(datasetNames);
+        // Kolon referansları da veriliyor: model gerekli seti join'e eklemeyi unuttuysa
+        // ve ilişki tanımlıysa kapsam kendiliğinden genişler (bkz. TenantCatalog).
+        // Soruda geçen bir koşul plana hiç yansımamışsa burada dur: filtresiz bir toplam
+        // göstermek, hata göstermekten çok daha zararlıdır (kullanıcı yanlış sayıya inanır).
+        QueryPlanMapper.ValidateAgainstQuestion(plan, question);
+
+        var scope = catalog.BuildScope(datasetNames, QueryPlanMapper.ColumnReferences(plan));
         var used = scope.Sources.Select(s => s.Name).ToList();
         var summary = PlanSummary.Describe(plan, used);
 
@@ -106,16 +218,19 @@ public class AskController : ControllerBase
 
         if (kind == "rows")
         {
-            var built = DatasetRowQueryBuilder.BuildSelect(QueryPlanMapper.ToRowQuery(plan), scope);
+            // plan.Select: yalnız sorulan kolonlar. Verilmezse bütün kolonlar döner.
+            var built = DatasetRowQueryBuilder.BuildSelect(
+                QueryPlanMapper.ToRowQuery(plan), scope, plan.Select);
             var rows = await _executor.RunRowsAsync(built, ct);
             stopwatch.Stop();
 
-            return Ok(new AskResponse(
+            return new AskResponse(
                 question, kind, summary, used,
+                Model: planResult.Model,
                 Sql: built.Sql,
                 PlanMs: planResult.DurationMs,
                 QueryMs: (int)stopwatch.ElapsedMilliseconds,
-                Rows: new AskRowsResult(built.Columns, rows)));
+                Rows: new AskRowsResult(built.Columns, rows));
         }
 
         if (plan.Compare is not null)
@@ -126,19 +241,20 @@ public class AskController : ControllerBase
         var buckets = await _executor.RunAggregateAsync(aggregate, ct: ct);
         stopwatch.Stop();
 
-        return Ok(new AskResponse(
+        return new AskResponse(
             question, kind, summary, used,
+            Model: planResult.Model,
             Sql: aggregate.Sql,
             PlanMs: planResult.DurationMs,
             QueryMs: (int)stopwatch.ElapsedMilliseconds,
             Aggregate: new AskAggregateResult(
-                aggregateQuery.GroupBy, aggregateQuery.Metrics, aggregateQuery.Bucket, buckets)));
+                aggregateQuery.GroupBy, aggregateQuery.Metrics, aggregateQuery.Bucket, buckets));
     }
 
     // "Bu ay geçen aya göre nasıl?" — tek SQL ile çözülmez: aynı agregasyon iki dönem için
     // çalıştırılıp sonuçlar eşleştirilir. Limit iki sorgudan da çıkarılır, eşleştirmeden
     // SONRA uygulanır (bkz. QueryPlanMapper.ToComparisonQueries).
-    private async Task<IActionResult> CompareAsync(
+    private async Task<AskResponse> CompareAsync(
         string question, PlanResult planResult, QueryPlan plan, QueryScope scope,
         IReadOnlyList<string> used, string summary, Stopwatch stopwatch, CancellationToken ct)
     {
@@ -160,16 +276,75 @@ public class AskController : ControllerBase
 
         stopwatch.Stop();
 
-        return Ok(new AskResponse(
+        return new AskResponse(
             question, "aggregate", summary, used,
+            Model: planResult.Model,
             // İki sorgu çalıştı; kullanıcıya ikisini de gösteriyoruz ki karşılaştırmanın
             // nasıl kurulduğu görünür olsun.
             Sql: $"-- Mevcut dönem\n{currentBuilt.Sql}\n\n-- Önceki dönem\n{previousBuilt.Sql}",
             PlanMs: planResult.DurationMs,
             QueryMs: (int)stopwatch.ElapsedMilliseconds,
             Comparison: new AskComparisonResult(
-                plan.Compare!.Period ?? "", plan.Compare.Previous ?? "", merged)));
+                plan.Compare!.Period ?? "", plan.Compare.Previous ?? "", merged));
     }
+
+    // Token'daki kullanıcı kimliği. Sohbetler KİŞİSELDİR: aynı firmadaki başka bir
+    // kullanıcı bunları göremez, o yüzden tenant filtresi tek başına yetmez.
+    private Guid? CurrentUserId =>
+        Guid.TryParse(User.FindFirstValue("sub"), out var id) ? id : null;
+
+    // Yanıtı sohbete ekler; sohbet yoksa açar. Sohbet kimliği döner.
+    private async Task<Guid?> SaveTurnAsync(
+        Guid? conversationId, AskResponse response, CancellationToken ct)
+    {
+        var userId = CurrentUserId;
+        if (userId is null) return null;
+
+        AskConversation? conversation = null;
+
+        // Kimlik verilmişse KULLANICININ KENDİ sohbeti mi diye bakılır: başkasının
+        // sohbetine yazmanın yolu olmamalı.
+        if (conversationId is Guid id)
+            conversation = await _db.AskConversations
+                .FirstOrDefaultAsync(c => c.Id == id && c.UserId == userId, ct);
+
+        if (conversation is null)
+        {
+            conversation = new AskConversation
+            {
+                Id = Guid.NewGuid(),
+                UserId = userId.Value,
+                Title = MakeTitle(response.Question)
+            };
+            _db.AskConversations.Add(conversation);
+        }
+
+        conversation.UpdatedAt = DateTime.UtcNow;
+
+        _db.AskMessages.Add(new AskMessage
+        {
+            Id = Guid.NewGuid(),
+            ConversationId = conversation.Id,
+            Question = response.Question,
+            // Yanıtın tamamı saklanır: geçmiş kayıt yeniden hesaplanmadan, verildiği
+            // hâliyle gösterilecek.
+            ResponseJson = JsonSerializer.Serialize(response, WebJson)
+        });
+
+        await _db.SaveChangesAsync(ct);
+        return conversation.Id;
+    }
+
+    // Sohbet adı ilk sorudan türetilir; liste okunur kalsın diye kısaltılır.
+    private static string MakeTitle(string question)
+    {
+        var text = question.Trim();
+        return text.Length <= 60 ? text : $"{text[..57]}…";
+    }
+
+    // İstemciye giden JSON ile AYNI biçim (camelCase): kaydedilen yanıt, canlı yanıttan
+    // ayırt edilemez olmalı ki geçmiş sohbet aynı arayüzle çizilebilsin.
+    private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
 
     // Firmanın kataloğu. Global query filter sayesinde yalnız bu tenant'ın setleri gelir —
     // izolasyonun dayanağı bu: kataloğa girmeyen bir veri seti sorguya da giremez.
@@ -177,7 +352,7 @@ public class AskController : ControllerBase
     {
         var datasets = await _db.Datasets
             .OrderBy(d => d.Name)
-            .Select(d => new { d.Id, d.Name, d.Description })
+            .Select(d => new { d.Id, d.Name, d.Description, d.RowCount })
             .ToListAsync();
 
         var columns = await _db.DatasetColumns
@@ -192,7 +367,7 @@ public class AskController : ControllerBase
 
         var infos = datasets
             .Select(d => new DatasetInfo(d.Id, d.Name, d.Description,
-                byDataset.GetValueOrDefault(d.Id, new Dictionary<string, string>())))
+                byDataset.GetValueOrDefault(d.Id, new Dictionary<string, string>()), d.RowCount))
             // Şemasız setler modele hiç gösterilmez: seçilirlerse sorgu kurulamaz ve
             // kullanıcı sebebini anlamayacağı bir hata alırdı.
             .Where(d => d.Columns.Count > 0)

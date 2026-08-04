@@ -279,8 +279,14 @@ class ApiService {
       return;
     }
     final refresh = _readRefresh();
-    if (refresh != null && await _tryRefresh(refresh)) return;
-    _clearTokens();
+    if (refresh == null) {
+      _clearTokens();
+      return;
+    }
+
+    // Yalnız sunucu token'ı REDDETTİYSE oturumu kapat. Sunucuya ulaşılamıyorsa
+    // token'lara dokunma: kesinti geçince bir sonraki açılışta oturum geri gelir.
+    if (await _tryRefresh(refresh) == RefreshOutcome.rejected) _clearTokens();
   }
 
   // Yetkili bir istekten ÖNCE çağrılır: access süresi dolduysa refresh ile yeniler (aktif
@@ -294,7 +300,20 @@ class ApiService {
   // Refresh token ile /api/auth/refresh'e gider, yeni access+refresh alır. Backend rotation
   // uygular (yeni refresh gelir, eskisi geçersizleşir) → yeni refresh'i de saklamak ŞART.
   // Başarılıysa aynı modda (kalıcı/oturumluk) saklar ve true döner.
-  static Future<bool> _tryRefresh(String refresh) async {
+  // Süren yenileme çağrısı. Aynı anda birden fazla istek yenilemeye kalkarsa hepsi
+  // BU tek çağrıyı bekler.
+  static Future<RefreshOutcome>? _refreshInFlight;
+
+  // Sunucu refresh token'ı DÖNDÜRÜYOR: kullanılan token geçersizleşip yenisi veriliyor.
+  // Ekran açılışında birkaç istek (model listesi, öneriler, sohbetler) aynı anda gidiyor;
+  // her biri ayrı ayrı yenileme çağırsaydı ilki token'ı döndürür, diğerleri artık
+  // geçersiz olan eski token'la 401 alırdı — yani oturum kendi kendini bozardı.
+  // Tek uçuş (single-flight) bunu engelliyor.
+  static Future<RefreshOutcome> _tryRefresh(String refresh) =>
+      _refreshInFlight ??=
+          _doRefresh(refresh).whenComplete(() => _refreshInFlight = null);
+
+  static Future<RefreshOutcome> _doRefresh(String refresh) async {
     try {
       final remember = _isRemembered();
       final res = await http.post(
@@ -305,10 +324,18 @@ class ApiService {
       if (res.statusCode == 200) {
         final j = jsonDecode(res.body) as Map<String, dynamic>;
         _saveTokens(j['token'] as String, j['refreshToken'] as String, remember: remember);
-        return true;
+        return RefreshOutcome.success;
       }
-    } catch (_) {/* ağ hatası vb. → yenileme başarısız */}
-    return false;
+
+      // Sunucu cevap verdi ve KABUL ETMEDİ → token gerçekten geçersiz (süresi dolmuş,
+      // iptal edilmiş ya da şifre değişmiş). Oturumu kapatmak doğru.
+      return RefreshOutcome.rejected;
+    } catch (_) {
+      // Sunucuya ULAŞILAMADI (kapalı, ağ kesik, yeniden başlıyor). Token'ın geçerli olup
+      // olmadığı hakkında hiçbir şey öğrenmedik — bu yüzden SİLMİYORUZ. Silseydik geçici
+      // bir kesinti "oturumu açık tut" seçen kullanıcıyı kalıcı olarak dışarı atardı.
+      return RefreshOutcome.unreachable;
+    }
   }
 
   // Çıkış: token'ları her yerden siler.
@@ -567,6 +594,120 @@ class ApiService {
     throw ApiException(_message(res));
   }
 
+  // POST /api/ask — doğal dilde soru. Veri seti kimliği GÖNDERİLMEZ: hangi setlerin
+  // kullanılacağına model, firmanın kataloğuna bakarak kendisi karar verir.
+  static Future<AskResult> ask(String question,
+      {String? model, String? conversationId}) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/ask'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'question': question,
+        'model': ?model,
+        'conversationId': ?conversationId,
+      }),
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return AskResult.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  // GET /api/ask/conversations — kullanıcının kendi sohbetleri.
+  static Future<List<ChatSummary>> conversations() async {
+    await _ensureFreshToken();
+    final res = await http.get(
+      Uri.parse('$baseUrl/api/ask/conversations'),
+      headers: _authHeader,
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return (jsonDecode(res.body) as List)
+        .map((e) => ChatSummary.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  // GET /api/ask/conversations/{id} — sohbetin turları.
+  static Future<ChatDetail> conversation(String id) async {
+    await _ensureFreshToken();
+    final res = await http.get(
+      Uri.parse('$baseUrl/api/ask/conversations/$id'),
+      headers: _authHeader,
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return ChatDetail.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  // DELETE /api/ask/conversations/{id}
+  static Future<void> deleteConversation(String id) async {
+    await _ensureFreshToken();
+    final res = await http.delete(
+      Uri.parse('$baseUrl/api/ask/conversations/$id'),
+      headers: _authHeader,
+    );
+    if (res.statusCode != 204) throw ApiException(_message(res));
+  }
+
+  // GET /api/ask/models — Ollama'da kurulu modeller (seçici bunu okur).
+  static Future<List<AiModel>> aiModels() async {
+    await _ensureFreshToken();
+    final res = await http.get(Uri.parse('$baseUrl/api/ask/models'), headers: _authHeader);
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return (jsonDecode(res.body) as List)
+        .map((e) => AiModel.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  // GET /api/ask/suggestions — firmanın kendi verisine göre örnek sorular.
+  static Future<AskSuggestions> askSuggestions() async {
+    await _ensureFreshToken();
+    final res =
+        await http.get(Uri.parse('$baseUrl/api/ask/suggestions'), headers: _authHeader);
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return AskSuggestions.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  // GET /api/relations — veri setleri arasındaki tanımlı bağlar.
+  static Future<List<DatasetRelation>> relations() async {
+    await _ensureFreshToken();
+    final res = await http.get(Uri.parse('$baseUrl/api/relations'), headers: _authHeader);
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return (jsonDecode(res.body) as List)
+        .map((e) => DatasetRelation.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  // POST /api/relations — yeni bağ tanımla. Bu bağ olmadan iki set birleştirilemez:
+  // sistem "Satislar.musteri_no = Musteriler.no" ilişkisini kendiliğinden bilemez.
+  static Future<DatasetRelation> createRelation({
+    required String fromDatasetId,
+    required String fromColumn,
+    required String toDatasetId,
+    required String toColumn,
+  }) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/relations'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'fromDatasetId': fromDatasetId,
+        'fromColumn': fromColumn,
+        'toDatasetId': toDatasetId,
+        'toColumn': toColumn,
+      }),
+    );
+    if (res.statusCode != 201) throw ApiException(_message(res));
+    return DatasetRelation.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  // DELETE /api/relations/{id}
+  static Future<void> deleteRelation(String id) async {
+    await _ensureFreshToken();
+    final res = await http.delete(
+      Uri.parse('$baseUrl/api/relations/$id'),
+      headers: _authHeader,
+    );
+    if (res.statusCode != 204) throw ApiException(_message(res));
+  }
+
   // Gerçek bir CSV/Excel dosyasını yükler: önce yeni veri seti oluşturur, sonra AYNI dosyayı
   // hem /schema (kolon+tip algılama) hem /rows (satırları içe aktarma) uçlarına gönderir.
   // Backend uzantıya (.csv/.xlsx) göre ayrıştırdığından gerçek dosya adı geçilir.
@@ -664,4 +805,350 @@ class ApiException implements Exception {
   ApiException(this.message);
   @override
   String toString() => message;
+}
+
+/// Oturum yenilemenin sonucu.
+///
+/// [rejected] ile [unreachable] ayrımı kritik: ilkinde token gerçekten geçersizdir ve
+/// oturum kapatılmalıdır, ikincisinde ise token hakkında hiçbir şey bilmiyoruzdur.
+/// İkisini aynı saymak, sunucunun bir anlık kesintisinde "oturumu açık tut" seçmiş
+/// kullanıcıyı kalıcı olarak dışarı atardı.
+enum RefreshOutcome { success, rejected, unreachable }
+
+// ---------------------------------------------------------------------------
+// Doğal dilde sorgu (/api/ask)
+// ---------------------------------------------------------------------------
+
+/// Ollama'da kurulu bir model. Boyut ve parametre sayısı seçiciye gösterilir:
+/// kullanıcı hangi modelin daha ağır (ve yavaş) olduğunu görmeden seçim yapamaz.
+class AiModel {
+  final String name;
+  final int sizeBytes;
+  final String? parameterSize;
+  final String? quantization;
+  final bool isDefault;
+
+  AiModel({
+    required this.name,
+    required this.sizeBytes,
+    this.parameterSize,
+    this.quantization,
+    required this.isDefault,
+  });
+
+  factory AiModel.fromJson(Map<String, dynamic> j) => AiModel(
+        name: j['name'] as String,
+        sizeBytes: (j['sizeBytes'] as num?)?.toInt() ?? 0,
+        parameterSize: j['parameterSize'] as String?,
+        quantization: j['quantization'] as String?,
+        isDefault: j['isDefault'] as bool? ?? false,
+      );
+
+  String get sizeLabel => sizeBytes <= 0
+      ? ''
+      : '${(sizeBytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+}
+
+/// Satır listesi sonucu. Kolon adları ayrı taşınır: birleştirilmiş sorguda sütunlar
+/// birden çok veri setinden gelir ("Musteriler.sehir").
+class AskRows {
+  final List<String> columns;
+  final List<List<String?>> rows;
+
+  AskRows({required this.columns, required this.rows});
+
+  factory AskRows.fromJson(Map<String, dynamic> j) => AskRows(
+        columns: (j['columns'] as List).map((e) => e as String).toList(),
+        rows: (j['rows'] as List)
+            .map((r) => (r as List).map((c) => c as String?).toList())
+            .toList(),
+      );
+}
+
+/// Bir ölçüm tanımı (işlem + kolon) — çoklu metrik yanıtlarında başlık üretmek için.
+class AskMetric {
+  final String op;
+  final String? column;
+
+  AskMetric({required this.op, this.column});
+
+  factory AskMetric.fromJson(Map<String, dynamic> j) =>
+      AskMetric(op: j['op'] as String? ?? '', column: j['column'] as String?);
+
+  static const _labels = {
+    'count': 'Adet',
+    'sum': 'Toplam',
+    'avg': 'Ortalama',
+    'min': 'En düşük',
+    'max': 'En yüksek',
+    'countDistinct': 'Farklı değer',
+  };
+
+  String get label {
+    final name = _labels[op] ?? op;
+    return column == null ? name : '$column $name';
+  }
+}
+
+/// Özet (agregasyon) sonucu.
+class AskAggregate {
+  final List<String> groupBy;
+  final List<AskMetric> metrics;
+  final String? bucket;
+  final List<AskBucket> buckets;
+
+  AskAggregate({
+    required this.groupBy,
+    required this.metrics,
+    this.bucket,
+    required this.buckets,
+  });
+
+  factory AskAggregate.fromJson(Map<String, dynamic> j) => AskAggregate(
+        groupBy: (j['groupBy'] as List? ?? []).map((e) => e as String).toList(),
+        metrics: (j['metrics'] as List? ?? [])
+            .map((e) => AskMetric.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        bucket: j['bucket'] as String?,
+        buckets: (j['buckets'] as List? ?? [])
+            .map((e) => AskBucket.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+
+  /// Gruplama yoksa tek satırlık bir sonuçtur (KPI); grafik yerine rakam gösterilir.
+  bool get isSingleValue => groupBy.isEmpty;
+}
+
+/// Tek bir grup: anahtarlar (çoklu gruplama), değerler (çoklu ölçüm), satır sayısı, pay.
+class AskBucket {
+  final List<String?> keys;
+  final List<double?> values;
+  final int count;
+  final double? share;
+
+  AskBucket({
+    required this.keys,
+    required this.values,
+    required this.count,
+    this.share,
+  });
+
+  factory AskBucket.fromJson(Map<String, dynamic> j) => AskBucket(
+        keys: (j['keys'] as List? ?? []).map((e) => e as String?).toList(),
+        values:
+            (j['values'] as List? ?? []).map((e) => (e as num?)?.toDouble()).toList(),
+        count: (j['count'] as num?)?.toInt() ?? 0,
+        share: (j['share'] as num?)?.toDouble(),
+      );
+
+  String get label => keys.where((k) => k != null).join(' · ');
+}
+
+/// Dönem karşılaştırma satırı. previous/delta null olabilir: o grup önceki dönemde
+/// HİÇ yoksa fark hesaplanamaz (eksik dönem sıfır sayılmıyor).
+class AskComparisonRow {
+  final String? key;
+  final double? current;
+  final double? previous;
+  final double? delta;
+  final double? deltaPercent;
+
+  AskComparisonRow({
+    this.key,
+    this.current,
+    this.previous,
+    this.delta,
+    this.deltaPercent,
+  });
+
+  factory AskComparisonRow.fromJson(Map<String, dynamic> j) => AskComparisonRow(
+        key: j['key'] as String?,
+        current: (j['current'] as num?)?.toDouble(),
+        previous: (j['previous'] as num?)?.toDouble(),
+        delta: (j['delta'] as num?)?.toDouble(),
+        deltaPercent: (j['deltaPercent'] as num?)?.toDouble(),
+      );
+}
+
+class AskComparison {
+  final String period;
+  final String previous;
+  final List<AskComparisonRow> rows;
+
+  AskComparison({
+    required this.period,
+    required this.previous,
+    required this.rows,
+  });
+
+  factory AskComparison.fromJson(Map<String, dynamic> j) => AskComparison(
+        period: j['period'] as String? ?? '',
+        previous: j['previous'] as String? ?? '',
+        rows: (j['buckets'] as List? ?? [])
+            .map((e) => AskComparisonRow.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
+/// Sorgunun tam yanıtı.
+///
+/// Sunucu üretilen SQL'i de döndürüyor ama ARAYÜZ ONU OKUMUYOR: iş kullanıcısı SQL
+/// okumaz. Kullanıcıya dönük doğrulama aracı `summary` ("anladığım sorgu") satırıdır —
+/// modelin soruyu yanlış anladığını oradan fark eder.
+class AskResult {
+  final String question;
+  final String kind; // "rows" | "aggregate" | "unsupported"
+  final String summary;
+  final List<String> datasets;
+  final String model;
+  final String? reason;
+
+  /// Yanıtın kaydedildiği sohbet. Sonraki soru bununla gönderilir ki aynı sohbete eklensin.
+  final String? conversationId;
+
+  final int planMs;
+  final int queryMs;
+  final AskRows? rows;
+  final AskAggregate? aggregate;
+  final AskComparison? comparison;
+
+  AskResult({
+    required this.question,
+    required this.kind,
+    required this.summary,
+    required this.datasets,
+    required this.model,
+    this.reason,
+    this.conversationId,
+    required this.planMs,
+    required this.queryMs,
+    this.rows,
+    this.aggregate,
+    this.comparison,
+  });
+
+  bool get isUnsupported => kind == 'unsupported';
+
+  factory AskResult.fromJson(Map<String, dynamic> j) => AskResult(
+        question: j['question'] as String? ?? '',
+        kind: j['kind'] as String? ?? '',
+        summary: j['summary'] as String? ?? '',
+        datasets: (j['datasets'] as List? ?? []).map((e) => e as String).toList(),
+        model: j['model'] as String? ?? '',
+        reason: j['reason'] as String?,
+        conversationId: j['conversationId'] as String?,
+        planMs: (j['planMs'] as num?)?.toInt() ?? 0,
+        queryMs: (j['queryMs'] as num?)?.toInt() ?? 0,
+        rows: j['rows'] == null
+            ? null
+            : AskRows.fromJson(j['rows'] as Map<String, dynamic>),
+        aggregate: j['aggregate'] == null
+            ? null
+            : AskAggregate.fromJson(j['aggregate'] as Map<String, dynamic>),
+        comparison: j['comparison'] == null
+            ? null
+            : AskComparison.fromJson(j['comparison'] as Map<String, dynamic>),
+      );
+}
+
+/// Karşılama ekranındaki örnek sorular.
+///
+/// [ready] false ise üretim sunucuda sürüyor demektir — sorular modele yazdırılıyor ve
+/// her biri gösterilmeden önce gerçekten çalıştırılıp doğrulanıyor. İstemci biraz sonra
+/// tekrar sorar.
+class AskSuggestions {
+  final bool ready;
+  final List<String> questions;
+
+  AskSuggestions({required this.ready, required this.questions});
+
+  factory AskSuggestions.fromJson(Map<String, dynamic> j) => AskSuggestions(
+        ready: j['ready'] as bool? ?? false,
+        questions:
+            (j['questions'] as List? ?? []).map((e) => e as String).toList(),
+      );
+}
+
+/// Sohbet listesindeki bir satır.
+class ChatSummary {
+  final String id;
+  final String title;
+  final DateTime updatedAt;
+  final int messageCount;
+
+  ChatSummary({
+    required this.id,
+    required this.title,
+    required this.updatedAt,
+    required this.messageCount,
+  });
+
+  factory ChatSummary.fromJson(Map<String, dynamic> j) => ChatSummary(
+        id: j['id'] as String,
+        title: j['title'] as String,
+        updatedAt: DateTime.tryParse(j['updatedAt'] as String? ?? '') ?? DateTime.now(),
+        messageCount: (j['messageCount'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// Geçmiş bir sohbetteki tek tur: soru + o gün verilen yanıt.
+class ChatTurn {
+  final String question;
+  final AskResult result;
+
+  ChatTurn({required this.question, required this.result});
+
+  factory ChatTurn.fromJson(Map<String, dynamic> j) => ChatTurn(
+        question: j['question'] as String,
+        result: AskResult.fromJson(j['response'] as Map<String, dynamic>),
+      );
+}
+
+class ChatDetail {
+  final String id;
+  final String title;
+  final List<ChatTurn> turns;
+
+  ChatDetail({required this.id, required this.title, required this.turns});
+
+  factory ChatDetail.fromJson(Map<String, dynamic> j) => ChatDetail(
+        id: j['id'] as String,
+        title: j['title'] as String,
+        turns: (j['turns'] as List? ?? [])
+            .map((e) => ChatTurn.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
+/// İki veri seti arasındaki tanımlı bağ.
+class DatasetRelation {
+  final String id;
+  final String fromDatasetId;
+  final String fromDatasetName;
+  final String fromColumn;
+  final String toDatasetId;
+  final String toDatasetName;
+  final String toColumn;
+
+  DatasetRelation({
+    required this.id,
+    required this.fromDatasetId,
+    required this.fromDatasetName,
+    required this.fromColumn,
+    required this.toDatasetId,
+    required this.toDatasetName,
+    required this.toColumn,
+  });
+
+  factory DatasetRelation.fromJson(Map<String, dynamic> j) => DatasetRelation(
+        id: j['id'] as String,
+        fromDatasetId: j['fromDatasetId'] as String,
+        fromDatasetName: j['fromDatasetName'] as String,
+        fromColumn: j['fromColumn'] as String,
+        toDatasetId: j['toDatasetId'] as String,
+        toDatasetName: j['toDatasetName'] as String,
+        toColumn: j['toColumn'] as String,
+      );
+
+  String get label => '$fromDatasetName.$fromColumn = $toDatasetName.$toColumn';
 }

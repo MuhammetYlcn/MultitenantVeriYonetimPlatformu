@@ -88,6 +88,7 @@ public static class QueryPromptBuilder
                 {"logic":"or", "children":[ {...}, {...} ]}
               ],
 
+              "select": ["<yalnız sorulan kolonlar (kind=rows)>"],
               "sort": "<kolon adı (kind=rows) | 'key' | 'value'>",
               "dir": "asc" | "desc",
               "limit": <sayı>,
@@ -123,9 +124,18 @@ public static class QueryPromptBuilder
         sb.AppendLine("  join YALNIZCA yukarıda tanımlı ilişki varsa kullanılabilir. İlişki yoksa kind=unsupported.");
         sb.AppendLine("- Birden çok set kullanıyorsan kolonları \"VeriSetiAdı.kolon\" biçiminde yaz.");
         sb.AppendLine("  Tek set kullanıyorsan sade kolon adı yeter.");
-        sb.AppendLine("- Soru bir LİSTE istiyorsa (\"hangileri\", \"göster\", \"listele\") kind=rows kullan.");
+        sb.AppendLine("- Soru bir LİSTE ya da TEK BİR KAYIT istiyorsa kind=rows kullan.");
         sb.AppendLine("- Soru bir HESAP istiyorsa (\"toplam\", \"ortalama\", \"kaç tane\") kind=aggregate kullan.");
-        sb.AppendLine("- Tarihleri kendin hesaplama. \"bu yıl\" için inPeriod + dönem etiketi kullan.");
+        sb.AppendLine("- kind=rows'ta select ZORUNLU: SADECE sorulan kolonları yaz.");
+        sb.AppendLine("  \"en pahalı satışı yapan müşterinin ADI\" sorusunun cevabı tek bir isimdir;");
+        sb.AppendLine("  o satırın bütün alanlarını döndürmek yanlış cevaptır.");
+        sb.AppendLine("- Soru tek bir şey soruyorsa limit:1 kullan.");
+        sb.AppendLine("- GÖRELİ dönemler (\"bu yıl\", \"geçen ay\") için inPeriod + dönem etiketi kullan.");
+        sb.AppendLine("  Tarihi kendin hesaplama.");
+        sb.AppendLine("- BELİRLİ bir yıl/ay/aralık için inPeriod KULLANMA (o yalnız göreli dönemler içindir).");
+        sb.AppendLine("  Bunun yerine iki filtre yaz: gte (başlangıç) ve lt (bitiş).");
+        sb.AppendLine("  \"2023 yılında\" → gte 2023-01-01 ve lt 2024-01-01");
+        sb.AppendLine("  Soruda geçen tarih koşulunu ATLAMA: filtresiz cevap yanlış cevaptır.");
         sb.AppendLine("- \"A ve B'deki\" gibi çoklu değerde ayrı ayrı eq DEĞİL, tek bir in kullan.");
         sb.AppendLine("- Soruyu bu şemayla ifade edemiyorsan kind=unsupported döndür ve reason yaz.");
         sb.AppendLine("  Uydurma. Yanlış cevap vermektense cevaplayamadığını söylemen daha iyidir.");
@@ -148,13 +158,23 @@ public static class QueryPromptBuilder
         {"kind":"aggregate","from":"Satislar","groupBy":["sehir"],"metrics":[{"op":"sum","column":"tutar"}]}
 
         Soru: En pahalı 5 ürün hangileri
-        {"kind":"rows","from":"Satislar","sort":"tutar","dir":"desc","limit":5}
+        {"kind":"rows","from":"Satislar","select":["urun","tutar"],"sort":"tutar","dir":"desc","limit":5}
+
+        Soru: En pahalı satışı yapan müşterinin adı
+        (Satislar.musteri_no = Musteriler.no ilişkisi tanımlıysa)
+        {"kind":"rows","from":"Satislar","join":["Musteriler"],"select":["Musteriler.ad"],"sort":"Satislar.tutar","dir":"desc","limit":1}
+
+        Soru: En son satış ne zaman yapıldı
+        {"kind":"rows","from":"Satislar","select":["tarih"],"sort":"tarih","dir":"desc","limit":1}
 
         Soru: Ankara ve İzmir'deki satışların adedi
         {"kind":"aggregate","from":"Satislar","metrics":[{"op":"count"}],"filters":[{"column":"sehir","op":"in","values":["Ankara","İzmir"]}]}
 
         Soru: Bu yıl aylara göre ciro
         {"kind":"aggregate","from":"Satislar","groupBy":["tarih"],"bucket":"month","metrics":[{"op":"sum","column":"tutar"}],"filters":[{"column":"tarih","op":"inPeriod","value":"buYil"}]}
+
+        Soru: 2023 yılında toplam satış ne kadar
+        {"kind":"aggregate","from":"Satislar","metrics":[{"op":"sum","column":"tutar"}],"filters":[{"column":"tarih","op":"gte","value":"2023-01-01"},{"column":"tarih","op":"lt","value":"2024-01-01"}]}
 
         Soru: Ortalama satışı 1000'in üstünde olan şehirler
         {"kind":"aggregate","from":"Satislar","groupBy":["sehir"],"metrics":[{"op":"avg","column":"tutar"}],"having":{"metric":0,"op":"gt","value":1000}}

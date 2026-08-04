@@ -24,7 +24,10 @@ public static class PlanSummary
 
         if (kind == "rows")
         {
-            sb.Append(" satırları listelenir");
+            var select = plan.Select ?? Array.Empty<string>();
+            sb.Append(select.Count > 0
+                ? $" verisinden {string.Join(", ", select)}"
+                : " satırları listelenir");
 
             if (!string.IsNullOrWhiteSpace(plan.Sort))
                 sb.Append($"; {plan.Sort} göre {(IsDesc(plan.Dir) ? "azalan" : "artan")} sırada");

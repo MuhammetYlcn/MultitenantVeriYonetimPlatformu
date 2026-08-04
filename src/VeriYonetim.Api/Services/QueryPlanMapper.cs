@@ -107,6 +107,93 @@ public static class QueryPlanMapper
         return query with { Filters = filters };
     }
 
+    private static readonly System.Text.RegularExpressions.Regex YearPattern =
+        new(@"\b(19|20)\d{2}\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static readonly System.Text.RegularExpressions.Regex DatePattern =
+        new(@"\d{4}-\d{2}-\d{2}", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    // Soruda açıkça geçen ama plana HİÇ yansımayan tarih koşulunu yakalar.
+    //
+    // Neden gerekli? Model bir koşulu sessizce atlayabilir: "2023 yılında toplam satış"
+    // sorusuna filtresiz bir plan üretirse sonuç BÜTÜN yılların toplamı olur. Sorgu
+    // çalışır, hata çıkmaz, grafik çizilir — ve kullanıcı yanlış sayıya bakar. Sistemin
+    // verebileceği en kötü cevap türü budur; sessiz olduğu için fark edilmez.
+    //
+    // Kontrol bilinçli olarak GEVŞEK: planda herhangi bir tarih koşulu varsa ona güveniyoruz.
+    // Amaç "yanlış aralık seçilmiş mi" değil, "koşul tümden düşmüş mü" sorusunu yakalamak.
+    public static void ValidateAgainstQuestion(QueryPlan plan, string question)
+    {
+        if (!YearPattern.IsMatch(question)) return;
+
+        // Dönem karşılaştırması zaten tarihe dayanır.
+        if (plan.Compare is not null) return;
+
+        var values = new List<string>();
+        CollectFilterValues(plan.Filters, values);
+
+        var hasDateCondition = values.Any(v =>
+            DatePattern.IsMatch(v) || RelativePeriod.Tokens.Contains(v));
+
+        if (hasDateCondition) return;
+
+        var year = YearPattern.Match(question).Value;
+        throw new InvalidQueryException(
+            $"Soruda geçen {year} yılı için bir tarih koşulu üretilemedi. " +
+            "Filtresiz bir toplam göstermek yanıltıcı olurdu; soruyu biraz farklı yazmayı deneyin.");
+    }
+
+    private static void CollectFilterValues(IReadOnlyList<PlanFilter>? filters, List<string> into)
+    {
+        foreach (var f in filters ?? Array.Empty<PlanFilter>())
+        {
+            if (!string.IsNullOrWhiteSpace(f.Logic))
+            {
+                CollectFilterValues(f.Children, into);
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(f.Value)) into.Add(f.Value.Trim());
+            foreach (var v in f.Values ?? Array.Empty<string>())
+                if (!string.IsNullOrWhiteSpace(v)) into.Add(v.Trim());
+        }
+    }
+
+    // Planın dokunduğu bütün kolon referansları.
+    //
+    // Ne işe yarar? Model gerekli veri setini join'e eklemeyi unutabilir ("şehirlere göre
+    // toplam satış" — şehir Müşteriler'de). Hangi kolonların istendiğini bilirsek eksik
+    // seti kendimiz ekleyebiliriz (bkz. TenantCatalog.BuildScope).
+    public static IReadOnlyList<string> ColumnReferences(QueryPlan plan)
+    {
+        var refs = new List<string>();
+
+        void Add(string? name)
+        {
+            if (!string.IsNullOrWhiteSpace(name)) refs.Add(name.Trim());
+        }
+
+        foreach (var g in plan.GroupBy ?? Array.Empty<string>()) Add(g);
+        foreach (var s in plan.Select ?? Array.Empty<string>()) Add(s);
+        foreach (var m in plan.Metrics ?? Array.Empty<PlanMetric>()) Add(m.Column);
+        Add(plan.Sort);
+        Add(plan.Compare?.Column);
+        CollectFilterColumns(plan.Filters, refs);
+
+        return refs;
+    }
+
+    private static void CollectFilterColumns(IReadOnlyList<PlanFilter>? filters, List<string> into)
+    {
+        foreach (var f in filters ?? Array.Empty<PlanFilter>())
+        {
+            if (!string.IsNullOrWhiteSpace(f.Logic))
+                CollectFilterColumns(f.Children, into);
+            else if (!string.IsNullOrWhiteSpace(f.Column))
+                into.Add(f.Column.Trim());
+        }
+    }
+
     public static IReadOnlyList<FilterNode> MapFilters(IReadOnlyList<PlanFilter>? filters) =>
         (filters ?? Array.Empty<PlanFilter>()).Select(MapFilter).ToList();
 

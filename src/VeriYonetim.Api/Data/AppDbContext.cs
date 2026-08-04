@@ -24,6 +24,8 @@ public class AppDbContext : DbContext
     public DbSet<DatasetColumn> DatasetColumns => Set<DatasetColumn>();
     public DbSet<DatasetRow> DatasetRows => Set<DatasetRow>();
     public DbSet<DatasetRelation> DatasetRelations => Set<DatasetRelation>();
+    public DbSet<AskConversation> AskConversations => Set<AskConversation>();
+    public DbSet<AskMessage> AskMessages => Set<AskMessage>();
     public DbSet<AccountToken> AccountTokens => Set<AccountToken>();
 
     // Platform katmanı: tenant'ların üstünde durur, bu yüzden global query filter YOK.
@@ -183,6 +185,36 @@ public class AppDbContext : DbContext
 
             // İzolasyon Dataset üzerinden (DatasetColumn/DatasetRow ile aynı desen).
             relation.HasQueryFilter(r => r.FromDataset.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<AskConversation>(conversation =>
+        {
+            conversation.Property(c => c.Title).HasMaxLength(200);
+
+            // Kullanıcı silinince sohbetleri de gitsin.
+            conversation.HasOne(c => c.User)
+                .WithMany()
+                .HasForeignKey(c => c.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Liste en son konuşulana göre sıralandığı için indeks.
+            conversation.HasIndex(c => new { c.UserId, c.UpdatedAt });
+
+            // İzolasyon User üzerinden. Ayrıca uçlar kullanıcının KENDİ sohbetlerine
+            // filtreler: sohbet kişiseldir, aynı firmadaki başkası göremez.
+            conversation.HasQueryFilter(c => c.User.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<AskMessage>(message =>
+        {
+            message.Property(m => m.Question).HasMaxLength(500);
+
+            message.HasOne(m => m.Conversation)
+                .WithMany(c => c.Messages)
+                .HasForeignKey(m => m.ConversationId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            message.HasQueryFilter(m => m.Conversation.User.TenantId == _tenantContext.TenantId);
         });
     }
 }

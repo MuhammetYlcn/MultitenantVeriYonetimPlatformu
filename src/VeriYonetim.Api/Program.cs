@@ -25,6 +25,10 @@ builder.Services.AddScoped<IDatasetQueryExecutor, DatasetQueryExecutor>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, TenantContext>();
 
+// Örnek soru üretimi SINGLETON: sonuçlar önbellekte tutuluyor ve üretim arka planda
+// çalışıyor (istek ömründen uzun), o yüzden scoped olamaz.
+builder.Services.AddSingleton<IAskSuggestionService, AskSuggestionService>();
+
 // Doğal dil → sorgu planı. Model kendi makinemizde (Ollama) çalışır: veri kurum dışına
 // çıkmaz, KVKK argümanı buna dayanıyor.
 builder.Services.Configure<OllamaOptions>(builder.Configuration.GetSection("Ollama"));

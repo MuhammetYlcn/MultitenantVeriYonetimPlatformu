@@ -3,6 +3,7 @@ import '../api_service.dart';
 import '../widgets/app_shell.dart';
 import '../widgets/change_password_dialog.dart';
 import '../widgets/ui.dart';
+import 'ask_screen.dart';
 import 'dashboard_screen.dart';
 import 'data_table_screen.dart';
 import 'datasets_screen.dart';
@@ -28,12 +29,19 @@ class _HomeShellState extends State<HomeShell> {
 
   // Kullanıcı yönetimi yalnız Admin'e görünür → bölüm listesi role göre kurulur.
   List<String> get _keys => [
+        'ask',
         'datasets',
         'dashboard',
         if (ApiService.isAdmin) 'users',
       ];
 
   List<ShellDestination> get _destinations => [
+        // Sorgu en üstte: platformun asıl vaadi bu, veri yönetimi ona hizmet ediyor.
+        const ShellDestination(
+          icon: Icons.auto_awesome_outlined,
+          activeIcon: Icons.auto_awesome,
+          label: 'Soru sor',
+        ),
         const ShellDestination(
           icon: Icons.folder_outlined,
           activeIcon: Icons.folder,
@@ -81,12 +89,12 @@ class _HomeShellState extends State<HomeShell> {
 
   void _openDataset(Dataset d) => setState(() {
         _selected = d;
-        _index = 0; // tablo, veri setleri bölümünün içinde açılır
+        _index = _keys.indexOf('datasets'); // tablo, veri setleri bölümünün içinde açılır
       });
 
   void _closeDataset() => setState(() => _selected = null);
 
-  void _openDashboard() => setState(() => _index = 1);
+  void _openDashboard() => setState(() => _index = _keys.indexOf('dashboard'));
 
   // Seçili veri seti silinirse ya da adı değişirse seçim tazelenir/temizlenir.
   void _onDatasetGone(String id) {
@@ -97,6 +105,7 @@ class _HomeShellState extends State<HomeShell> {
     final key = _keys[_index];
     final name = _selected?.name;
     return switch (key) {
+      'ask' => ['Soru sor'],
       'datasets' => ['Veri setleri', ?name],
       'dashboard' => ['Panel', ?name],
       _ => ['Kullanıcılar'],
@@ -105,6 +114,9 @@ class _HomeShellState extends State<HomeShell> {
 
   Widget get _body {
     switch (_keys[_index]) {
+      case 'ask':
+        return const AskPage();
+
       case 'datasets':
         final selected = _selected;
         if (selected == null) {
@@ -126,7 +138,7 @@ class _HomeShellState extends State<HomeShell> {
                 'Özet kartları ve grafikler seçili veri setine göre hesaplanır. '
                 'Veri setleri bölümünden birini aç, sonra buraya dön.',
             action: FilledButton.icon(
-              onPressed: () => setState(() => _index = 0),
+              onPressed: () => setState(() => _index = _keys.indexOf('datasets')),
               icon: const Icon(Icons.folder_outlined, size: 18),
               label: const Text('Veri setlerine git'),
             ),

@@ -25,12 +25,27 @@ public class OllamaOptions
 public class QueryPlannerException(string message, Exception? inner = null)
     : Exception(message, inner);
 
-public record PlanResult(QueryPlan Plan, string RawJson, int DurationMs);
+public record PlanResult(QueryPlan Plan, string RawJson, int DurationMs, string Model);
+
+// Kurulu bir model. Boyut ve parametre sayısı arayüzde gösteriliyor: kullanıcı hangi
+// modelin daha ağır (ve yavaş) olduğunu görmeden seçim yapamaz.
+public record OllamaModel(
+    string Name,
+    long SizeBytes,
+    string? ParameterSize,
+    string? Quantization,
+    bool IsDefault);
 
 public interface IQueryPlannerService
 {
     Task<PlanResult> PlanAsync(string question, TenantCatalog catalog,
-        CancellationToken ct = default);
+        string? model = null, CancellationToken ct = default);
+
+    Task<IReadOnlyList<OllamaModel>> ListModelsAsync(CancellationToken ct = default);
+
+    // Ham istem → ham JSON yanıt. Plan üretimi dışındaki JSON işleri (ör. örnek soru
+    // üretimi) ayrı bir Ollama istemcisi yazmak yerine bunu kullanır.
+    Task<string> CompleteJsonAsync(string prompt, string? model = null, CancellationToken ct = default);
 }
 
 public class QueryPlannerService : IQueryPlannerService
@@ -51,8 +66,36 @@ public class QueryPlannerService : IQueryPlannerService
         _logger = logger;
     }
 
+    // Kurulu modeller (Ollama /api/tags). Liste kullanıcıya sunulduğu için ayrıca
+    // doğrulama kaynağı: seçilen model bu listede yoksa isteği hiç göndermiyoruz.
+    public async Task<IReadOnlyList<OllamaModel>> ListModelsAsync(CancellationToken ct = default)
+    {
+        OllamaTagsResponse? tags;
+        try
+        {
+            tags = await _http.GetFromJsonAsync<OllamaTagsResponse>("/api/tags", ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            throw new QueryPlannerException(
+                $"Yapay zekâ servisine ({_options.BaseUrl}) ulaşılamadı. Ollama çalışıyor mu?", ex);
+        }
+
+        return (tags?.Models ?? new List<OllamaTag>())
+            .Where(m => !string.IsNullOrWhiteSpace(m.Name))
+            .Select(m => new OllamaModel(
+                m.Name!,
+                m.Size,
+                m.Details?.ParameterSize,
+                m.Details?.QuantizationLevel,
+                IsDefault: m.Name == _options.Model))
+            .OrderByDescending(m => m.IsDefault)
+            .ThenBy(m => m.Name)
+            .ToList();
+    }
+
     public async Task<PlanResult> PlanAsync(string question, TenantCatalog catalog,
-        CancellationToken ct = default)
+        string? model = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(question))
             throw new InvalidQueryException("Soru boş olamaz.");
@@ -65,51 +108,29 @@ public class QueryPlannerService : IQueryPlannerService
             throw new InvalidQueryException(
                 "Sorgulanabilir veri seti yok; önce bir dosya yükleyip şema oluşturun.");
 
+        // Model seçimi kullanıcıdan gelebilir. Serbest metni doğrudan Ollama'ya
+        // göndermiyoruz: kurulu modeller arasında yoksa anlaşılır bir hata veriyoruz
+        // (aksi halde kullanıcı Ollama'nın ham "model not found" hatasını görürdü).
+        var selected = _options.Model;
+        if (!string.IsNullOrWhiteSpace(model) && model.Trim() != _options.Model)
+        {
+            var installed = await ListModelsAsync(ct);
+            var match = installed.FirstOrDefault(m =>
+                string.Equals(m.Name, model.Trim(), StringComparison.OrdinalIgnoreCase));
+
+            if (match is null)
+                throw new InvalidQueryException(
+                    $"'{model}' modeli kurulu değil. Kurulu modeller: " +
+                    string.Join(", ", installed.Select(m => m.Name)));
+
+            selected = match.Name;
+        }
+
         var prompt = QueryPromptBuilder.Build(question.Trim(), catalog);
 
-        var request = new OllamaGenerateRequest(
-            Model: _options.Model,
-            Prompt: prompt,
-            Stream: false,
-            // format=json: Ollama çıktının geçerli JSON olmasını dilbilgisi düzeyinde
-            // zorlar. Modelin "İşte planınız:" gibi bir giriş cümlesi yazma ihtimalini
-            // ayrıştırma öncesinde ortadan kaldırır.
-            Format: "json",
-            // temperature=0: aynı soru aynı planı üretsin. Yaratıcılık istemiyoruz;
-            // tekrarlanabilirlik hem hata ayıklamayı hem demoyu güvenilir kılar.
-            Options: new OllamaModelOptions(Temperature: 0));
-
         var stopwatch = Stopwatch.StartNew();
-        OllamaGenerateResponse? response;
-
-        try
-        {
-            var http = await _http.PostAsJsonAsync("/api/generate", request, ct);
-
-            if (!http.IsSuccessStatusCode)
-                throw new QueryPlannerException(
-                    $"Yapay zekâ servisi yanıt vermedi (HTTP {(int)http.StatusCode}). " +
-                    $"'{_options.Model}' modeli yüklü mü?");
-
-            response = await http.Content.ReadFromJsonAsync<OllamaGenerateResponse>(ct);
-        }
-        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
-        {
-            // İstek iptali değil, zaman aşımı.
-            throw new QueryPlannerException(
-                $"Yapay zekâ servisi {_options.TimeoutSeconds} saniyede yanıt veremedi.", ex);
-        }
-        catch (HttpRequestException ex)
-        {
-            throw new QueryPlannerException(
-                $"Yapay zekâ servisine ({_options.BaseUrl}) ulaşılamadı. Ollama çalışıyor mu?", ex);
-        }
-
+        var raw = await GenerateAsync(prompt, selected, ct);
         stopwatch.Stop();
-
-        var raw = response?.Response;
-        if (string.IsNullOrWhiteSpace(raw))
-            throw new QueryPlannerException("Yapay zekâ servisi boş yanıt döndürdü.");
 
         QueryPlan? plan;
         try
@@ -126,9 +147,60 @@ public class QueryPlannerService : IQueryPlannerService
         if (plan is null)
             throw new QueryPlannerException("Yapay zekâ geçerli bir sorgu planı üretemedi.");
 
-        _logger.LogInformation("Sorgu planı üretildi ({Ms} ms): {Raw}", stopwatch.ElapsedMilliseconds, raw);
+        _logger.LogInformation("Sorgu planı üretildi ({Model}, {Ms} ms): {Raw}",
+            selected, stopwatch.ElapsedMilliseconds, raw);
 
-        return new PlanResult(plan, raw, (int)stopwatch.ElapsedMilliseconds);
+        return new PlanResult(plan, raw, (int)stopwatch.ElapsedMilliseconds, selected);
+    }
+
+    public Task<string> CompleteJsonAsync(string prompt, string? model = null,
+        CancellationToken ct = default) =>
+        GenerateAsync(prompt, string.IsNullOrWhiteSpace(model) ? _options.Model : model.Trim(), ct);
+
+    // Ollama'ya tek bir üretim isteği atar ve ham yanıt metnini döndürür.
+    private async Task<string> GenerateAsync(string prompt, string model, CancellationToken ct)
+    {
+        var request = new OllamaGenerateRequest(
+            Model: model,
+            Prompt: prompt,
+            Stream: false,
+            // format=json: Ollama çıktının geçerli JSON olmasını dilbilgisi düzeyinde
+            // zorlar. Modelin "İşte planınız:" gibi bir giriş cümlesi yazma ihtimalini
+            // ayrıştırma öncesinde ortadan kaldırır.
+            Format: "json",
+            // temperature=0: aynı soru aynı planı üretsin. Yaratıcılık istemiyoruz;
+            // tekrarlanabilirlik hem hata ayıklamayı hem demoyu güvenilir kılar.
+            Options: new OllamaModelOptions(Temperature: 0));
+
+        OllamaGenerateResponse? response;
+        try
+        {
+            var http = await _http.PostAsJsonAsync("/api/generate", request, ct);
+
+            if (!http.IsSuccessStatusCode)
+                throw new QueryPlannerException(
+                    $"Yapay zekâ servisi yanıt vermedi (HTTP {(int)http.StatusCode}). " +
+                    $"'{model}' modeli yüklü mü?");
+
+            response = await http.Content.ReadFromJsonAsync<OllamaGenerateResponse>(ct);
+        }
+        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            // İstek iptali değil, zaman aşımı.
+            throw new QueryPlannerException(
+                $"Yapay zekâ servisi {_options.TimeoutSeconds} saniyede yanıt veremedi.", ex);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new QueryPlannerException(
+                $"Yapay zekâ servisine ({_options.BaseUrl}) ulaşılamadı. Ollama çalışıyor mu?", ex);
+        }
+
+        var raw = response?.Response;
+        if (string.IsNullOrWhiteSpace(raw))
+            throw new QueryPlannerException("Yapay zekâ servisi boş yanıt döndürdü.");
+
+        return raw;
     }
 
     // --- Ollama HTTP sözleşmesi ---
@@ -147,4 +219,16 @@ public class QueryPlannerService : IQueryPlannerService
 
     private record OllamaGenerateResponse(
         [property: JsonPropertyName("response")] string? Response);
+
+    private record OllamaTagsResponse(
+        [property: JsonPropertyName("models")] List<OllamaTag>? Models);
+
+    private record OllamaTag(
+        [property: JsonPropertyName("name")] string? Name,
+        [property: JsonPropertyName("size")] long Size,
+        [property: JsonPropertyName("details")] OllamaTagDetails? Details);
+
+    private record OllamaTagDetails(
+        [property: JsonPropertyName("parameter_size")] string? ParameterSize,
+        [property: JsonPropertyName("quantization_level")] string? QuantizationLevel);
 }

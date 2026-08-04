@@ -5,7 +5,8 @@ public record DatasetInfo(
     Guid Id,
     string Name,
     string? Description,
-    IReadOnlyDictionary<string, string> Columns);
+    IReadOnlyDictionary<string, string> Columns,
+    int RowCount = 0);
 
 // İki veri seti arasındaki bağ (DatasetRelation'ın sorgu tarafındaki karşılığı).
 public record RelationInfo(Guid FromDatasetId, string FromColumn, Guid ToDatasetId, string ToColumn);
@@ -32,7 +33,11 @@ public class TenantCatalog
         : Datasets.FirstOrDefault(d => string.Equals(d.Name, name.Trim(), StringComparison.OrdinalIgnoreCase));
 
     // Seçilen veri setlerinden sorgu kapsamı kurar; aralarındaki bağları katalogdan bulur.
-    public QueryScope BuildScope(IReadOnlyList<string> datasetNames)
+    //
+    // requiredColumns verilirse, kapsamda bulunamayan kolonlar için gereken veri setleri
+    // KENDİLİĞİNDEN eklenir — ilişkileri tanımlı olmak şartıyla.
+    public QueryScope BuildScope(
+        IReadOnlyList<string> datasetNames, IReadOnlyList<string>? requiredColumns = null)
     {
         if (datasetNames.Count == 0)
             throw new InvalidQueryException("Sorgunun hangi veri setini kullanacağı belirtilmemiş.");
@@ -58,8 +63,53 @@ public class TenantCatalog
             sources.Add(new QuerySource($"d{sources.Count}", dataset.Id, dataset.Name, dataset.Columns));
         }
 
-        return new QueryScope(sources, BuildJoins(sources));
+        AddSourcesForMissingColumns(sources, seen, requiredColumns);
+
+        return new QueryScope(sources, BuildJoins(sources), LocateColumn);
     }
+
+    // Model gerekli veri setini join'e eklemeyi unutabilir: "şehirlere göre toplam satış"
+    // sorusunda şehir Müşteriler'dedir ama model yalnız Satışlar'ı seçer.
+    //
+    // Bu durumda hata vermek yerine seti kendimiz ekliyoruz — çünkü belirsizlik YOK:
+    // aranan kolonu içeren ve mevcut kaynaklardan birine TANIMLI ilişkiyle bağlanan tek
+    // bir set varsa, kullanıcının kastettiği odur. Birden fazla aday varsa dokunmuyoruz;
+    // orada tahmin yürütmek sessiz yanlış cevap üretirdi.
+    private void AddSourcesForMissingColumns(
+        List<QuerySource> sources, HashSet<Guid> seen, IReadOnlyList<string>? requiredColumns)
+    {
+        foreach (var reference in requiredColumns ?? Array.Empty<string>())
+        {
+            // Nitelikli referansın ("Musteriler.sehir") set adı zaten belli.
+            var dot = reference.IndexOf('.');
+            var wanted = dot > 0 ? reference[(dot + 1)..] : reference;
+            var qualifier = dot > 0 ? reference[..dot] : null;
+
+            if (sources.Any(s => s.Columns.ContainsKey(wanted) &&
+                                 (qualifier is null ||
+                                  string.Equals(s.Name, qualifier, StringComparison.OrdinalIgnoreCase))))
+                continue;
+
+            var candidates = Datasets
+                .Where(d => !seen.Contains(d.Id))
+                .Where(d => d.Columns.ContainsKey(wanted))
+                .Where(d => qualifier is null ||
+                            string.Equals(d.Name, qualifier, StringComparison.OrdinalIgnoreCase))
+                .Where(d => IsRelatedToAny(d.Id, sources))
+                .ToList();
+
+            if (candidates.Count != 1) continue;
+
+            var extra = candidates[0];
+            seen.Add(extra.Id);
+            sources.Add(new QuerySource($"d{sources.Count}", extra.Id, extra.Name, extra.Columns));
+        }
+    }
+
+    private bool IsRelatedToAny(Guid datasetId, IReadOnlyList<QuerySource> sources) =>
+        Relations.Any(r =>
+            (r.FromDatasetId == datasetId && sources.Any(s => s.DatasetId == r.ToDatasetId)) ||
+            (r.ToDatasetId == datasetId && sources.Any(s => s.DatasetId == r.FromDatasetId)));
 
     // Seçilen kaynaklar arasındaki ilişkileri takma adlara çevirir. Kataloğa tanımlanmamış
     // bir bağ varsa hata BuildFrom'da verilir (orada hangi setin bağlanamadığı bellidir).

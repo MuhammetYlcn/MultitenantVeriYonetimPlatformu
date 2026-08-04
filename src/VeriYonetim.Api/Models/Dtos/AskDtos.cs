@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json;
 using VeriYonetim.Api.Services;
 
 namespace VeriYonetim.Api.Models.Dtos;
@@ -6,7 +7,26 @@ namespace VeriYonetim.Api.Models.Dtos;
 // Doğal dil sorusu. Veri seti kimliği YOK: hangi setin (ya da setlerin) kullanılacağına
 // model karar verir — gerçek bir müşteride onlarca set olur ve kullanıcının her seferinde
 // doğru olanı seçmesini beklemek işi kullanıcıya geri yıkmak olurdu.
-public record AskRequest([Required, MaxLength(500)] string Question);
+// Model boş bırakılırsa sunucunun varsayılanı kullanılır. Kullanıcı seçtiğinde ise
+// yalnızca kurulu modeller kabul edilir (bkz. QueryPlannerService).
+// ConversationId verilirse yanıt o sohbete eklenir; verilmezse yeni sohbet açılır.
+public record AskRequest(
+    [Required, MaxLength(500)] string Question,
+    string? Model = null,
+    Guid? ConversationId = null);
+
+// Sohbet listesi satırı.
+public record ConversationSummary(Guid Id, string Title, DateTime UpdatedAt, int MessageCount);
+
+// Tek bir tur: soru + o soruya verilmiş yanıtın tamamı.
+//
+// Response ham JSON olarak taşınıyor: yanıtın şekli soruya göre değişiyor (tek değer,
+// tablo, grafik, karşılaştırma) ve geçmiş kayıt VERİLDİĞİ HÂLİYLE gösterilmeli —
+// yeniden hesaplanarak değil, çünkü veri o günden beri değişmiş olabilir.
+public record ConversationTurn(string Question, JsonElement Response, DateTime CreatedAt);
+
+public record ConversationDetail(
+    Guid Id, string Title, IReadOnlyList<ConversationTurn> Turns);
 
 // Satır listesi sonucu. Kolon adları ayrı taşınıyor çünkü JOIN'li sonuçta sütunlar
 // birden çok veri setinden gelir ("Musteriler.sehir").
@@ -33,6 +53,8 @@ public record AskResponse(
     string Kind,                          // "rows" | "aggregate" | "unsupported"
     string Summary,                       // "anladığım sorgu"
     IReadOnlyList<string> Datasets,       // kullanılan veri setleri
+    string Model = "",                    // yanıtı hangi model üretti
+    Guid? ConversationId = null,          // yanıtın kaydedildiği sohbet
     string? Reason = null,                // yalnız kind=unsupported
     string? Sql = null,
     int PlanMs = 0,

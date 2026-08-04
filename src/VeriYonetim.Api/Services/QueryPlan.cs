@@ -28,6 +28,10 @@ public record QueryPlan(
     IReadOnlyList<PlanFilter>? Filters = null,
 
     // --- rows ---
+    // Hangi kolonların döneceği. Boş bırakılırsa bütün kolonlar gelir — ama bu çoğu
+    // soruda YANLIŞ cevaptır: "en pahalı satışı yapan müşterinin adı" sorusunun cevabı
+    // tek bir isimdir, o satırın bütün alanları değil.
+    IReadOnlyList<string>? Select = null,
     string? Sort = null,
     string? Dir = null,
     int? Limit = null,

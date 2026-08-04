@@ -40,13 +40,20 @@ public class QueryScope
     // Tek kaynakta takma ad kullanılmaz (bkz. ResolvedColumn).
     public bool IsSingleSource => Sources.Count == 1;
 
-    public QueryScope(IReadOnlyList<QuerySource> sources, IReadOnlyList<QueryJoin>? joins = null)
+    // Kolon kapsamda yoksa BAŞKA hangi veri setinde olduğunu söyleyen arayıcı (opsiyonel).
+    // "Bilinmeyen kolon: sehir" teknik olarak doğru ama işe yaramaz bir mesaj; kullanıcının
+    // öğrenmesi gereken şey kolonun nerede olduğudur.
+    private readonly Func<string, string?>? _locate;
+
+    public QueryScope(IReadOnlyList<QuerySource> sources, IReadOnlyList<QueryJoin>? joins = null,
+        Func<string, string?>? columnLocator = null)
     {
         if (sources.Count == 0)
             throw new InvalidQueryException("Sorgu için en az bir veri seti gerekli.");
 
         Sources = sources;
         Joins = joins ?? Array.Empty<QueryJoin>();
+        _locate = columnLocator;
     }
 
     // Tek veri setli (mevcut querystring uçlarının) kullanımı için kısayol.
@@ -111,8 +118,13 @@ public class QueryScope
     // mesaj kullanıcıya "hangi sette ne var" bilgisini de vermiş olur.
     private string UnknownColumnMessage(string column)
     {
-        if (IsSingleSource)
-            return $"Bilinmeyen kolon: {column}";
+        // Kolon başka bir veri setinde varsa bunu SÖYLE: kullanıcı böylece eksiğin kolon
+        // değil, iki set arasındaki ilişki olduğunu anlar.
+        var elsewhere = _locate?.Invoke(column);
+        if (!string.IsNullOrWhiteSpace(elsewhere))
+            return $"'{column}' kolonu bu sorguda kullanılan veri setlerinde yok; " +
+                   $"'{elsewhere}' setinde bulunuyor. İki seti birleştirmek için aralarında " +
+                   "ilişki tanımlanmalı.";
 
         var available = string.Join(" | ",
             Sources.Select(s => $"{s.Name}: {string.Join(", ", s.Columns.Keys)}"));
