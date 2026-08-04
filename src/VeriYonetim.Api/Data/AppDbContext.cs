@@ -23,6 +23,7 @@ public class AppDbContext : DbContext
     public DbSet<Dataset> Datasets => Set<Dataset>();
     public DbSet<DatasetColumn> DatasetColumns => Set<DatasetColumn>();
     public DbSet<DatasetRow> DatasetRows => Set<DatasetRow>();
+    public DbSet<DatasetRelation> DatasetRelations => Set<DatasetRelation>();
     public DbSet<AccountToken> AccountTokens => Set<AccountToken>();
 
     // Platform katmanı: tenant'ların üstünde durur, bu yüzden global query filter YOK.
@@ -156,6 +157,32 @@ public class AppDbContext : DbContext
 
             // İzolasyon Dataset üzerinden (DatasetColumn ile aynı desen).
             row.HasQueryFilter(r => r.Dataset.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<DatasetRelation>(relation =>
+        {
+            relation.Property(r => r.FromColumn).HasMaxLength(200);
+            relation.Property(r => r.ToColumn).HasMaxLength(200);
+
+            // İki uç da aynı Dataset tablosuna baktığından EF'e hangi tarafın hangisi
+            // olduğu açıkça söylenmeli. Cascade YALNIZCA From tarafında: iki tarafa da
+            // cascade konsaydı PostgreSQL "multiple cascade paths" hatası verirdi.
+            relation.HasOne(r => r.FromDataset)
+                .WithMany()
+                .HasForeignKey(r => r.FromDatasetId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            relation.HasOne(r => r.ToDataset)
+                .WithMany()
+                .HasForeignKey(r => r.ToDatasetId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // Aynı iki kolon arasında ikinci bir ilişki kurulamasın.
+            relation.HasIndex(r => new { r.FromDatasetId, r.FromColumn, r.ToDatasetId, r.ToColumn })
+                .IsUnique();
+
+            // İzolasyon Dataset üzerinden (DatasetColumn/DatasetRow ile aynı desen).
+            relation.HasQueryFilter(r => r.FromDataset.TenantId == _tenantContext.TenantId);
         });
     }
 }

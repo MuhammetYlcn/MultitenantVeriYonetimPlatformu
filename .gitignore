@@ -10,6 +10,10 @@
 *rapor.docx
 ~$*.docx
 
+# Kişisel plan/ilerleme takibi (kapsam KAPSAM.md'de, o repoda kalır)
+PLAN.md
+PLAN.html
+
 # Yerel geliştirme ayarları (gizli anahtar/şifre içerir, repoya girmesin)
 appsettings.Development.json
 

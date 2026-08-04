@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using VeriYonetim.Api.Data;
 using VeriYonetim.Api.Middleware;
@@ -20,8 +21,20 @@ builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IAccountTokenService, AccountTokenService>();
 builder.Services.AddScoped<ITenantProvisioner, TenantProvisioner>();
 builder.Services.AddScoped<IDatasetImportService, DatasetImportService>();
+builder.Services.AddScoped<IDatasetQueryExecutor, DatasetQueryExecutor>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, TenantContext>();
+
+// Doğal dil → sorgu planı. Model kendi makinemizde (Ollama) çalışır: veri kurum dışına
+// çıkmaz, KVKK argümanı buna dayanıyor.
+builder.Services.Configure<OllamaOptions>(builder.Configuration.GetSection("Ollama"));
+builder.Services.AddHttpClient<IQueryPlannerService, QueryPlannerService>((sp, client) =>
+{
+    var ollama = sp.GetRequiredService<IOptions<OllamaOptions>>().Value;
+    client.BaseAddress = new Uri(ollama.BaseUrl);
+    // Zaman aşımı HttpClient üzerinde: ilk çağrıda model belleğe yükleniyor ve uzun sürüyor.
+    client.Timeout = TimeSpan.FromSeconds(ollama.TimeoutSeconds);
+});
 
 var jwt = builder.Configuration.GetSection("Jwt");
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)

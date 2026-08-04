@@ -475,6 +475,17 @@ public class DatasetsController : ControllerBase
         if (dataset is null)
             return DatasetNotFound();
 
+        // İlişkiler İKİ yönde de temizlenir. Veritabanı cascade'i yalnız From tarafında;
+        // To tarafı Restrict (aksi halde PostgreSQL "multiple cascade paths" verir). Bu
+        // satır olmasaydı, başka bir sete bağlanmış bir seti silmek FK hatasıyla patlardı.
+        var relations = await _db.DatasetRelations
+            .IgnoreQueryFilters()
+            .Where(r => r.FromDatasetId == id || r.ToDatasetId == id)
+            .Where(r => r.FromDataset.TenantId == _tenantContext.TenantId
+                     || r.ToDataset.TenantId == _tenantContext.TenantId)
+            .ToListAsync();
+
+        _db.DatasetRelations.RemoveRange(relations);
         _db.Datasets.Remove(dataset);
         await _db.SaveChangesAsync();
 

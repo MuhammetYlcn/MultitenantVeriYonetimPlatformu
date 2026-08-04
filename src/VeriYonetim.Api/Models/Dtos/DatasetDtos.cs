@@ -25,6 +25,19 @@ public record DatasetResponse(
 // Tek bir satır: kimlik + JSONB değerleri.
 public record RowItem(Guid Id, Dictionary<string, object?> Data);
 
+// İki veri seti arasında ilişki tanımlama isteği.
+public record CreateRelationRequest(
+    Guid FromDatasetId,
+    [Required, MaxLength(200)] string FromColumn,
+    Guid ToDatasetId,
+    [Required, MaxLength(200)] string ToColumn);
+
+// İlişki yanıtı — set adları da dönüyor ki istemci ayrıca sorgu atmasın.
+public record RelationResponse(
+    Guid Id,
+    Guid FromDatasetId, string FromDatasetName, string FromColumn,
+    Guid ToDatasetId, string ToDatasetName, string ToColumn);
+
 // Tek satır ekleme isteği: kolon adı → değer (metin gelir; tip dönüşümü sunucuda şemaya göre).
 public record AddRowRequest(Dictionary<string, string?> Values);
 

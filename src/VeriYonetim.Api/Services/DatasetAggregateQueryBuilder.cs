@@ -66,16 +66,27 @@ public static class DatasetAggregateQueryBuilder
     private const int MaxGroupBy = 3;
     private const int MaxMetrics = 6;
 
-    public static BuiltAggregate Build(AggregateQuery q, IReadOnlyDictionary<string, string> schema)
+    // Tek veri setli çağrı biçimi (querystring ucu ve mevcut testler).
+    public static BuiltAggregate Build(AggregateQuery q, IReadOnlyDictionary<string, string> schema) =>
+        Build(q, QueryScope.Single(schema));
+
+    public static BuiltAggregate Build(AggregateQuery q, QueryScope scope)
     {
         var groupBy = q.GroupBy ?? Array.Empty<string>();
         var metrics = q.Metrics ?? Array.Empty<MetricSpec>();
 
-        var groupExprs = BuildGroupExpressions(groupBy, q.Bucket, schema);
-        var aggExprs = BuildMetricExpressions(metrics, schema);
+        var groupExprs = BuildGroupExpressions(groupBy, q.Bucket, scope);
+        var aggExprs = BuildMetricExpressions(metrics, scope);
 
-        var (where, parameters) = DatasetSqlExpr.BuildWhere(
-            q.Filters ?? Array.Empty<FilterNode>(), schema);
+        var from = DatasetSqlExpr.BuildFrom(scope);
+
+        var (where, whereParams) = DatasetSqlExpr.BuildWhere(
+            q.Filters ?? Array.Empty<FilterNode>(), scope);
+
+        // Veri seti parametreleri filtre parametrelerinden ÖNCE gelir; ikisi de aynı
+        // komuta bağlanacağı için tek listede toplanıyor.
+        var parameters = new List<NpgsqlParameter>(from.Parameters);
+        parameters.AddRange(whereParams);
 
         // Grup anahtarları text'e cast edilir (tek tip materializasyon). Gruplamasız durumda
         // tek bir NULL anahtar yazılır ki okuyucunun sütun düzeni her iki halde de aynı olsun.
@@ -97,8 +108,8 @@ public static class DatasetAggregateQueryBuilder
         // pay'ın varlığına göre kaydırmak zorunda kalmasın.
         var sql = $"""
             SELECT {keySelect}, {valueSelect}, COUNT(*)::int AS "Count"{shareSql}
-            FROM "DatasetRows"
-            WHERE "DatasetId" = @datasetId{where}{groupBySql}{havingSql}{orderLimitSql}
+            FROM {from.FromSql}
+            WHERE {from.BaseWhere}{where}{groupBySql}{havingSql}{orderLimitSql}
             """;
 
         return new BuiltAggregate(sql, parameters, Math.Max(groupExprs.Count, 1), aggExprs.Count,
@@ -108,7 +119,7 @@ public static class DatasetAggregateQueryBuilder
     // Gruplama ifadeleri. Bucket yalnızca ilk kolona uygulanır: "aylara ve şehre göre"
     // sorusunda kovalanacak olan tarih kolonudur, şehir değil.
     private static List<string> BuildGroupExpressions(
-        IReadOnlyList<string> groupBy, string? bucket, IReadOnlyDictionary<string, string> schema)
+        IReadOnlyList<string> groupBy, string? bucket, QueryScope scope)
     {
         if (groupBy.Count > MaxGroupBy)
             throw new InvalidQueryException($"En fazla {MaxGroupBy} kolona göre gruplanabilir.");
@@ -125,24 +136,22 @@ public static class DatasetAggregateQueryBuilder
 
         for (var i = 0; i < groupBy.Count; i++)
         {
-            var col = groupBy[i];
-            if (!schema.TryGetValue(col, out var type))
-                throw new InvalidQueryException($"Bilinmeyen kolon: {col}");
+            var column = scope.Resolve(groupBy[i]);
 
             if (i == 0 && hasBucket)
             {
-                if (type != "date")
+                if (column.Type != "date")
                     throw new InvalidQueryException("bucket yalnızca tarih kolonlarında kullanılır.");
 
                 var b = bucket!.ToLowerInvariant();
                 if (!Buckets.Contains(b))
                     throw new InvalidQueryException($"Bilinmeyen bucket: {bucket}. (day/week/month/year)");
 
-                exprs.Add($"date_trunc('{b}', {DatasetSqlExpr.Typed(col, "date")})");
+                exprs.Add($"date_trunc('{b}', {DatasetSqlExpr.Typed(column)})");
             }
             else
             {
-                exprs.Add(DatasetSqlExpr.Typed(col, type));
+                exprs.Add(DatasetSqlExpr.Typed(column));
             }
         }
 
@@ -150,17 +159,17 @@ public static class DatasetAggregateQueryBuilder
     }
 
     private static List<string> BuildMetricExpressions(
-        IReadOnlyList<MetricSpec> metrics, IReadOnlyDictionary<string, string> schema)
+        IReadOnlyList<MetricSpec> metrics, QueryScope scope)
     {
         if (metrics.Count == 0)
             throw new InvalidQueryException("En az bir ölçüm (op) gerekli.");
         if (metrics.Count > MaxMetrics)
             throw new InvalidQueryException($"En fazla {MaxMetrics} ölçüm hesaplanabilir.");
 
-        return metrics.Select(m => BuildMetric(m, schema)).ToList();
+        return metrics.Select(m => BuildMetric(m, scope)).ToList();
     }
 
-    private static string BuildMetric(MetricSpec m, IReadOnlyDictionary<string, string> schema)
+    private static string BuildMetric(MetricSpec m, QueryScope scope)
     {
         var op = (m.Op ?? "").Trim().ToLowerInvariant();
 
@@ -175,18 +184,18 @@ public static class DatasetAggregateQueryBuilder
 
         if (string.IsNullOrWhiteSpace(m.Column))
             throw new InvalidQueryException($"'{m.Op}' için metric kolonu gerekli.");
-        if (!schema.TryGetValue(m.Column, out var type))
-            throw new InvalidQueryException($"Bilinmeyen metric kolonu: {m.Column}");
+
+        var column = scope.Resolve(m.Column);
 
         // COUNT(DISTINCT) benzersiz DEĞER sayar — COUNT(*)'tan bambaşka bir soru.
         // Sayısal kısıtı yok: "kaç farklı şehir" sorusu metin kolonu üzerinde sorulur.
         if (op == "countdistinct")
-            return $"COUNT(DISTINCT {DatasetSqlExpr.Typed(m.Column, type)})::numeric";
+            return $"COUNT(DISTINCT {DatasetSqlExpr.Typed(column)})::numeric";
 
-        if (type != "number")
+        if (column.Type != "number")
             throw new InvalidQueryException($"'{m.Op}' yalnızca sayısal kolonlarda kullanılır: {m.Column}");
 
-        var expr = DatasetSqlExpr.Typed(m.Column, "number");
+        var expr = DatasetSqlExpr.Typed(column);
         return op switch
         {
             "sum" => $"SUM({expr})",
