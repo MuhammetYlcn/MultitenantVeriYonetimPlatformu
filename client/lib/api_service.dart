@@ -269,24 +269,43 @@ class ApiService {
   // Refresh'i localStorage'da bulduysak "oturumu açık tut" modundayız → yenilemede aynı moda yaz.
   static bool _isRemembered() => _local.getItem(_refreshKey) != null;
 
-  // Uygulama açılışında çağrılır. Access hâlâ geçerliyse onu kullan; süresi geçmişse ama
-  // refresh varsa sessizce yenile; ikisi de yoksa temizle (giriş ekranına düşülür).
-  static Future<void> loadToken() async {
+  // Uygulama açılışında çağrılır. Access hâlâ geçerliyse onu kullan; süresi geçmişse
+  // refresh ile sessizce yenile.
+  //
+  // Dönen değer ÜÇ durumu ayırır. Önceden ikiye indirilmişti (girişli / girişsiz) ve
+  // "sunucuya ulaşılamıyor" hali girişsiz sayılıyordu: sunucu bir dakika kapalı kalsa
+  // kullanıcı giriş ekranına düşüyor, "oturumum niye kapandı" diyor ve şifresini
+  // giriyordu — o istek de aynı kapalı sunucuya gittiği için işe yaramıyordu.
+  static Future<SessionState> loadToken() async {
     final access = _readAccess();
     if (access != null && _isTokenValid(access)) {
       _token = access;
       _refreshToken = _readRefresh();
-      return;
+      return SessionState.signedIn;
     }
+
     final refresh = _readRefresh();
     if (refresh == null) {
       _clearTokens();
-      return;
+      return SessionState.signedOut;
     }
 
-    // Yalnız sunucu token'ı REDDETTİYSE oturumu kapat. Sunucuya ulaşılamıyorsa
-    // token'lara dokunma: kesinti geçince bir sonraki açılışta oturum geri gelir.
-    if (await _tryRefresh(refresh) == RefreshOutcome.rejected) _clearTokens();
+    switch (await _tryRefresh(refresh)) {
+      case RefreshOutcome.success:
+        return SessionState.signedIn;
+
+      // Sunucu token'ı reddetti: gerçekten geçersiz (süresi dolmuş, iptal edilmiş,
+      // şifre değişmiş). Oturumu kapatmak doğru.
+      case RefreshOutcome.rejected:
+        _clearTokens();
+        return SessionState.signedOut;
+
+      // Sunucuya ulaşılamadı. Token'lara DOKUNMUYORUZ ve kullanıcıyı giriş ekranına
+      // ATMIYORUZ: oturumu bitmedi, sadece sunucu yok. Kesinti geçince yeniden
+      // denemesi yeterli; şifre girmesi gerekmiyor.
+      case RefreshOutcome.unreachable:
+        return SessionState.serverUnreachable;
+    }
   }
 
   // Yetkili bir istekten ÖNCE çağrılır: access süresi dolduysa refresh ile yeniler (aktif
@@ -814,6 +833,14 @@ class ApiException implements Exception {
 /// İkisini aynı saymak, sunucunun bir anlık kesintisinde "oturumu açık tut" seçmiş
 /// kullanıcıyı kalıcı olarak dışarı atardı.
 enum RefreshOutcome { success, rejected, unreachable }
+
+/// Açılışta oturumun durumu.
+///
+/// [serverUnreachable] ile [signedOut] ayrımı kullanıcı için kritik: ilkinde oturum
+/// DURUYOR, sadece sunucuya ulaşılamıyor — kullanıcıyı giriş ekranına atmak ona
+/// "oturumun bitti" demek olur, oysa bitmemiştir. Sifresini yeniden girmesi de işe
+/// yaramaz, çünkü giriş isteği de aynı sunucuya gider.
+enum SessionState { signedIn, signedOut, serverUnreachable }
 
 // ---------------------------------------------------------------------------
 // Doğal dilde sorgu (/api/ask)
