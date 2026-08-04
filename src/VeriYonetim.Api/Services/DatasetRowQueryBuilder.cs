@@ -2,11 +2,32 @@ using Npgsql;
 
 namespace VeriYonetim.Api.Services;
 
+// Filtre ağacının ortak tabanı.
+//
+// Filtreler ÇOĞUNLUKLA düz bir listedir ve hepsi VE ile bağlanır — "Ankara'daki, 1000 TL
+// üstü satışlar". Ağaç yalnızca VEYA gerektiğinde devreye girer: "Ankara'daki VEYA 1000 TL
+// üstü satışlar" düz listeyle ifade edilemez. Bu yüzden düz liste hâlâ birinci sınıf; ağaç
+// ise aynı listenin içine bir FilterGroup düğümü konarak kurulur.
+public abstract record FilterNode;
+
+// Çocuklarını VE ya da VEYA ile bağlayan düğüm. Logic: "and" | "or".
+public record FilterGroup(string Logic, IReadOnlyList<FilterNode> Children) : FilterNode;
+
 // Tek bir filtre koşulu: kolon, operatör ("eq"/"gte"/"contains"…), değer (ham string).
-public record RowFilter(string Column, string Op, string Value);
+//
+// Values yalnızca çoklu değer alan operatörler ("in"/"notIn") içindir. Neden ayrı bir
+// alan? "Ankara ve İzmir" sorusu tek değerli eq'larla kurulamaz: filtreler VE ile
+// bağlandığından "sehir=Ankara AND sehir=İzmir" hiçbir satır döndürmez — üstelik hata da
+// vermez. Sessiz yanlış cevabı önlemek için çoklu değer ilk sınıf vatandaş.
+//
+// Değer istemeyen operatörlerde ("isNull"/"notNull") Value boş kalır; "inPeriod"de ise
+// Value bir tarih değil, RelativePeriod etiketidir ("gecenAy").
+public record RowFilter(string Column, string Op, string Value = "", IReadOnlyList<string>? Values = null)
+    : FilterNode;
 
 // Listeleme isteğinin tüm parçaları (sayfalama + sıralama + filtreler).
-public record RowQuery(int Page, int PageSize, string? Sort, string? Dir, IReadOnlyList<RowFilter> Filters);
+// Filters düz liste = hepsi VE; araya FilterGroup konarak VEYA kurulabilir.
+public record RowQuery(int Page, int PageSize, string? Sort, string? Dir, IReadOnlyList<FilterNode> Filters);
 
 // Build çıktısı: parametreli WHERE eki (" AND ..."), ORDER BY eki ve Npgsql parametreleri.
 // datasetId / limit / offset gibi sabitler bu builder'da DEĞİL, çağıran tarafta eklenir.

@@ -40,7 +40,7 @@ public class DatasetAggregateQueryBuilderTests
             Schema);
 
         Assert.DoesNotContain("GROUP BY", built.Sql);
-        Assert.Contains("NULL::text AS \"Key\"", built.Sql);
+        Assert.Contains("NULL::text AS \"Key0\"", built.Sql);
         Assert.Contains("SUM(", built.Sql);
     }
 
@@ -57,7 +57,7 @@ public class DatasetAggregateQueryBuilderTests
     public void Build_Count_NeedsNoMetric()
     {
         var built = DatasetAggregateQueryBuilder.Build(Q("sehir", "count"), Schema);
-        Assert.Contains("COUNT(*)::numeric AS \"Value\"", built.Sql);
+        Assert.Contains("COUNT(*)::numeric AS \"Value0\"", built.Sql);
     }
 
     [Fact]
@@ -66,7 +66,7 @@ public class DatasetAggregateQueryBuilderTests
         var built = DatasetAggregateQueryBuilder.Build(
             Q("sehir", "sum", "tutar", sort: "value", dir: "desc", limit: 5), Schema);
 
-        Assert.Contains("ORDER BY \"Value\" DESC", built.Sql);
+        Assert.Contains("ORDER BY \"Value0\" DESC", built.Sql);
         Assert.Contains("LIMIT 5", built.Sql);
     }
 

@@ -587,8 +587,10 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
     // ---- Agregasyon (grup özeti / top-N / zaman serisi) ----
 
+    // Key/Value kısayolları bilinçli olarak kullanılıyor: çoklu gruplama/ölçüm eklendikten
+    // sonra da tek gruplamalı istemcinin yanıtı aynı şekilde okuyabildiğini kanıtlıyor.
     private record AggBucketDto(string? Key, decimal? Value, int Count);
-    private record AggResponseDto(string GroupBy, string Op, string? Metric, string? Bucket,
+    private record AggResponseDto(List<string> GroupBy, string Op, string? Metric, string? Bucket,
         List<AggBucketDto> Buckets);
 
     // Şehir/yaş/tarih/tutar içeren 4 satırlık bir dataset kurar.

@@ -387,11 +387,12 @@ public class DatasetsController : ControllerBase
         var (filters, filterError) = ParseFilters(filter);
         if (filterError is not null) return filterError;
 
+        var query = new AggregateQuery(groupBy, op, metric, bucket, sort, dir, limit, filters!);
+
         BuiltAggregate built;
         try
         {
-            built = DatasetAggregateQueryBuilder.Build(
-                new AggregateQuery(groupBy, op, metric, bucket, sort, dir, limit, filters!), schema);
+            built = DatasetAggregateQueryBuilder.Build(query, schema);
         }
         catch (InvalidQueryException ex)
         {
@@ -413,12 +414,30 @@ public class DatasetsController : ControllerBase
             if (wasClosed) await conn.OpenAsync();
             try
             {
+                // Sütun düzeni builder'dan geliyor: önce KeyCount anahtar, sonra MetricCount
+                // ölçüm, en sonda Count. Böylece okuyucu sıralamayı tahmin etmiyor.
                 await using var reader = await cmd.ExecuteReaderAsync();
                 while (await reader.ReadAsync())
+                {
+                    var keys = new string?[built.KeyCount];
+                    for (var i = 0; i < built.KeyCount; i++)
+                        keys[i] = reader.IsDBNull(i) ? null : reader.GetString(i);
+
+                    var values = new decimal?[built.MetricCount];
+                    for (var i = 0; i < built.MetricCount; i++)
+                    {
+                        var ordinal = built.KeyCount + i;
+                        values[i] = reader.IsDBNull(ordinal) ? null : reader.GetDecimal(ordinal);
+                    }
+
+                    var countOrdinal = built.KeyCount + built.MetricCount;
+                    var share = built.HasShare && !reader.IsDBNull(countOrdinal + 1)
+                        ? reader.GetDecimal(countOrdinal + 1)
+                        : (decimal?)null;
+
                     buckets.Add(new AggregateBucket(
-                        Key: reader.IsDBNull(0) ? null : reader.GetString(0),
-                        Value: reader.IsDBNull(1) ? null : reader.GetDecimal(1),
-                        Count: reader.GetInt32(2)));
+                        keys, values, reader.GetInt32(countOrdinal), share));
+                }
             }
             finally
             {
@@ -426,7 +445,7 @@ public class DatasetsController : ControllerBase
             }
         }
 
-        return Ok(new AggregateResponse(groupBy, op.ToLowerInvariant(), metric, bucket, buckets));
+        return Ok(new AggregateResponse(query.GroupBy, query.Metrics, bucket, buckets));
     }
 
     // PUT /api/datasets/{id} — güncelle.

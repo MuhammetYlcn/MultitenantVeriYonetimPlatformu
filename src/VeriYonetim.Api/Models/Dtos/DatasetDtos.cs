@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using VeriYonetim.Api.Services;   // MetricSpec — agregasyon yanıtı ölçümleri yankılar
 
 namespace VeriYonetim.Api.Models.Dtos;
 
@@ -35,13 +36,30 @@ public record RowListResponse(
     int TotalPages,
     IReadOnlyList<RowItem> Rows);
 
-// Tek bir agregasyon grubu: anahtar (grup değeri, text), agregasyon sonucu, grup büyüklüğü.
-public record AggregateBucket(string? Key, decimal? Value, int Count);
+// Tek bir agregasyon grubu: gruplama anahtarları, ölçüm sonuçları, grup büyüklüğü.
+//
+// Keys/Values liste çünkü artık çoklu gruplama ("şehir VE kategoriye göre") ve çoklu ölçüm
+// ("toplam, ortalama ve adet birlikte") destekleniyor. Key/Value kısayolları tek gruplama +
+// tek ölçüm bekleyen mevcut pano istemcisini kırmamak için duruyor: JSON'da her ikisi de
+// yer alır, istemci hangisini okuyacağını kendi seçer.
+public record AggregateBucket(
+    IReadOnlyList<string?> Keys,
+    IReadOnlyList<decimal?> Values,
+    int Count,
+    decimal? Share = null)   // grubun toplam içindeki yüzdesi; yalnız istenirse hesaplanır
+{
+    public string? Key => Keys.Count > 0 ? Keys[0] : null;
+    public decimal? Value => Values.Count > 0 ? Values[0] : null;
+}
 
 // Agregasyon yanıtı: hangi soru soruldu + grupların listesi.
 public record AggregateResponse(
-    string? GroupBy,
-    string Op,
-    string? Metric,
+    IReadOnlyList<string> GroupBy,
+    IReadOnlyList<MetricSpec> Metrics,
     string? Bucket,
-    IReadOnlyList<AggregateBucket> Buckets);
+    IReadOnlyList<AggregateBucket> Buckets)
+{
+    // Tek ölçümlü eski yanıt şeklinin karşılığı (bkz. AggregateBucket.Key/Value).
+    public string? Op => Metrics.Count > 0 ? Metrics[0].Op : null;
+    public string? Metric => Metrics.Count > 0 ? Metrics[0].Column : null;
+}
