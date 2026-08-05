@@ -17,6 +17,7 @@ import '../widgets/ui.dart';
 const _opLabels = <String, String>{
   'sum': 'Toplam',
   'avg': 'Ortalama',
+  'median': 'Medyan',
   'count': 'Adet',
   'min': 'En düşük',
   'max': 'En yüksek',
@@ -50,6 +51,7 @@ class _ColumnSummary {
   final String name;
   final double? total;
   final double? average;
+  final double? median;
   final double? min;
   final double? max;
 
@@ -57,6 +59,7 @@ class _ColumnSummary {
     required this.name,
     required this.total,
     required this.average,
+    required this.median,
     required this.min,
     required this.max,
   });
@@ -249,7 +252,7 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  // Bir kolonun toplam/ortalama/en düşük/en yüksek değerleri — dördü de gruplamasız.
+  // Bir kolonun toplam/ortalama/medyan/en düşük/en yüksek değerleri — beşi de gruplamasız.
   Future<_ColumnSummary> _summarize(
       String datasetId, String column, List<String> filters) async {
     Future<double?> one(String op) async {
@@ -258,14 +261,15 @@ class _DashboardPageState extends State<DashboardPage> {
       return b.isNotEmpty ? b.first.value : null;
     }
 
-    final results =
-        await Future.wait([one('sum'), one('avg'), one('min'), one('max')]);
+    final results = await Future.wait(
+        [one('sum'), one('avg'), one('median'), one('min'), one('max')]);
     return _ColumnSummary(
       name: column,
       total: results[0],
       average: results[1],
-      min: results[2],
-      max: results[3],
+      median: results[2],
+      min: results[3],
+      max: results[4],
     );
   }
 
@@ -642,7 +646,7 @@ class _Notice extends StatelessWidget {
   }
 }
 
-/// Boyutsuz veri setlerinde tek bir sayısal kolonun dört özeti.
+/// Boyutsuz veri setlerinde tek bir sayısal kolonun beş özeti.
 class _ColumnCard extends StatelessWidget {
   final _ColumnSummary summary;
   final Color color;
@@ -680,6 +684,9 @@ class _ColumnCard extends StatelessWidget {
             const SizedBox(height: 16),
             const Divider(),
             const SizedBox(height: 12),
+            // Medyan ortalamanın hemen altında: ikisi belirgin ayrışıyorsa dağılım
+            // çarpıktır (birkaç uç değer ortalamayı çekiyordur) — yan yana okunmalı.
+            _row(context, 'Medyan', summary.median),
             _row(context, 'Toplam', summary.total),
             _row(context, 'En düşük', summary.min),
             _row(context, 'En yüksek', summary.max),

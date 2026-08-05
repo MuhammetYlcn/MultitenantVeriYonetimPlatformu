@@ -128,6 +128,7 @@ public static class PlanSummary
         "avg" => "ortalaması",
         "min" => "en düşüğü",
         "max" => "en yükseği",
+        "median" => "medyanı",
         "countdistinct" => "farklı değer sayısı",
         _ => op ?? "?"
     };

@@ -3,8 +3,8 @@ using NpgsqlTypes;
 
 namespace VeriYonetim.Api.Services;
 
-// Tek bir ölçüm: işlem + (gerekiyorsa) kolon. count kolon istemez; sum/avg/min/max sayısal
-// kolon ister; countDistinct her tipte çalışır ("kaç farklı şehir" metin kolonu sorar).
+// Tek bir ölçüm: işlem + (gerekiyorsa) kolon. count kolon istemez; sum/avg/min/max/median
+// sayısal kolon ister; countDistinct her tipte çalışır ("kaç farklı şehir" metin kolonu sorar).
 public record MetricSpec(string Op, string? Column = null);
 
 // Agregasyon SONUCUNA uygulanan koşul. WHERE'den farkı şu: WHERE tek tek satırlara bakar,
@@ -59,7 +59,7 @@ public static class DatasetAggregateQueryBuilder
 
     // İşlem whitelist'i (küçük harfe indirgenmiş halleriyle karşılaştırılır).
     private static readonly HashSet<string> Ops =
-        new() { "count", "sum", "avg", "min", "max", "countdistinct" };
+        new() { "count", "sum", "avg", "min", "max", "countdistinct", "median" };
 
     // Üst sınırlar: doğal dilden gelen bir plan bunları aşıyorsa büyük ihtimalle hatalıdır.
     // Sınır olmadan model "her kolona göre grupla" diyerek okunamaz bir sonuç üretebilir.
@@ -177,7 +177,7 @@ public static class DatasetAggregateQueryBuilder
         // gibi yanıltıcı bir hata alır ve asıl sorun (uydurulmuş işlem) gizlenirdi.
         if (!Ops.Contains(op))
             throw new InvalidQueryException(
-                $"Bilinmeyen işlem: {m.Op}. (count/sum/avg/min/max/countDistinct)");
+                $"Bilinmeyen işlem: {m.Op}. (count/sum/avg/min/max/median/countDistinct)");
 
         // COUNT(*) satır sayar; hiçbir kolona ihtiyaç duymaz.
         if (op == "count") return "COUNT(*)::numeric";
@@ -202,8 +202,17 @@ public static class DatasetAggregateQueryBuilder
             "avg" => $"AVG({expr})",
             "min" => $"MIN({expr})",
             "max" => $"MAX({expr})",
+            // Medyan: ortadaki değer. Ortalamadan farkı, birkaç uç değerin sonucu
+            // sürüklememesidir — tek bir 10 milyonluk fatura ortalamayı zıplatır,
+            // medyanı zıplatmaz. "Tipik" değeri sorulduğunda doğru olan budur.
+            //
+            // percentile_cont sıralı-küme (ordered-set) agregasıdır; sıralamayı kendi
+            // yapar, o yüzden WITHIN GROUP (ORDER BY ...) sözdizimi zorunludur.
+            // Yalnız double precision alır (numeric aşırı yüklemesi YOK), dönüşü de
+            // double'dır — diğer ölçümlerle aynı tipte okunsun diye numeric'e çevriliyor.
+            "median" => $"percentile_cont(0.5) WITHIN GROUP (ORDER BY ({expr})::double precision)::numeric",
             _ => throw new InvalidQueryException(
-                $"Bilinmeyen işlem: {m.Op}. (count/sum/avg/min/max/countDistinct)")
+                $"Bilinmeyen işlem: {m.Op}. (count/sum/avg/min/max/median/countDistinct)")
         };
     }
 

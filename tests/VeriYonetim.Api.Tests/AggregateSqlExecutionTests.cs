@@ -143,6 +143,52 @@ public class AggregateSqlExecutionTests : IClassFixture<ApiFactory>, IAsyncLifet
             having, sortMetric, share);
 
     [Fact]
+    public async Task Median_Grouped_ReturnsMiddleValue()
+    {
+        // Ankara: 50, 100, 150 → tek sayıda değer, ortadaki 100.
+        // Ortalaması da 100 olduğu için ayrıca Izmir'e bakılıyor (aşağıdaki test).
+        var rows = await RunAsync(Q(
+            groupBy: new[] { "sehir" },
+            metrics: new[] { new MetricSpec("median", "tutar") }));
+
+        Assert.Equal(100m, rows.Single(r => r.Keys[0] == "Ankara").Values[0]);
+        Assert.Equal(200m, rows.Single(r => r.Keys[0] == "Bursa").Values[0]);
+        // Izmir: 10, 40 → çift sayıda değer; percentile_cont ikisinin ortasını verir.
+        Assert.Equal(25m, rows.Single(r => r.Keys[0] == "Izmir").Values[0]);
+    }
+
+    [Fact]
+    public async Task Median_DiffersFromAverage_WhenOutlierPresent()
+    {
+        // Medyanın var oluş sebebi tam olarak bu: 6 değer (10, 40, 50, 100, 150, 200)
+        // ortalamada 91,67 verir; 200'lük uç değer ortalamayı yukarı çeker. Medyan
+        // ortadaki iki değerin ortası = (50 + 100) / 2 = 75.
+        var rows = await RunAsync(Q(metrics: new[]
+        {
+            new MetricSpec("avg", "tutar"),
+            new MetricSpec("median", "tutar")
+        }));
+
+        var row = Assert.Single(rows);
+        Assert.Equal(91.67m, Math.Round(row.Values[0]!.Value, 2));
+        Assert.Equal(75m, row.Values[1]);
+    }
+
+    [Fact]
+    public async Task Median_WithHaving_FiltersGroups()
+    {
+        // HAVING, SELECT takma adlarını kabul etmediği için ifadenin kendisi tekrarlanır.
+        // Sıralı-küme agregası da tekrarlanınca geçerli mi — ancak veritabanı söyler.
+        var rows = await RunAsync(Q(
+            groupBy: new[] { "sehir" },
+            metrics: new[] { new MetricSpec("median", "tutar") },
+            having: new HavingSpec(0, "gte", 100m)));
+
+        Assert.Equal(new string?[] { "Ankara", "Bursa" },
+            rows.Select(r => r.Keys[0]).Order().ToArray());
+    }
+
+    [Fact]
     public async Task MultipleMetrics_ReturnCorrectValues()
     {
         var rows = await RunAsync(Q(

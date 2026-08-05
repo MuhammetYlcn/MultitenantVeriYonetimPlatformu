@@ -108,8 +108,9 @@ public static class QueryPromptBuilder
     private static void AppendValues(StringBuilder sb)
     {
         sb.AppendLine("## Değerler");
-        sb.AppendLine("- işlem (metrics.op): count, sum, avg, min, max, countDistinct");
-        sb.AppendLine("  sum/avg/min/max yalnız SAYI kolonlarında; countDistinct her tipte; count kolon istemez.");
+        sb.AppendLine("- işlem (metrics.op): count, sum, avg, min, max, median, countDistinct");
+        sb.AppendLine("  sum/avg/min/max/median yalnız SAYI kolonlarında; countDistinct her tipte; count kolon istemez.");
+        sb.AppendLine("  median = ortadaki değer. \"medyan\", \"ortanca\", \"tipik\" denince avg DEĞİL median kullan.");
         sb.AppendLine("- operatör (filters.op): eq, ne, gt, gte, lt, lte, contains, in, notIn, isNull, notNull, inPeriod");
         sb.AppendLine("  contains yalnız METİN kolonlarında; inPeriod yalnız TARİH kolonlarında.");
         sb.AppendLine($"- dönem (inPeriod ve compare): {string.Join(", ", RelativePeriod.Tokens)}");

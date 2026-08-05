@@ -909,6 +909,7 @@ class AskMetric {
     'avg': 'Ortalama',
     'min': 'En düşük',
     'max': 'En yüksek',
+    'median': 'Medyan',
     'countDistinct': 'Farklı değer',
   };
 

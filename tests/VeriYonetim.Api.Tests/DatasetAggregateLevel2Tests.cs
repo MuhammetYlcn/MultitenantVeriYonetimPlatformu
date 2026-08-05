@@ -164,6 +164,51 @@ public class DatasetAggregateLevel2Tests
                 Q(metrics: new[] { new MetricSpec("countDistinct", "yok") }), Schema));
     }
 
+    // --- medyan -----------------------------------------------------------------------
+
+    [Fact]
+    public void Median_EmitsOrderedSetAggregate()
+    {
+        // Medyan sıradan bir agrega değil: percentile_cont sıralı-küme agregasıdır ve
+        // WITHIN GROUP (ORDER BY ...) olmadan sözdizimi hatası verir.
+        var built = DatasetAggregateQueryBuilder.Build(
+            Q(metrics: new[] { new MetricSpec("median", "tutar") }), Schema);
+
+        Assert.Contains("percentile_cont(0.5) WITHIN GROUP (ORDER BY", built.Sql);
+        Assert.Contains("\"Data\"->>'tutar'", built.Sql);
+    }
+
+    [Fact]
+    public void Median_OnTextColumn_Throws()
+    {
+        // "Şehirlerin medyanı" diye bir şey yok; countDistinct'in aksine tip kısıtı var.
+        Assert.Throws<InvalidQueryException>(() =>
+            DatasetAggregateQueryBuilder.Build(
+                Q(metrics: new[] { new MetricSpec("median", "sehir") }), Schema));
+    }
+
+    [Fact]
+    public void Median_WithoutColumn_Throws()
+    {
+        Assert.Throws<InvalidQueryException>(() =>
+            DatasetAggregateQueryBuilder.Build(
+                Q(metrics: new[] { new MetricSpec("median") }), Schema));
+    }
+
+    [Fact]
+    public void Median_WithShare_Throws()
+    {
+        // Pay yalnız toplanabilir ölçümlerde anlamlı. Medyanların toplamı bir bütün
+        // etmediği için "medyanın yüzdesi" sessizce saçma bir sayı üretirdi.
+        var q = new AggregateQuery(
+            new[] { "sehir" },
+            new[] { new MetricSpec("median", "tutar") },
+            null, null, null, null, Array.Empty<RowFilter>(), null, 0, Share: true);
+
+        Assert.Throws<InvalidQueryException>(() =>
+            DatasetAggregateQueryBuilder.Build(q, Schema));
+    }
+
     // --- HAVING -----------------------------------------------------------------------
 
     [Fact]
