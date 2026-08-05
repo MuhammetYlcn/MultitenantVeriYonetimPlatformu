@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:web/web.dart' as web;
+import 'storage/store.dart';
 
 // Bir firmanın platform görünümü. DİKKAT: burada YALNIZCA metadata ve sayı var.
 // Veri seti adı, kolon adı, satır içeriği, kullanıcı e-postası backend'de kasıtlı
@@ -119,7 +119,7 @@ class PlatformApi {
   static const String _tokenKey = 'platform_jwt';
   static const String _emailKey = 'platform_email';
 
-  static web.Storage get _store => web.window.sessionStorage;
+  static KeyValueStore get _store => sessionStore;
 
   static bool get isLoggedIn => _token != null;
   static String? get email => _email;

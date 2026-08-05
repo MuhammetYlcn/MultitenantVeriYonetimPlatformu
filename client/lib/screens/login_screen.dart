@@ -105,8 +105,11 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+            // Row DEĞİL Wrap: dar pencerede (kart ~364px) iki parça yan yana
+            // sığmıyor ve Row taşma çizgileri veriyordu. Wrap alt satıra akıtır.
+            Wrap(
+              alignment: WrapAlignment.center,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 Text('Hesabın yok mu?',
                     style: Theme.of(context).textTheme.bodySmall),

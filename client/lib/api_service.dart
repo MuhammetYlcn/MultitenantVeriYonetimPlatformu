@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:web/web.dart' as web;
+import 'platform/platform.dart';
 
 // Backend'in DatasetResponse'una karşılık gelen basit model (C# record karşılığı).
 class Dataset {
@@ -198,10 +198,11 @@ class ApiService {
   static const String _accessKey = 'jwt';
   static const String _refreshKey = 'refresh';
 
-  // İki tarayıcı deposu. localStorage: sekme/tarayıcı kapansa da kalır ("oturumu açık tut").
+  // İki depo. localStorage: sekme/tarayıcı kapansa da kalır ("oturumu açık tut").
   // sessionStorage: yenilemede kalır ama sekme kapanınca uçar (işaretsiz mod).
-  static web.Storage get _local => web.window.localStorage;
-  static web.Storage get _session => web.window.sessionStorage;
+  // Somut karşılıkları platform/ altında; VM'de (testlerde) bellekte tutulur.
+  static KeyValueStore get _local => localStore;
+  static KeyValueStore get _session => sessionStore;
 
   static bool get isLoggedIn => _token != null;
 

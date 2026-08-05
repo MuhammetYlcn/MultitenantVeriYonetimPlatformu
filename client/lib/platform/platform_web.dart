@@ -1,16 +1,11 @@
 import 'dart:async';
 import 'dart:js_interop';
-import 'dart:typed_data';
 
 import 'package:web/web.dart' as web;
 
-// Seçilen dosya: adı (uzantısı sunucudaki ayrıştırıcı için önemli) + ham içeriği.
-class PickedFile {
-  final String name;
-  final Uint8List bytes;
+import 'platform_api.dart';
 
-  PickedFile(this.name, this.bytes);
-}
+// Tarayıcı gerçeklemesi. Bu dosya YALNIZ web hedefinde derlenir (bkz. platform.dart).
 
 /// Tarayıcıda CSV/Excel dosyası seçtirir; iptal edilirse null döner.
 ///
@@ -63,3 +58,25 @@ Future<PickedFile?> pickCsvOrExcelFile() async {
   input.click();
   return completer.future;
 }
+
+// web.Storage'ı KeyValueStore yüzüne saran ince kabuk.
+class _WebStore implements KeyValueStore {
+  final web.Storage _storage;
+
+  const _WebStore(this._storage);
+
+  @override
+  String? getItem(String key) => _storage.getItem(key);
+
+  @override
+  void setItem(String key, String value) => _storage.setItem(key, value);
+
+  @override
+  void removeItem(String key) => _storage.removeItem(key);
+}
+
+/// Sekme/tarayıcı kapansa da kalır — "oturumu açık tut" için.
+KeyValueStore get localStore => _WebStore(web.window.localStorage);
+
+/// Yenilemede kalır ama sekme kapanınca uçar — işaretsiz mod.
+KeyValueStore get sessionStore => _WebStore(web.window.sessionStorage);
