@@ -261,6 +261,218 @@ class AppBarChart extends StatelessWidget {
   }
 }
 
+/// Gruplanmış çubuk grafiğin tek bir serisi: ad + her gruptaki değeri.
+///
+/// `values` uzunluğu grup sayısıyla AYNI olmalıdır; o grupta bu serinin kaydı yoksa
+/// null geçilir. Sunucu yalnız var olan kombinasyonları döndürdüğü için boşlukları
+/// çağıran taraf doldurur (bkz. AppGroupedBarChart.fromBuckets).
+class ChartSeries {
+  final String name;
+  final List<double?> values;
+
+  const ChartSeries(this.name, this.values);
+}
+
+/// İki kolonla gruplanmış çubuk grafik: her grup yan yana birkaç çubuk.
+/// "Şehir VE kategoriye göre toplam" → x ekseninde şehirler, her şehirde kategori
+/// başına bir çubuk. Renk seriyi (kategoriyi) anlatır, bu yüzden lejant zorunlu.
+///
+/// Tek gruplamalı AppBarChart'tan ayrı bir widget: orada renk yalnız çubukları
+/// birbirinden ayırmak içindir ve hiçbir anlam taşımaz; burada renk VERİDİR.
+class AppGroupedBarChart extends StatelessWidget {
+  final List<String> groups;
+  final List<ChartSeries> series;
+  final String? valueLabel;
+  final double height;
+
+  const AppGroupedBarChart({
+    super.key,
+    required this.groups,
+    required this.series,
+    this.valueLabel,
+    this.height = 300,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final maxV = series.fold<double>(
+        0,
+        (a, s) => s.values.fold<double>(
+            a, (b, v) => (v?.abs() ?? 0) > b ? v!.abs() : b));
+    final axis = AxisScale.forMax(maxV);
+    final tilt = groups.length > 5;
+
+    // Çubuk kalınlığı toplam çubuk sayısına göre: kalabalıkta incelmezse taşar.
+    final rodCount = groups.length * math.max(series.length, 1);
+    final barWidth = rodCount > 24
+        ? 8.0
+        : rodCount > 12
+            ? 12.0
+            : 18.0;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SeriesLegend(names: series.map((s) => s.name).toList()),
+        const SizedBox(height: 12),
+        _ChartFrame(
+          height: height,
+          isEmpty: groups.isEmpty || series.isEmpty,
+          child: BarChart(
+            BarChartData(
+              alignment: BarChartAlignment.spaceAround,
+              maxY: axis.max,
+              gridData: _grid(axis.interval),
+              borderData: FlBorderData(show: false),
+              barTouchData: BarTouchData(
+                touchTooltipData: BarTouchTooltipData(
+                  getTooltipColor: (_) => AppColors.surfaceAlt,
+                  tooltipPadding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  fitInsideHorizontally: true,
+                  fitInsideVertically: true,
+                  // Balonda hem grup hem seri yazılır: renkten seriyi hatırlamak
+                  // zorunda kalmasın diye ("Ankara · Elektronik").
+                  getTooltipItem: (group, groupIndex, rod, rodIndex) =>
+                      BarTooltipItem(
+                    '${groups[groupIndex]} · ${series[rodIndex].name}\n',
+                    const TextStyle(
+                        color: AppColors.muted,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600),
+                    children: [
+                      TextSpan(
+                        text: formatNumber(rod.toY),
+                        style: const TextStyle(
+                            color: AppColors.text,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700),
+                      ),
+                      if (valueLabel != null)
+                        TextSpan(
+                          text: '  $valueLabel',
+                          style: const TextStyle(
+                              color: AppColors.muted, fontSize: 11),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              titlesData: FlTitlesData(
+                topTitles: const AxisTitles(),
+                rightTitles: const AxisTitles(),
+                leftTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 52,
+                    interval: axis.interval,
+                    getTitlesWidget: (value, meta) => Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Text(axis.format(value),
+                          style: _axisStyle, textAlign: TextAlign.right),
+                    ),
+                  ),
+                ),
+                bottomTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: tilt ? 62 : 34,
+                    getTitlesWidget: (value, meta) {
+                      final i = value.toInt();
+                      if (i < 0 || i >= groups.length) {
+                        return const SizedBox.shrink();
+                      }
+                      final label = Text(
+                        groups[i],
+                        style: _axisStyle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      );
+                      return SideTitleWidget(
+                        meta: meta,
+                        space: 8,
+                        child: tilt
+                            ? Transform.rotate(
+                                angle: -0.6,
+                                alignment: Alignment.topRight,
+                                child: SizedBox(width: 74, child: label),
+                              )
+                            : SizedBox(width: 88, child: Center(child: label)),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              barGroups: [
+                for (var g = 0; g < groups.length; g++)
+                  BarChartGroupData(
+                    x: g,
+                    barsSpace: 4,
+                    barRods: [
+                      for (var s = 0; s < series.length; s++)
+                        BarChartRodData(
+                          // Kaydı olmayan kombinasyon 0 yükseklikte çizilir:
+                          // "bu şehirde bu kategori yok" zaten boşluk demektir.
+                          toY: series[s].values[g] ?? 0,
+                          width: barWidth,
+                          borderRadius: BorderRadius.circular(4),
+                          gradient: LinearGradient(
+                            begin: Alignment.bottomCenter,
+                            end: Alignment.topCenter,
+                            colors: [
+                              chartPalette[s % chartPalette.length]
+                                  .withValues(alpha: 0.55),
+                              chartPalette[s % chartPalette.length],
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Seri adı → renk eşlemesi. Gruplanmış grafikte renk anlam taşıdığı için şart.
+class _SeriesLegend extends StatelessWidget {
+  final List<String> names;
+
+  const _SeriesLegend({required this.names});
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 16,
+      runSpacing: 8,
+      children: [
+        for (var i = 0; i < names.length; i++)
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  color: chartPalette[i % chartPalette.length],
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
+              const SizedBox(width: 7),
+              Text(names[i],
+                  style: Theme.of(context).textTheme.bodySmall,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+            ],
+          ),
+      ],
+    );
+  }
+}
+
 /// Zaman serisi çizgisi: eğrisel çizgi + altında degrade dolgu.
 /// X ekseni tarih kovalarının sırasıdır; etiketler kalabalıklaşmasın diye seyreltilir.
 class AppLineChart extends StatelessWidget {

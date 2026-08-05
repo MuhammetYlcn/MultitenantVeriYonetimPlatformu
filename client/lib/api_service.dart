@@ -82,14 +82,25 @@ class RowPage {
 
 // Bir agregasyon grubu: anahtar (grup değeri, null=genel), değer, grup büyüklüğü.
 class AggBucket {
-  final String? key;
+  /// Gruplama anahtarlarının tamamı. Tek gruplamada tek eleman; gruplanmış çubuk
+  /// grafikte iki ("şehir VE kategoriye göre" → keys[0]=şehir, keys[1]=kategori).
+  final List<String?> keys;
   final double? value;
   final int count;
 
-  AggBucket({this.key, this.value, required this.count});
+  AggBucket({this.keys = const [], this.value, required this.count});
+
+  /// İlk anahtar. Tek gruplamayla çalışan çağıranlar bunu okumaya devam eder.
+  String? get key => keys.isNotEmpty ? keys[0] : null;
+
+  /// İkinci anahtar (seri adı) — yalnız iki kolonla gruplandığında dolu.
+  String? get subKey => keys.length > 1 ? keys[1] : null;
 
   factory AggBucket.fromJson(Map<String, dynamic> j) => AggBucket(
-        key: j['key'] as String?,
+        // Sunucu hem 'keys' listesini hem tek 'key' kısayolunu döndürüyor; liste
+        // yoksa kısayoldan tek elemanlı listeye düşülür.
+        keys: (j['keys'] as List<dynamic>?)?.map((e) => e as String?).toList() ??
+            [j['key'] as String?],
         value: (j['value'] as num?)?.toDouble(),
         count: j['count'] as int,
       );
@@ -579,6 +590,8 @@ class ApiService {
   static Future<List<AggBucket>> aggregate(
     String datasetId, {
     String? groupBy,
+    /// İkinci gruplama kolonu (gruplanmış çubuk grafik). groupBy olmadan anlamsızdır.
+    String? groupBy2,
     required String op,
     String? metric,
     String? bucket,
@@ -593,7 +606,9 @@ class ApiService {
       if (v != null) qp.add('$k=${Uri.encodeQueryComponent(v)}');
     }
 
+    // groupBy tekrarlanabilir bir parametre: sunucu sırayla okur.
     add('groupBy', groupBy);
+    if (groupBy != null) add('groupBy', groupBy2);
     add('metric', metric);
     add('bucket', bucket);
     add('sort', sort);

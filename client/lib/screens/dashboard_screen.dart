@@ -80,6 +80,10 @@ class _DashboardData {
   final List<AggBucket> distribution;
   final List<AggBucket> series;
 
+  /// İki kolonla gruplanmış sonuç (gruplanmış çubuk grafik). Ayrıştırma kolonu
+  /// seçilmediğinde boştur.
+  final List<AggBucket> grouped;
+
   // Boyutsuz düzen (kolon özeti) alanı.
   final List<_ColumnSummary> columns;
 
@@ -91,6 +95,7 @@ class _DashboardData {
     this.average,
     this.distribution = const [],
     this.series = const [],
+    this.grouped = const [],
     this.columns = const [],
   });
 }
@@ -100,6 +105,9 @@ class _DashboardPageState extends State<DashboardPage> {
 
   // Grafik ayarları. İlk yüklemede şemadan makul varsayılanlarla doldurulur.
   String? _groupCol;
+
+  /// İkinci gruplama ("ayrıştırma") kolonu. null → sade çubuk/halka grafik.
+  String? _splitCol;
   String? _metricCol;
   String? _dateCol;
   String _op = 'sum';
@@ -227,6 +235,24 @@ class _DashboardPageState extends State<DashboardPage> {
             filters: filters)
         : <AggBucket>[];
 
+    // Ayrıştırma seçiliyse ikinci bir sorgu: aynı ölçüm, iki kolona göre gruplanmış.
+    //
+    // Neden ayrı sorgu ve neden limit'siz: iki anahtarlı sonuçta "ilk 10" satır ilk 10
+    // ŞEHRİ değil, ilk 10 (şehir, kategori) İKİLİSİNİ verir — bir şehrin kategorileri
+    // yarıda kesilir ve grafik yanlış okunur. Bu yüzden hangi grupların gösterileceğine
+    // yukarıdaki tek anahtarlı `distribution` karar verir, kırılım burada tamamlanır.
+    final grouped = (_groupCol != null && _splitCol != null)
+        ? await ApiService.aggregate(id,
+            groupBy: _groupCol,
+            groupBy2: _splitCol,
+            op: _effectiveOp,
+            metric: _effectiveMetric,
+            sort: 'value',
+            dir: 'desc',
+            limit: 1000,
+            filters: filters)
+        : <AggBucket>[];
+
     // Zaman serisi: tarih kolonu varsa kovalanmış (gün/hafta/ay/yıl) ve
     // tarihe göre ARTAN sıralı — çizgi soldan sağa akmalı.
     final series = _dateCol != null
@@ -249,6 +275,7 @@ class _DashboardPageState extends State<DashboardPage> {
       average: average,
       distribution: distribution,
       series: series,
+      grouped: grouped,
     );
   }
 
@@ -430,6 +457,24 @@ class _DashboardPageState extends State<DashboardPage> {
               items: {for (final c in groupChoices) c: c},
               onChanged: (v) {
                 _groupCol = v;
+                // Aynı kolonla iki kez gruplanamaz (sunucu 400 döner). Kullanıcı
+                // ayrıştırma kolonunu ana gruplama yaparsa seçim sessizce bırakılır.
+                if (_splitCol == v) _splitCol = null;
+                _reload();
+              },
+            ),
+            // Ayrıştırma: ikinci bir kırılım. "Şehir bazında toplam" sorusunu
+            // "şehir bazında, kategori kırılımıyla toplam"a çevirir.
+            _Picker<String>(
+              label: 'Ayrıştır',
+              value: _splitCol ?? '',
+              items: {
+                '': 'Yok',
+                for (final c in groupChoices)
+                  if (c != _groupCol) c: c,
+              },
+              onChanged: (v) {
+                _splitCol = (v == null || v.isEmpty) ? null : v;
                 _reload();
               },
             ),
@@ -535,13 +580,62 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  /// En fazla kaç seri (ayrıştırma değeri) çizilir. Üstü okunmaz hale gelir:
+  /// 8 şehir × 12 kategori = 96 çubuk, hiçbir şey karşılaştırılamaz.
+  static const int _maxSeries = 6;
+
+  /// İki anahtarlı düz sonucu grafiğin istediği (gruplar + seriler) biçimine çevirir.
+  ///
+  /// Gruplar `distribution`'ın sırasını izler — yani ana grafikte hangi gruplar hangi
+  /// sırayla görünüyorsa burada da öyle. Seriler toplam büyüklüğe göre seçilir ve
+  /// [_maxSeries] ile sınırlanır; kalanlar çizilmez.
+  ({List<String> groups, List<ChartSeries> series, int hidden}) _pivot(
+      _DashboardData d) {
+    final groups = [for (final b in d.distribution) b.key ?? '—'];
+
+    // Seri adaylarını toplam değerlerine göre sırala: en büyük kırılımlar kalsın.
+    final totals = <String, double>{};
+    for (final b in d.grouped) {
+      final name = b.subKey ?? '—';
+      totals[name] = (totals[name] ?? 0) + (b.value ?? b.count.toDouble());
+    }
+    final ranked = totals.keys.toList()
+      ..sort((a, b) => totals[b]!.compareTo(totals[a]!));
+    final names = ranked.take(_maxSeries).toList();
+
+    // (grup, seri) → değer. Sunucu yalnız var olan kombinasyonları döndürdüğü için
+    // olmayanlar null kalır; grafik bunları sıfır yükseklikte çizer.
+    final byPair = <String, double>{};
+    for (final b in d.grouped) {
+      byPair['${b.key ?? '—'} ${b.subKey ?? '—'}'] =
+          b.value ?? b.count.toDouble();
+    }
+
+    final series = [
+      for (final name in names)
+        ChartSeries(name, [
+          for (final g in groups) byPair['$g $name'],
+        ]),
+    ];
+
+    return (
+      groups: groups,
+      series: series,
+      hidden: ranked.length - names.length
+    );
+  }
+
   // Dağılım: grup bazında çubuk ya da halka. Aynı veri, iki okuma biçimi —
   // çubuk büyüklükleri karşılaştırır, halka bütün içindeki payı gösterir.
+  // Ayrıştırma kolonu seçiliyse ikisinin yerini gruplanmış çubuk grafik alır.
   Widget _distributionCard(_DashboardData d) {
     final data = [
       for (final b in d.distribution)
         ChartDatum(b.key ?? '—', b.value ?? b.count.toDouble()),
     ];
+
+    final isSplit = _splitCol != null && d.grouped.isNotEmpty;
+    final pivot = isSplit ? _pivot(d) : null;
 
     // Her grupta tek satır varsa gruplama aslında hiçbir şeyi toplamamıştır: kolon
     // benzersiz değerler taşıyor (ölçüm, kimlik, açıklama…). Grafik teknik olarak
@@ -551,27 +645,34 @@ class _DashboardPageState extends State<DashboardPage> {
         d.distribution.length > 1 && d.distribution.every((b) => b.count == 1);
 
     return SectionCard(
-      title: '${_groupCol ?? '—'} bazında ${_opLabels[_effectiveOp]!.toLowerCase()}',
+      title: isSplit
+          ? '${_groupCol ?? '—'} ve $_splitCol bazında '
+              '${_opLabels[_effectiveOp]!.toLowerCase()}'
+          : '${_groupCol ?? '—'} bazında ${_opLabels[_effectiveOp]!.toLowerCase()}',
       subtitle: 'En yüksek $_limit grup · $_measureLabel',
-      trailing: SegmentedButton<bool>(
-        segments: const [
-          ButtonSegment(
-              value: false,
-              icon: Icon(Icons.bar_chart, size: 18),
-              tooltip: 'Çubuk grafik'),
-          ButtonSegment(
-              value: true,
-              icon: Icon(Icons.donut_large, size: 18),
-              tooltip: 'Halka grafik'),
-        ],
-        selected: {_donut},
-        showSelectedIcon: false,
-        onSelectionChanged: (s) => setState(() => _donut = s.first),
-        style: const ButtonStyle(
-          visualDensity: VisualDensity.compact,
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        ),
-      ),
+      // Ayrıştırma açıkken çubuk/halka seçimi anlamsız: halka tek boyutlu bir
+      // bütünü gösterir, iki kırılımı gösteremez. Seçici o modda gizleniyor.
+      trailing: isSplit
+          ? null
+          : SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(
+                    value: false,
+                    icon: Icon(Icons.bar_chart, size: 18),
+                    tooltip: 'Çubuk grafik'),
+                ButtonSegment(
+                    value: true,
+                    icon: Icon(Icons.donut_large, size: 18),
+                    tooltip: 'Halka grafik'),
+              ],
+              selected: {_donut},
+              showSelectedIcon: false,
+              onSelectionChanged: (s) => setState(() => _donut = s.first),
+              style: const ButtonStyle(
+                visualDensity: VisualDensity.compact,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -583,9 +684,23 @@ class _DashboardPageState extends State<DashboardPage> {
             ),
             const SizedBox(height: 16),
           ],
-          _donut
-              ? AppDonutChart(data: data, centerLabel: _measureLabel)
-              : AppBarChart(data: data, valueLabel: _measureLabel),
+          if (pivot != null && pivot.hidden > 0) ...[
+            _Notice(
+              '“$_splitCol” kolonunda ${pivot.hidden + _maxSeries} farklı değer var; '
+              'grafik okunur kalsın diye en büyük $_maxSeries tanesi çiziliyor.',
+            ),
+            const SizedBox(height: 16),
+          ],
+          if (pivot != null)
+            AppGroupedBarChart(
+              groups: pivot.groups,
+              series: pivot.series,
+              valueLabel: _measureLabel,
+            )
+          else if (_donut)
+            AppDonutChart(data: data, centerLabel: _measureLabel)
+          else
+            AppBarChart(data: data, valueLabel: _measureLabel),
         ],
       ),
     );

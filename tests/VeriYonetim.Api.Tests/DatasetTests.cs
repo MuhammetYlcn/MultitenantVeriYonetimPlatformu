@@ -589,7 +589,7 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
     // Key/Value kısayolları bilinçli olarak kullanılıyor: çoklu gruplama/ölçüm eklendikten
     // sonra da tek gruplamalı istemcinin yanıtı aynı şekilde okuyabildiğini kanıtlıyor.
-    private record AggBucketDto(string? Key, decimal? Value, int Count);
+    private record AggBucketDto(string? Key, decimal? Value, int Count, List<string?>? Keys = null);
     private record AggResponseDto(List<string> GroupBy, string Op, string? Metric, string? Bucket,
         List<AggBucketDto> Buckets);
 
@@ -640,6 +640,50 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
         Assert.Equal(300m, body.Buckets[0].Value);
         Assert.Equal("Ankara", body.Buckets[1].Key);      // 100+150=250
         Assert.Equal(250m, body.Buckets[1].Value);
+    }
+
+    [Fact]
+    public async Task Aggregate_TwoGroupByParams_ReturnsBothKeys()
+    {
+        // Gruplanmış çubuk grafiğin ihtiyacı: groupBy tekrarlanınca iki anahtar döner.
+        var (token, id) = await SeededAggDatasetAsync("agg-two", "a@aggtwo.com");
+
+        var body = await AggregateAsync(token, id,
+            "groupBy=sehir&groupBy=ad&op=sum&metric=tutar");
+
+        Assert.Equal(new[] { "sehir", "ad" }, body.GroupBy);
+        Assert.Equal(4, body.Buckets.Count);   // her (şehir, ad) ikilisi ayrı grup
+
+        var veli = body.Buckets.Single(b => b.Keys![1] == "Veli");
+        Assert.Equal("Ankara", veli.Keys![0]);
+        Assert.Equal(150m, veli.Value);
+        // Key kısayolu ilk anahtarı vermeye devam etmeli (eski istemciler kırılmasın).
+        Assert.Equal("Ankara", veli.Key);
+    }
+
+    [Fact]
+    public async Task Aggregate_RepeatedGroupByWithSameColumn_Rejected()
+    {
+        // Aynı kolonla iki kez gruplamak sessizce anlamsız bir sonuç üretirdi.
+        var (token, id) = await SeededAggDatasetAsync("agg-dup", "a@aggdup.com");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Get,
+            $"/api/datasets/{id}/aggregate?groupBy=sehir&groupBy=sehir&op=count", token));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Aggregate_EmptyGroupByParam_TreatedAsUngrouped()
+    {
+        // "?groupBy=" yazan istemci gruplamasız sonuç ister; adı boş bir kolon değil.
+        var (token, id) = await SeededAggDatasetAsync("agg-empty", "a@aggempty.com");
+
+        var body = await AggregateAsync(token, id, "groupBy=&op=sum&metric=tutar");
+
+        var bucket = Assert.Single(body.Buckets);
+        Assert.Null(bucket.Key);
+        Assert.Equal(750m, bucket.Value);   // 100+200+150+300
     }
 
     [Fact]

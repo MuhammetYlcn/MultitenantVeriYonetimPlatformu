@@ -381,11 +381,16 @@ public class DatasetsController : ControllerBase
 
     // GET /api/datasets/{id}/aggregate — satırları gruplayıp özetler (grup özeti / top-N /
     // zaman serisi). Örn: ?groupBy=sehir&op=avg&metric=yas  |  ?groupBy=tarih&bucket=month&op=sum&metric=tutar
-    // op ∈ {count,sum,avg,min,max}; sum/avg/min/max sayısal metric ister; count metric istemez.
+    // op ∈ {count,sum,avg,min,max,median}; sum/avg/min/max/median sayısal metric ister;
+    // count metric istemez.
+    //
+    // groupBy TEKRARLANABİLİR: ?groupBy=sehir&groupBy=kategori → gruplanmış çubuk grafiğin
+    // ihtiyacı olan iki anahtarlı sonuç. Tek değer verildiğinde davranış eskisiyle aynı,
+    // çünkü tek elemanlı dizi de aynı SQL'i üretir.
     [HttpGet("{id:guid}/aggregate")]
     public async Task<IActionResult> Aggregate(
         Guid id,
-        [FromQuery] string? groupBy = null,
+        [FromQuery] string[]? groupBy = null,
         [FromQuery] string? op = null,
         [FromQuery] string? metric = null,
         [FromQuery] string? bucket = null,
@@ -410,7 +415,16 @@ public class DatasetsController : ControllerBase
         var (filters, filterError) = ParseFilters(filter);
         if (filterError is not null) return filterError;
 
-        var query = new AggregateQuery(groupBy, op, metric, bucket, sort, dir, limit, filters!);
+        // Boş/whitespace girdiler atılır: "?groupBy=" yazan bir istemci gruplamasız
+        // agregasyon istiyordur, "adı boş kolon" değil.
+        var groupCols = (groupBy ?? Array.Empty<string>())
+            .Where(g => !string.IsNullOrWhiteSpace(g))
+            .ToArray();
+
+        var query = new AggregateQuery(
+            groupCols,
+            new[] { new MetricSpec(op, metric) },
+            bucket, sort, dir, limit, filters!);
 
         BuiltAggregate built;
         try
