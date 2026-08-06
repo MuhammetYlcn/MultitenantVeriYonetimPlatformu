@@ -496,3 +496,7 @@ $RECYCLE.BIN/
 
 # Claude Code kisisel ayarlar (kod gezisi hatirlaticisi vb.)
 .claude/settings.local.json
+
+# Uretilen egitim verisi (tools/VeriYonetim.TrainingData ile yeniden uretilir)
+data/
+training/*.gguf

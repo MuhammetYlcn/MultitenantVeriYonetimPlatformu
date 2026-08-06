@@ -15,6 +15,13 @@ public class OllamaOptions
     // 7B model bu donanımda ~10 sn'de yanıt veriyor; ilk çağrıda model belleğe yüklendiği
     // için çok daha uzun sürebilir. Sınır ona göre geniş tutuldu.
     public int TimeoutSeconds { get; set; } = 120;
+
+    // İnce ayarlı (fine-tune edilmiş) modellerin ad öneki.
+    //
+    // Bu önekle başlayan bir model plan dilini eğitimden bildiği için istemde few-shot
+    // örnek GÖRMEZ (bkz. QueryPromptBuilder). Ayrı bir kayıt tutmak yerine ad önekine
+    // bakılıyor: modeli Ollama'ya kuran biziz, adını da biz veriyoruz.
+    public string FineTunedPrefix { get; set; } = "veriyonetim";
 }
 
 // Modelden plan ALINAMADIĞI durumlar: servis kapalı, zaman aşımı, ayrıştırılamayan yanıt.
@@ -126,7 +133,9 @@ public class QueryPlannerService : IQueryPlannerService
             selected = match.Name;
         }
 
-        var prompt = QueryPromptBuilder.Build(question.Trim(), catalog);
+        // Örnekler yalnız temel modele gönderilir; ince ayarlı model deseni ağırlıklarından
+        // bilir ve aynı örnekleri tekrar okumak istemi iki katına çıkarıp yanıtı yavaşlatır.
+        var prompt = QueryPromptBuilder.Build(question.Trim(), catalog, !IsFineTuned(selected));
 
         var stopwatch = Stopwatch.StartNew();
         var raw = await GenerateAsync(prompt, selected, ct);
@@ -152,6 +161,12 @@ public class QueryPlannerService : IQueryPlannerService
 
         return new PlanResult(plan, raw, (int)stopwatch.ElapsedMilliseconds, selected);
     }
+
+    // Eğitim verisi üreteci de bunu kullanır: eğitimdeki istem ile canlıdaki istem birebir
+    // aynı olmalı, yoksa model tanımadığı bir biçim görür ve doğruluk düşer.
+    public bool IsFineTuned(string model) =>
+        !string.IsNullOrWhiteSpace(_options.FineTunedPrefix) &&
+        model.StartsWith(_options.FineTunedPrefix, StringComparison.OrdinalIgnoreCase);
 
     public Task<string> CompleteJsonAsync(string prompt, string? model = null,
         CancellationToken ct = default) =>

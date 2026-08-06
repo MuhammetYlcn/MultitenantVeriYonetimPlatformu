@@ -10,9 +10,16 @@ namespace VeriYonetim.Api.Services;
 //
 // Örnekler (few-shot) bilinçli olarak çeşitli: küçük modeller tek desen gördüklerinde
 // her soruyu ona benzetme eğilimindedir.
+//
+// İstemin İKİ biçimi var ve ayrımı includeExamples yapar:
+//   örnekli   — temel model için. Model plan dilini hiç bilmez, örneklerden öğrenir.
+//   örneksiz  — ince ayarlı model için. Desen artık ağırlıklarda; örnekleri tekrar
+//               göndermek istemin yarısını boşa harcar ve yanıtı yavaşlatır.
+// Kurallar İKİ biçimde de kalır: eğitim beklenenden zayıf çıkarsa sistem yine de ayakta
+// kalsın. Eğitim verisi bu sınıfla üretildiği için iki taraf birbirinden ayrışamaz.
 public static class QueryPromptBuilder
 {
-    public static string Build(string question, TenantCatalog catalog)
+    public static string Build(string question, TenantCatalog catalog, bool includeExamples = true)
     {
         var sb = new StringBuilder();
 
@@ -25,9 +32,12 @@ public static class QueryPromptBuilder
         AppendValues(sb);
         AppendRules(sb);
 
-        sb.AppendLine("## Örnekler");
-        sb.AppendLine(Examples);
-        sb.AppendLine();
+        if (includeExamples)
+        {
+            sb.AppendLine("## Örnekler");
+            sb.AppendLine(Examples);
+            sb.AppendLine();
+        }
 
         sb.AppendLine("## Soru");
         sb.AppendLine(question);
