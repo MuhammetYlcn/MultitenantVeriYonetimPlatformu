@@ -54,6 +54,59 @@ public static class QueryPlanMapper
         return new RowQuery(1, limit, plan.Sort, plan.Dir, MapFilters(plan.Filters));
     }
 
+    // Satır listesinde kaydı TANITAN kolon adayları, tercih sırasıyla. Ad kolonu varsa
+    // koda tercih edilir: "P-1042" kullanıcıya kimin kastedildiğini söylemez.
+    private static readonly string[] IdentityColumns =
+    {
+        "ad_soyad", "adsoyad", "isim_soyisim", "ad", "adi", "isim",
+        "urun_adi", "urunadi", "musteri_adi", "firma_adi", "baslik",
+        "unvan", "plaka", "surucu", "sicil", "kod", "no"
+    };
+
+    // Satır listesine kaydı tanıtan kolonu ekler.
+    //
+    // Neden gerekli? "maaşı en yüksek 5 personel HANGİLERİ" sorusunun cevabı isimlerdir.
+    // Model bunu tutturamıyor — soru hangi kolonların gösterileceğini söylemediği için
+    // aslında tutturabileceği bir şey de yok: eğitim verisinde o kolon rastgele seçilmiş.
+    // Ölçümde bu, "sorgu doğru ama plan farklı" diye görünüyordu; kullanıcı tarafında ise
+    // isim yerine şehir gösteren bir tablo demekti.
+    //
+    // Karar modele bırakılmıyor çünkü bu bir SUNUM kararı, sorgu anlamı değil — tarih
+    // aritmetiğini de sunucuda hesaplıyoruz (bkz. RelativePeriod).
+    //
+    // TEK kolonluk seçime dokunulmuyor: "en son satış ne zaman" sorusunun cevabı tek bir
+    // tarihtir, yanına isim eklemek sorulmayan bir şeyi cevaba karıştırmak olur.
+    public static IReadOnlyList<string>? WithIdentityColumn(
+        IReadOnlyList<string>? select, QueryScope scope)
+    {
+        if (select is null || select.Count < 2) return select;
+
+        // Seçilenlerden biri zaten tanıtıcıysa ekleme yapma.
+        if (select.Any(reference => IsIdentity(BareColumn(reference)))) return select;
+
+        // Tanıtıcı kolon, sorunun BAŞLADIĞI veri setinden alınır (plan.From → ilk kaynak):
+        // liste o setin satırlarıdır, join'e katılan setin değil.
+        var primary = scope.Sources[0];
+        var identity = IdentityColumns.FirstOrDefault(primary.Columns.ContainsKey);
+        if (identity is null) return select;
+
+        var reference = scope.IsSingleSource ? identity : $"{primary.Name}.{identity}";
+
+        var result = new List<string>(select.Count + 1) { reference };
+        result.AddRange(select);
+        return result;
+    }
+
+    private static bool IsIdentity(string column) =>
+        IdentityColumns.Contains(column, StringComparer.OrdinalIgnoreCase);
+
+    // "Musteriler.ad" → "ad". Nitelikli olmayan referans olduğu gibi döner.
+    private static string BareColumn(string reference)
+    {
+        var dot = reference.IndexOf('.');
+        return dot > 0 && dot < reference.Length - 1 ? reference[(dot + 1)..] : reference;
+    }
+
     public static AggregateQuery ToAggregateQuery(QueryPlan plan)
     {
         // Ölçüm eksikse VARSAYILAN ATAMIYORUZ. "Adet say" diye tahmin etseydik kullanıcının

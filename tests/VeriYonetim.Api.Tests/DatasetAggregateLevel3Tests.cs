@@ -45,7 +45,8 @@ public class DatasetAggregateLevel3Tests
                 new RowFilter("tutar", "gt", "1000")
             }));
 
-        Assert.Contains("((\"Data\"->>'sehir') = @f1 OR", built.WhereSql);
+        // Metin eşitliği harfe duyarsız kurulur (lower/lower); test parantezi ölçüyor.
+        Assert.Contains("(lower((\"Data\"->>'sehir')) = lower(@f1) OR", built.WhereSql);
         Assert.EndsWith(")", built.WhereSql);
     }
 

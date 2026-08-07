@@ -169,6 +169,15 @@ internal static class DatasetSqlExpr
                     throw new InvalidQueryException($"'{op}' en fazla {MaxInValues} değer alabilir.");
 
                 parameters.Add(ArrayParam(p, column.Type, values));
+
+                // Metinde harf büyüklüğü göz ardı edilir (bkz. eq/ne). Diziyi de aynı
+                // kurala sokmak için unnest ile açıp lower'dan geçiriyoruz; PostgreSQL'de
+                // ANY/ALL bir alt sorgu da kabul eder.
+                if (column.Type == "text")
+                    return op == "in"
+                        ? $"lower({Text(column)}) = ANY(SELECT lower(v) FROM unnest(@{p}) AS v)"
+                        : $"lower({Text(column)}) <> ALL(SELECT lower(v) FROM unnest(@{p}) AS v)";
+
                 // = ANY(dizi) / <> ALL(dizi): tek koşulda çoklu değer.
                 return op == "in"
                     ? $"{Typed(column)} = ANY(@{p})"
@@ -210,6 +219,21 @@ internal static class DatasetSqlExpr
                     throw new InvalidQueryException($"Bilinmeyen operatör: {f.Op}");
 
                 parameters.Add(TypedParam(p, column.Type, f.Value));
+
+                // METİN eşitliğinde harf büyüklüğü göz ardı edilir.
+                //
+                // Neden? Kullanıcı "durumu gecikmiş olan faturalar" diye sorar, veride
+                // "Gecikmiş" yazar — düz '=' bunu eşleştirmez ve sorgu SIFIR satır döner.
+                // Üstelik hata da vermez: kullanıcı "hiç gecikmiş fatura yokmuş" sanır.
+                // Sistemin en tehlikeli hata türü olan sessiz yanlış cevabın ta kendisi.
+                // (contains zaten ILIKE ile harfe duyarsızdı; eq/ne geride kalmıştı.)
+                //
+                // lower() iki tarafa da SQL'de uygulanıyor, C#'ta değil: küçültme kuralı
+                // veritabanının derlemesine (collation) ait, iki dilde ayrı ayrı
+                // uygulanırsa Türkçe I/İ gibi harflerde ayrışabilirler.
+                if (column.Type == "text" && op is "eq" or "ne")
+                    return $"lower({Text(column)}) {sqlOp} lower(@{p})";
+
                 return $"{Typed(column)} {sqlOp} @{p}";
             }
         }

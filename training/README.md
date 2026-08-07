@@ -168,19 +168,91 @@ dotnet run --project tools/VeriYonetim.TrainingData -- \
 
 | Model | İstem | Ayrıştı | Geçerli | **Doğru** | **Sorgu** | Tarih |
 |---|---|---|---|---|---|---|
-| `qwen2.5-coder:7b` (baz) | örnekli | %100 | %93,7 | **%45,7** | **%66,3** | 2026-08-06 |
-| `veriyonetim-planlayici:7b` | örneksiz | — | — | — | — | — |
+| `qwen2.5-coder:7b` (baz) | örnekli | %100 | %94,0 | **%45,7** | **%66,3** | 2026-08-06 |
+| `veriyonetim-planlayici:7b` | örneksiz | %100 | **%100** | **%88,3** | **%100** | 2026-08-07 |
 
-Bölümlere göre (baz): görülmüş şema %42,1 / %63,2 — görülmemiş şema %49,3 / %69,6.
+Bölümlere göre (Doğru / Sorgu):
+
+| Model | Görülmüş şema | Görülmemiş şema |
+|---|---|---|
+| baz | %42,0 / %63,3 | %49,3 / %69,3 |
+| ince ayarlı | %89,3 / **%100** | %87,3 / **%100** |
 
 Baz çizginin okunuşu: model neredeyse her seferinde **çalışan** bir plan üretiyor
-(%93,7), ama sorgu mantığı ancak üçte ikisinde doğru. Kalan üçte bir, sistemin en
+(%94,0), ama sorgu mantığı ancak üçte ikisinde doğru. Kalan üçte bir, sistemin en
 tehlikeli hata türü: sorgu çalışır, grafik çizilir, kullanıcı yanlış sayıya bakar.
-İnce ayarın hedefi bu boşluk.
+İnce ayarın hedefi bu boşluktu.
 
-Görülmüş ve görülmemiş şemalar arasındaki fark temel modelde anlamsız — zaten ikisini de
-ilk kez görüyor. Bu ayrım asıl ince ayardan SONRA anlam kazanacak: orada açılan fark
-ezberin ölçüsü olacak.
+**Sonuç: boşluk kapandı.** Üç sayı birden anlamlı:
+
+* **Geçerli %100** — çalıştırılamayan tek bir plan yok (bazda 18 tane vardı)
+* **Sorgu %100** — 300 sorunun **hepsinde** sorgu mantığı doğru. "En çok hata veren
+  tarifler" listesi bu koşuda **boş**; bazdaki 6 hata tipinin tamamı kapandı
+* **Doğru %88,3** — kalan %11,7'nin tamamı `select` farkı, yani sorunun cevabını
+  değiştirmeyen "hangi kolonlar gösterilsin" tercihi (bkz. iki ayrı doğruluk ölçütü)
+
+**Ezber yok.** Görülmüş ve görülmemiş şema arasındaki fark yalnızca 2 puan (%89,3 →
+%87,3), Sorgu ölçütünde hiç yok. `Filo` ve `Kurs` katalogları eğitime hiç girmedi; model
+onları da aynı doğrulukla planlıyor, yani öğrendiği şey kolon adları değil plan dili.
+
+**Ölçümün sınırı — dürüst okunuş.** Ayrılan boyut ŞEMA'dır, CÜMLE değil. Değerlendirme
+soruları eğitim örnekleriyle aynı şablonlardan üretiliyor.
+
+## Cümle dayanıklılığı — 2026-08-07
+
+Yukarıdaki sayılar "kullanıcı cümleyi başka türlü kurunca ne oluyor" sorusunu hiç
+ölçmüyordu. Ölçmek için değerlendirme kümesinin soruları yerel modele yeniden yazdırıldı
+(`paraphrase --in data/samples.eval.jsonl`), planlar aynı bırakıldı. Aynı sorular şablon
+cümleyle de puanlandı — küme farkı sonucu kirletmesin diye (kontrol grubu).
+
+| Küme | Geçerli | Doğru | Sorgu |
+|---|---|---|---|
+| Kontrol (259 soru, şablon cümle) | %100 | %88,8 | **%100** |
+| Parafraz (257 soru) — ham | %99,6 | %67,7 | **%79,0** |
+| Parafraz — ispatlanabilir bozuk parafrazlar çıkarılınca | | | **%84,9** |
+| Parafraz — 54 hatanın tamamı elle okununca | | | **~%96-98** |
+
+**Ham sayı yanıltıcı.** 54 hatanın en az 18'i, parafrazın soruyu değiştirmesinden
+kaynaklanıyor; elle okunduğunda oran çok daha yüksek çıkıyor. Model çoğu durumda
+kendisine sorulan YENİ soruya doğru cevap veriyor, referans plan ise eski soruya ait:
+
+```
+ORİJİNAL : ödeme tipi alanında "Nak" GEÇEN kayıtlar   → contains
+PARAFRAZ : Ödeme tipi 'Nak' OLAN kayıtları filtreleyin → eq
+MODEL    : eq   ← yeni cümleye göre doğru, referansa göre yanlış
+```
+
+Gerçek model hatası 257 soruda ~4-9 tane. **Karar: ikinci bir eğitim koşusuna gerek yok.**
+
+## Bilinen eksik — parafraz kapısı
+
+Yukarıdaki ölçümün kirli olmasının sebebi, parafraz sadakat kapısının zayıf olması.
+Bugün iki şey denetleniyor (`Program.cs`, `IsFaithful` + `PlanValidator`): özel
+adlar/sayılar korunmuş mu, ve yeni cümle aynı planla hâlâ **kurulabilir** mi. İkincisi
+güçlü görünüyor ama değil — kurulabilirlik, cümlenin o planı hâlâ ANLATTIĞINI test
+etmiyor. "Veya"nın düşmesi, "ilk 5"in kaybolması, "geçen"in "olan"a dönmesi planı
+kurulamaz yapmadığı için hepsi kapıdan geçiyor.
+
+Aynı bozukluk **eğitim havuzunda da var**. Planın taşıdığı yapısal sinyal cümlede
+hayatta kalmış mı diye bakıldığında:
+
+```
+Eğitimdeki parafraz : 5 839
+  sinyal kaybetmiş  : 1 429  (%24,5)
+    groupBy 706 | limit 562 | contains 103 | or 54 | having 38
+```
+
+Yani `data/samples.train.para.jsonl` **güvenilir değil**: dört örnekten biri modele
+yanlış eşleme öğretir. Bugün "koşu 2 için hazır" durumda görünen 9 839 satırlık havuz bu
+hâliyle kullanılmamalı.
+
+**Yeniden eğitim gündeme gelirse İLK yapılacak iş budur.** Kapıya plan özelliği başına
+sinyal denetimi eklenmeli: plan `or` içeriyorsa cümlede "veya/ya da", `limit:5` varsa
+"5", `contains` varsa "geçen/içeren", `groupBy` varsa "göre/bazında" bulunmalı; ayrıca
+planda geçmeyen bir veri seti adını cümleye ekleyen parafraz elenmeli. Ardından parafraz
+yeniden üretilmeli (~2 saat) ve dayanıklılık temiz kümeyle yeniden ölçülmeli.
+
+**Bu koşuyu üreten model eski veriyle eğitildi**: 4 000 örnek, parafrazsız, 500 adım.
 
 Sorgunun kendisini yanlış kuran hatalar (baz, en sık 6'sı):
 
@@ -194,7 +266,9 @@ Sorgunun kendisini yanlış kuran hatalar (baz, en sık 6'sı):
 | `time_bucket_period` | Olmayan kolon uyduruyor (`tarih`, oysa sette `ise_giris` var) |
 
 Hepsi plan dilinin kurallarını bilmemekten kaynaklanıyor — istemde yazılı oldukları
-hâlde. İnce ayarın kapatması gereken liste bu.
+hâlde. İnce ayarın kapatması gereken liste buydu; **ince ayarlı koşuda listenin tamamı
+boş çıktı.** Kural istemde okunduğunda atlanabiliyor, ağırlığa geçtiğinde atlanmıyor —
+ince ayarın bu işte ne işe yaradığının en somut kanıtı bu tablo.
 
 ## Eğitim koşusu 1 — 2026-08-06
 
@@ -224,3 +298,24 @@ bozuk olması (`make clean` çağırıyor ama llama.cpp CMake'e geçmiş; ayrıc
 `LLAMA_CURL is deprecated` uyarısını hata sayıyor). `training/kaggle_gguf.ipynb` aynı işi
 elle yapıyor: doğru CMake bayrakları, ara dosyalar `/tmp`'ye (20 GB çıktı sınırını
 aşmamak için), çıktıya yalnız 4,4 GB'lık `q4_k_m`.
+
+**Dönüşüm bu defterle tamamlandı.** Çıktılar Hugging Face'te (özel):
+
+| Depo | İçerik |
+|---|---|
+| `rhymali/veriyonetim-planlayici-lora` | LoRA eklentisi (~300 MB) |
+| `rhymali/veriyonetim-planlayici-gguf` | `Q4_K_M` GGUF (4,36 GB) |
+
+## Modeli kurarken: ad ÖNEMLİ
+
+Ollama'ya doğrudan HF'den çekilirse model adı `hf.co/rhymali/...` olur ve
+`OllamaOptions.FineTunedPrefix` (`veriyonetim`) ile eşleşmez. Sunucu o zaman modeli ince
+ayarlı SAYMAZ ve isteme 13 few-shot örneği koyar — yani model eğitimde hiç görmediği bir
+istem biçimiyle karşılaşır: hem yavaşlar hem doğruluk düşer. Belirti sessizdir, hata
+verilmez.
+
+Çekildikten sonra önekli bir ada kopyalanmalı (yer kaplamaz, katmanlar ortak):
+
+```bash
+ollama cp hf.co/rhymali/veriyonetim-planlayici-gguf:Q4_K_M veriyonetim-planlayici:7b
+```

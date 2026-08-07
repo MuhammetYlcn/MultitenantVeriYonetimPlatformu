@@ -219,8 +219,12 @@ public class AskController : ControllerBase
         if (kind == "rows")
         {
             // plan.Select: yalnız sorulan kolonlar. Verilmezse bütün kolonlar döner.
+            // WithIdentityColumn: liste hangi kayıtlara ait belli olsun diye ad/kod kolonu
+            // eklenir — soru bunu söylemediğinden modelden beklenmiyor (bkz. QueryPlanMapper).
+            var select = QueryPlanMapper.WithIdentityColumn(plan.Select, scope);
+
             var built = DatasetRowQueryBuilder.BuildSelect(
-                QueryPlanMapper.ToRowQuery(plan), scope, plan.Select);
+                QueryPlanMapper.ToRowQuery(plan), scope, select);
             var rows = await _executor.RunRowsAsync(built, ct);
             stopwatch.Stop();
 

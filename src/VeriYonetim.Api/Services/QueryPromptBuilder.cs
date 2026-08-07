@@ -148,6 +148,9 @@ public static class QueryPromptBuilder
         sb.AppendLine("  \"2023 yılında\" → gte 2023-01-01 ve lt 2024-01-01");
         sb.AppendLine("  Soruda geçen tarih koşulunu ATLAMA: filtresiz cevap yanlış cevaptır.");
         sb.AppendLine("- \"A ve B'deki\" gibi çoklu değerde ayrı ayrı eq DEĞİL, tek bir in kullan.");
+        sb.AppendLine("- \"A dışında\", \"A hariç\", \"A olmayan\" DIŞLAMA demektir: tek değerde ne, çok değerde notIn kullan.");
+        sb.AppendLine("  VEYA'lı eq YAZMA — o, hariç tutmak yerine tam tersini seçer ve sonucu ters çevirir.");
+        sb.AppendLine("  \"Servis ve Yönetim dışındaki araçlar\" → notIn [\"Servis\",\"Yönetim\"]");
         sb.AppendLine("- Soruyu bu şemayla ifade edemiyorsan kind=unsupported döndür ve reason yaz.");
         sb.AppendLine("  Uydurma. Yanlış cevap vermektense cevaplayamadığını söylemen daha iyidir.");
         sb.AppendLine("- Kullanmadığın alanları hiç yazma.");
@@ -180,6 +183,9 @@ public static class QueryPromptBuilder
 
         Soru: Ankara ve İzmir'deki satışların adedi
         {"kind":"aggregate","from":"Satislar","metrics":[{"op":"count"}],"filters":[{"column":"sehir","op":"in","values":["Ankara","İzmir"]}]}
+
+        Soru: Ankara ve İzmir dışındaki satışların adedi
+        {"kind":"aggregate","from":"Satislar","metrics":[{"op":"count"}],"filters":[{"column":"sehir","op":"notIn","values":["Ankara","İzmir"]}]}
 
         Soru: Bu yıl aylara göre ciro
         {"kind":"aggregate","from":"Satislar","groupBy":["tarih"],"bucket":"month","metrics":[{"op":"sum","column":"tutar"}],"filters":[{"column":"tarih","op":"inPeriod","value":"buYil"}]}

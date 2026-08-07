@@ -32,7 +32,8 @@ public class DatasetFilterOperatorTests
         // döndürmezdi; tek koşulda çoklu değer bu yüzden gerekli.
         var built = Where(In("sehir", "in", "Ankara", "İzmir"));
 
-        Assert.Contains("= ANY(@f0)", built.WhereSql);
+        // Metin kolonunda karşılaştırma harfe duyarsız: dizi de unnest ile lower'dan geçer.
+        Assert.Contains("= ANY(SELECT lower(v) FROM unnest(@f0) AS v)", built.WhereSql);
         var p = Assert.Single(built.Parameters);
         Assert.Equal(new[] { "Ankara", "İzmir" }, p.Value);
     }
@@ -41,7 +42,7 @@ public class DatasetFilterOperatorTests
     public void NotIn_UsesAllWithInequality()
     {
         var built = Where(In("sehir", "notIn", "Ankara"));
-        Assert.Contains("<> ALL(@f0)", built.WhereSql);
+        Assert.Contains("<> ALL(SELECT lower(v) FROM unnest(@f0) AS v)", built.WhereSql);
     }
 
     [Fact]
@@ -63,7 +64,7 @@ public class DatasetFilterOperatorTests
         var built = Where(In("sehir", "in", "x'); DROP TABLE \"DatasetRows\"; --"));
 
         Assert.DoesNotContain("DROP", built.WhereSql);
-        Assert.Contains("= ANY(@f0)", built.WhereSql);
+        Assert.Contains("unnest(@f0)", built.WhereSql);
     }
 
     [Fact]

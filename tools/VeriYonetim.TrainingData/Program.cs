@@ -27,6 +27,7 @@ return command switch
     "build" => Build(options),
     "evaluate" => await Evaluate(options),
     "rescore" => Rescore(options),
+    "recheck" => Recheck(options),
     _ => Help()
 };
 
@@ -36,10 +37,12 @@ static int Help()
         Kullanım: dotnet run -- <komut> [seçenekler]
 
           generate    --out <dizin> [--train 4000] [--eval 150] [--seed 42]
-          paraphrase  --out <dizin> [--model qwen2.5-coder:7b] [--variants 2]
+          paraphrase  --out <dizin> [--in <dosya>] [--out-file <dosya>]
+                      [--model qwen2.5-coder:7b] [--variants 2]
           build       --out <dizin>
           evaluate    --in <dosya> [--model qwen2.5-coder:7b] [--limit 0]
           rescore     --in <sonuc dosyasi> [--samples data/samples.eval.jsonl]
+          recheck     --in <parafraz dosyasi> [--write]
         """);
     return 1;
 }
@@ -158,8 +161,20 @@ static async Task<int> Paraphrase(Dictionary<string, string> options)
     var model = options.GetValueOrDefault("model", "qwen2.5-coder:7b");
     var variants = int.Parse(options.GetValueOrDefault("variants", "2"));
 
-    var inputPath = Path.Combine(outDir, "samples.train.jsonl");
-    var outputPath = Path.Combine(outDir, "samples.train.para.jsonl");
+    // Varsayılan eğitim kümesidir, ama --in ile başka bir küme de verilebilir.
+    // DEĞERLENDİRME kümesini parafrazlamak için gerekiyor: eğitim ve ölçüm sorularının
+    // ikisi de aynı şablonlardan çıktığı için, mevcut doğruluk "kullanıcı cümleyi başka
+    // türlü kurunca ne oluyor" sorusunu HİÇ ölçmüyor.
+    var inputPath = options.GetValueOrDefault("in", Path.Combine(outDir, "samples.train.jsonl"));
+
+    var outputPath = options.TryGetValue("out-file", out var explicitOut)
+        ? explicitOut
+        : Path.Combine(
+            Path.GetDirectoryName(inputPath) is { Length: > 0 } dir ? dir : outDir,
+            Path.GetFileNameWithoutExtension(inputPath) + ".para.jsonl");
+
+    Console.WriteLine($"Girdi: {inputPath}");
+    Console.WriteLine($"Çıktı: {outputPath}");
 
     var samples = ReadJsonl(inputPath).ToList();
     var catalogCache = CatalogDefs.All.ToDictionary(c => c.Name, c => c.ToCatalog());
@@ -208,7 +223,10 @@ static async Task<int> Paraphrase(Dictionary<string, string> options)
         {
             var candidate = rewrite.Trim();
 
-            if (!IsFaithful(sample.Question, candidate, required, features) || !done.Add(Normalize(candidate)))
+            if (!IsFaithful(sample.Question, candidate, required, features)
+                || MentionsForeignDataset(sample, candidate)
+                || AddsAbsentFeature(sample, candidate)
+                || !done.Add(Normalize(candidate)))
             {
                 rejected++;
                 continue;
@@ -295,6 +313,43 @@ static bool IsFaithful(string original, string candidate,
     return true;
 }
 
+// Yasaklı kavramlar: planda KARŞILIĞI OLMAYAN bir yetenek cümleye eklenmiş mi.
+//
+// RequiredFeatures'ın aynası. O, planın yeteneğinin cümleden düşmesini yakalar; bu ise
+// cümleye plana ait olmayan bir yeteneğin girmesini. İkisi ayrı bozulma yönü:
+//   "kaç satış var"  →  "kaç FARKLI marka var"   (plan count, cümle benzersiz sayım ister)
+//   "A ve B'deki"    →  "A VEYA B'deki"          (plan VE, cümle VEYA ister)
+// Her ikisinde de cümle kusursuz ve plan kurulabilir; eşleşme sessizce bozulmuş olur.
+static bool AddsAbsentFeature(SampleRecord sample, string candidate)
+{
+    QueryPlan? plan;
+    try { plan = QueryPlanJson.Parse(sample.Plan); }
+    catch (JsonException) { return false; }
+    if (plan is null) return false;
+
+    var operators = new List<string>();
+    CollectFilterOperators(plan.Filters, operators);
+
+    var hasDistinct = (plan.Metrics ?? Array.Empty<PlanMetric>())
+        .Any(m => string.Equals(m.Op?.Trim(), "countDistinct", StringComparison.OrdinalIgnoreCase));
+
+    // "farklı" hem benzersiz sayımın hem de dışlamanın ("X'ten farklı") işaretidir;
+    // ikisinden biri plandaysa sözcük meşrudur.
+    var hasExclusion = operators.Contains("ne") || operators.Contains("notIn");
+
+    if (!hasDistinct && !hasExclusion &&
+        new[] { "farklı", "benzersiz", "değişik" }
+            .Any(w => candidate.Contains(w, StringComparison.OrdinalIgnoreCase)))
+        return true;
+
+    if (!HasOrGroup(plan.Filters) &&
+        new[] { "veya", "ya da", "veyahut" }
+            .Any(w => candidate.Contains(w, StringComparison.OrdinalIgnoreCase)))
+        return true;
+
+    return false;
+}
+
 // Planın nadir yeteneklerini cümlede tutan anahtar kelimeler. Her küme için EN AZ BİRİ
 // bulunmalı; eş anlamlıya izin var, kavramın tümden düşmesine yok.
 static IReadOnlyList<string[]> RequiredFeatures(SampleRecord sample)
@@ -327,11 +382,172 @@ static IReadOnlyList<string[]> RequiredFeatures(SampleRecord sample)
     if (bucket == "month") groups.Add(new[] { "ay" });
     if (bucket == "year") groups.Add(new[] { "yıl" });
 
+    // --- 2026-08-07'de eklenenler ---
+    //
+    // Üretilmiş 5 839 parafraz taranınca dörtte birinin (1 429) planın taşıdığı yapısal
+    // sinyali kaybettiği görüldü. Bu satırlar modele YANLIŞ eşleme öğretir ve kayıp
+    // sessizdir: cümle "veya"yı düşürse de plan hâlâ kurulabilir olduğu için eski kapı
+    // hepsini geçiriyordu. Kurulabilirlik, cümlenin o planı hâlâ ANLATTIĞINI test etmez.
+
+    // Gruplama: "şehre göre toplam" → "toplam" olunca plan artık soruya ait değil (706 kayıp).
+    if ((plan.GroupBy?.Count ?? 0) > 0)
+        groups.Add(new[] { "göre", "bazında", "kırılım", "başına", "grupla", "her bir", "ayrım", "dağılım" });
+
+    // İlk N: sayı cümleden düşünce plandaki limit karşılıksız kalıyor (562 kayıp).
+    // Rakam tek başına iki harften kısa olduğu için genel belirteç denetimine takılmıyor;
+    // yazıyla yazılmış hâline de izin veriliyor.
+    if (plan.Limit is int limit && limit > 1)
+        groups.Add(NumberForms(limit));
+
+    var operators = new List<string>();
+    CollectFilterOperators(plan.Filters, operators);
+
+    // "geçen/içeren" düşüp "olan"a dönünce contains sessizce eşitliğe kayıyor (103 kayıp).
+    if (operators.Contains("contains"))
+        groups.Add(new[] { "geçen", "içeren", "içinde", "barındır", "geçiyor" });
+
+    // Dışlama: "Renault dışındaki" → "Renault olan" sonucu TERSİNE çevirir.
+    if (operators.Contains("ne") || operators.Contains("notIn"))
+        groups.Add(new[] { "dışında", "dışındaki", "hariç", "olmayan", "değil", "farklı", "haricinde" });
+
+    // VEYA ağacı: bağlaç düşünce koşullar VE ile bağlanmış gibi okunuyor (54 kayıp).
+    if (HasOrGroup(plan.Filters))
+        groups.Add(new[] { "veya", "ya da", "veyahut" });
+
+    // Grup sonrası eşik (38 kayıp).
+    if (plan.Having is not null)
+        groups.Add(new[] { "üstünde", "üzerinde", "altında", "yalnızca", "sadece", "fazla", "az olan", "geçen" });
+
+    // Dönem etiketi. Anahtar kelime denetimlerinin kaçırdığı en sinsi bozulma buydu:
+    // model "dün ortalama ücret" sorusunu "Bugünün ortalama ücreti" diye yeniden yazıyor.
+    // Cümle kusursuz, plan kurulabilir, sadakat denetimi geçiyor — ama plan artık BAŞKA
+    // bir günü sorguluyor. Eş anlamlılara izin var ("geçen ay" ~ "geçtiğimiz ay"),
+    // dönemin başka bir döneme kaymasına yok.
+    var leaves = new List<PlanFilter>();
+    CollectFilterLeaves(plan.Filters, leaves);
+
+    foreach (var leaf in leaves)
+    {
+        if (!string.Equals(leaf.Op?.Trim(), "inPeriod", StringComparison.OrdinalIgnoreCase)) continue;
+
+        var phrases = PeriodPhrases().GetValueOrDefault((leaf.Value ?? "").Trim());
+        if (phrases is not null) groups.Add(phrases);
+    }
+
     // Cevaplanamayan sorularda kavram tümden kaymasın.
     if (string.Equals(plan.Kind?.Trim(), "unsupported", StringComparison.OrdinalIgnoreCase))
         groups.Clear();
 
     return groups;
+}
+
+// Bir sayının cümlede geçebileceği biçimler. Model "ilk 5" yerine "ilk beş" yazabilir;
+// ikisi de sadıktır, sayının tümden düşmesi değildir.
+static string[] NumberForms(int n)
+{
+    var words = new Dictionary<int, string>
+    {
+        [2] = "iki", [3] = "üç", [4] = "dört", [5] = "beş", [6] = "altı", [7] = "yedi",
+        [8] = "sekiz", [9] = "dokuz", [10] = "on", [15] = "on beş", [20] = "yirmi"
+    };
+
+    return words.TryGetValue(n, out var word)
+        ? new[] { n.ToString(), word }
+        : new[] { n.ToString() };
+}
+
+// Göreli dönem etiketinin cümlede geçebileceği biçimler.
+//
+// Eş anlamlılar bilinçli olarak geniş: "geçen ay" yerine "geçtiğimiz ay" yazan bir
+// parafraz sadıktır ve elenmemelidir. Dar tutulursa kapı, bozuk olanla birlikte geçerli
+// yeniden yazımların çoğunu da eler — parafrazın varlık sebebi dil çeşitliliğiydi.
+static Dictionary<string, string[]> PeriodPhrases() => new()
+{
+    ["bugun"] = new[] { "bugün" },
+    ["dun"] = new[] { "dün" },
+    ["buHafta"] = new[] { "bu hafta", "içinde bulunduğumuz hafta" },
+    ["gecenHafta"] = new[] { "geçen hafta", "geçtiğimiz hafta", "önceki hafta" },
+    ["son7Gun"] = new[] { "son 7", "son yedi" },
+    ["son30Gun"] = new[] { "son 30", "son otuz" },
+    ["son90Gun"] = new[] { "son 90", "son doksan" },
+    ["buAy"] = new[] { "bu ay", "içinde bulunduğumuz ay", "mevcut ay" },
+    ["gecenAy"] = new[] { "geçen ay", "geçtiğimiz ay", "önceki ay" },
+    ["son12Ay"] = new[] { "son 12", "son on iki" },
+    ["buCeyrek"] = new[] { "bu çeyrek", "içinde bulunduğumuz çeyrek" },
+    ["gecenCeyrek"] = new[] { "geçen çeyrek", "geçtiğimiz çeyrek", "önceki çeyrek" },
+    ["buYil"] = new[] { "bu yıl", "bu sene", "içinde bulunduğumuz yıl" },
+    ["gecenYil"] = new[] { "geçen yıl", "geçtiğimiz yıl", "önceki yıl", "geçen sene", "geçtiğimiz sene" },
+};
+
+// Filtre ağacının yaprakları (VEYA gruplarının içindekiler dahil).
+static void CollectFilterLeaves(IReadOnlyList<PlanFilter>? filters, List<PlanFilter> into)
+{
+    foreach (var f in filters ?? Array.Empty<PlanFilter>())
+    {
+        if (!string.IsNullOrWhiteSpace(f.Logic)) CollectFilterLeaves(f.Children, into);
+        else into.Add(f);
+    }
+}
+
+// Filtre ağacındaki bütün operatörler (VEYA gruplarının içindekiler dahil).
+static void CollectFilterOperators(IReadOnlyList<PlanFilter>? filters, List<string> into)
+{
+    foreach (var f in filters ?? Array.Empty<PlanFilter>())
+    {
+        if (!string.IsNullOrWhiteSpace(f.Logic))
+            CollectFilterOperators(f.Children, into);
+        else if (!string.IsNullOrWhiteSpace(f.Op))
+            into.Add(f.Op.Trim());
+    }
+}
+
+static bool HasOrGroup(IReadOnlyList<PlanFilter>? filters) =>
+    (filters ?? Array.Empty<PlanFilter>()).Any(f =>
+        string.Equals(f.Logic?.Trim(), "or", StringComparison.OrdinalIgnoreCase) ||
+        HasOrGroup(f.Children));
+
+// Planın DOKUNMADIĞI bir veri setinin adını cümleye sokan parafrazı eler.
+//
+// Model bunu sık yapıyor: "Müşteri kartları ve satış kayıtlarını kullanarak..." diye
+// başlayan bir cümle, plan tek sete dokunurken modele olmayan bir birleştirme öğretir.
+// Orijinal cümlede zaten geçen adlar serbest; denetim yalnızca EKLENENLERİ yakalıyor.
+// Kullanılan setlerin kolon etiketlerinde geçen sözcükler de serbest, çünkü satış
+// setinde "müşteri" adlı bir kolon varsa o sözcük başka bir sete işaret etmez.
+static bool MentionsForeignDataset(SampleRecord sample, string candidate)
+{
+    var catalog = CatalogDefs.All.FirstOrDefault(c => c.Name == sample.Catalog);
+    if (catalog is null) return false;
+
+    QueryPlan? plan;
+    try { plan = QueryPlanJson.Parse(sample.Plan); }
+    catch (JsonException) { return false; }
+    if (plan is null) return false;
+
+    var used = QueryPlanMapper.DatasetNames(plan).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    var safeWords = catalog.Datasets
+        .Where(d => used.Contains(d.Name))
+        .SelectMany(d => d.Columns.SelectMany(c => new[] { c.Name, c.Label }))
+        .Where(w => !string.IsNullOrWhiteSpace(w))
+        .ToList();
+
+    foreach (var dataset in catalog.Datasets)
+    {
+        if (used.Contains(dataset.Name)) continue;
+
+        foreach (var form in new[] { dataset.Singular, dataset.Plural })
+        {
+            if (string.IsNullOrWhiteSpace(form) || form.Length < 4) continue;
+
+            if (!candidate.Contains(form, StringComparison.OrdinalIgnoreCase)) continue;
+            if (sample.Question.Contains(form, StringComparison.OrdinalIgnoreCase)) continue;
+            if (safeWords.Any(w => w.Contains(form, StringComparison.OrdinalIgnoreCase))) continue;
+
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static string[] DriftMarkers() => new[]
@@ -427,10 +643,20 @@ static int Build(Dictionary<string, string> options)
 {
     var outDir = options.GetValueOrDefault("out", "data");
 
-    var paraphrased = Path.Combine(outDir, "samples.train.para.jsonl");
-    var trainSource = File.Exists(paraphrased)
-        ? paraphrased
-        : Path.Combine(outDir, "samples.train.jsonl");
+    // Kaynak tercih sırası: temizlenmiş parafrazlı havuz → ham parafrazlı → şablon.
+    //
+    // Temiz olan öne alınıyor çünkü ham havuzun dörtte biri, cümlesi planını artık
+    // anlatmayan satırlardan oluşuyor (bkz. recheck). O satırlar modele yanlış eşleme
+    // öğretir ve bunun eğitim sırasında fark edilmesinin hiçbir yolu yoktur.
+    var adaylar = new[]
+    {
+        options.GetValueOrDefault("in", ""),
+        Path.Combine(outDir, "samples.train.para.temiz.jsonl"),
+        Path.Combine(outDir, "samples.train.para.jsonl"),
+        Path.Combine(outDir, "samples.train.jsonl"),
+    };
+
+    var trainSource = adaylar.First(p => !string.IsNullOrWhiteSpace(p) && File.Exists(p));
 
     Console.WriteLine($"Eğitim kaynağı: {Path.GetFileName(trainSource)}");
 
@@ -629,10 +855,23 @@ static int Rescore(Dictionary<string, string> options)
 
     var catalogCache = CatalogDefs.All.ToDictionary(c => c.Name, c => c.ToCatalog());
 
-    // Katalog/tarif/bölüm bilgisi sonuç dosyasında yok; soru metni üzerinden eşleniyor.
-    var bySample = ReadJsonl(samplesPath)
+    // Sonuç dosyasında katalog yok, o yüzden örnek kaydıyla eşlemek gerekiyor.
+    //
+    // Yalnız soru metnine bakmak YETMEZ: kolon adı geçirmeyen sorular ("bugün girilen
+    // kayıtlar") farklı kataloglarda aynı cümleyi üretebilir. O zaman satır yanlış bölüme
+    // yazılır VE yanlış katalog/beklenen plana karşı puanlanır — yani ezberi ölçen
+    // seen/unseen ayrımı sessizce bozulur. Bölüm ve tarif sonuç dosyasında zaten duruyor;
+    // anahtara onları da katıyoruz, kalan belirsizliği de beklenen plan çözüyor.
+    var samples = ReadJsonl(samplesPath).ToList();
+
+    var byKey = samples
+        .GroupBy(s => RescoreKey(Normalize(s.Question), s.Split, s.Recipe))
+        .ToDictionary(g => g.Key, g => g.ToList());
+
+    // Bölüm/tarif taşımayan eski sonuç dosyaları için geri düşüş.
+    var byQuestion = samples
         .GroupBy(s => Normalize(s.Question))
-        .ToDictionary(g => g.Key, g => g.First());
+        .ToDictionary(g => g.Key, g => g.ToList());
 
     var results = new List<EvalResult>();
     var unmatched = 0;
@@ -644,11 +883,20 @@ static int Rescore(Dictionary<string, string> options)
         var saved = JsonSerializer.Deserialize<SavedResult>(line, Jsonl);
         if (saved is null) continue;
 
-        if (!bySample.TryGetValue(Normalize(saved.Soru), out var sample))
+        var question = Normalize(saved.Soru);
+
+        if (!byKey.TryGetValue(RescoreKey(question, saved.Bolum, saved.Tarif), out var candidates)
+            && !byQuestion.TryGetValue(question, out candidates))
         {
             unmatched++;
             continue;
         }
+
+        // Aynı bölüm+tarifte birden çok aday kaldıysa (farklı kataloglar) beklenen plan
+        // hangisine aitse o seçilir; plan katalog kolonlarını taşıdığı için ayırt edicidir.
+        var sample = candidates.Count == 1
+            ? candidates[0]
+            : candidates.FirstOrDefault(s => s.Plan == saved.Beklenen) ?? candidates[0];
 
         var row = new TrainingRow(
             "", sample.Plan, sample.Question, sample.Recipe, sample.Catalog, sample.Split, sample.Source);
@@ -661,6 +909,101 @@ static int Rescore(Dictionary<string, string> options)
         Console.WriteLine($"Eşleşmeyen {unmatched} satır atlandı.");
 
     Report(Path.GetFileName(resultPath), results);
+    return 0;
+}
+
+// Eşleme anahtarı: soru + bölüm + tarif. Birleştirici olarak birim ayırıcı (U+001F)
+// kullanılıyor — üç alanın hiçbirinde geçmez, yani "a|b" ile "a" + "|b" karışmaz.
+static string RescoreKey(string question, string split, string recipe) =>
+    $"{question}\u001f{split}\u001f{recipe}";
+
+// ============================ recheck ============================
+
+// Mevcut bir parafraz dosyasını, BUGÜNKÜ sadakat kapısından geçirir ve neyin eleneceğini
+// raporlar. Yeniden üretim saatler sürdüğünden, kapı değiştiğinde önce burada denenir:
+// çok gevşek mi kaldı, yoksa geçerli parafrazları da mı eliyor.
+//
+// --write verilirse temizlenmiş dosya da yazılır; model hiç çağrılmaz.
+static int Recheck(Dictionary<string, string> options)
+{
+    var inputPath = options.GetValueOrDefault("in", Path.Combine("data", "samples.train.para.jsonl"));
+    var write = options.ContainsKey("write");
+
+    if (!File.Exists(inputPath))
+    {
+        Console.WriteLine($"Dosya yok: {inputPath}");
+        return 1;
+    }
+
+    var samples = ReadJsonl(inputPath).ToList();
+
+    // Parafrazın kaynağı olan şablon satırı: sadakat denetimi orijinal cümleyi ister.
+    var origins = samples
+        .Where(s => s.Source != "parafraz")
+        .GroupBy(s => Normalize(s.Question))
+        .ToDictionary(g => g.Key, g => g.First());
+
+    var kept = new List<SampleRecord>();
+    var sebepler = new Dictionary<string, int>();
+    int parafraz = 0, elenen = 0;
+
+    foreach (var sample in samples)
+    {
+        if (sample.Source != "parafraz")
+        {
+            kept.Add(sample);
+            continue;
+        }
+
+        parafraz++;
+
+        // Origin alanı parafrazın hangi cümleden türediğini söylüyor; şablon satırı
+        // dosyada yoksa parafrazın kendisi karşılaştırma tabanı olarak kullanılamaz.
+        var originText = sample.Origin ?? "";
+        var origin = origins.GetValueOrDefault(Normalize(originText));
+        if (origin is null)
+        {
+            kept.Add(sample);
+            continue;
+        }
+
+        var required = RequiredLabels(origin);
+        var features = RequiredFeatures(origin);
+
+        string? sebep = null;
+        if (!IsFaithful(origin.Question, sample.Question, required, features)) sebep = "sadakat";
+        else if (MentionsForeignDataset(origin, sample.Question)) sebep = "yabancı veri seti";
+        else if (AddsAbsentFeature(origin, sample.Question)) sebep = "olmayan yetenek";
+
+        if (sebep is null)
+        {
+            kept.Add(sample);
+            continue;
+        }
+
+        elenen++;
+        sebepler[sebep] = sebepler.GetValueOrDefault(sebep) + 1;
+    }
+
+    Console.WriteLine($"Dosya            : {Path.GetFileName(inputPath)}");
+    Console.WriteLine($"Toplam satır     : {samples.Count}");
+    Console.WriteLine($"  parafraz       : {parafraz}");
+    Console.WriteLine($"  elenen         : {elenen}  (%{(parafraz == 0 ? 0 : 100.0 * elenen / parafraz):N1})");
+    Console.WriteLine($"  kalan          : {kept.Count}");
+
+    foreach (var entry in sebepler.OrderByDescending(e => e.Value))
+        Console.WriteLine($"    {entry.Value,5}  {entry.Key}");
+
+    if (write)
+    {
+        var outputPath = Path.Combine(
+            Path.GetDirectoryName(inputPath) ?? ".",
+            Path.GetFileNameWithoutExtension(inputPath) + ".temiz.jsonl");
+
+        WriteJsonl(outputPath, kept);
+        Console.WriteLine($"Yazıldı          : {outputPath}");
+    }
+
     return 0;
 }
 
