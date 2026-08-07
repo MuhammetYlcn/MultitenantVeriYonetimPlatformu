@@ -222,7 +222,9 @@ PARAFRAZ : Ödeme tipi 'Nak' OLAN kayıtları filtreleyin → eq
 MODEL    : eq   ← yeni cümleye göre doğru, referansa göre yanlış
 ```
 
-Gerçek model hatası 257 soruda ~4-9 tane. **Karar: ikinci bir eğitim koşusuna gerek yok.**
+Gerçek model hatası 257 soruda ~4-9 tane. **O anki karar: ikinci bir eğitim koşusuna
+gerek yok.** Bu karar aynı gün içinde geri alındı — gerekçesi aşağıda: elle okuyarak
+çıkarılan ~%96-98 tahmini, kapı sertleştirilip ölçüm tekrarlandığında doğrulanmadı.
 
 ## Bilinen eksik — parafraz kapısı
 
@@ -246,13 +248,40 @@ Yani `data/samples.train.para.jsonl` **güvenilir değil**: dört örnekten biri
 yanlış eşleme öğretir. Bugün "koşu 2 için hazır" durumda görünen 9 839 satırlık havuz bu
 hâliyle kullanılmamalı.
 
-**Yeniden eğitim gündeme gelirse İLK yapılacak iş budur.** Kapıya plan özelliği başına
-sinyal denetimi eklenmeli: plan `or` içeriyorsa cümlede "veya/ya da", `limit:5` varsa
-"5", `contains` varsa "geçen/içeren", `groupBy` varsa "göre/bazında" bulunmalı; ayrıca
-planda geçmeyen bir veri seti adını cümleye ekleyen parafraz elenmeli. Ardından parafraz
-yeniden üretilmeli (~2 saat) ve dayanıklılık temiz kümeyle yeniden ölçülmeli.
-
 **Bu koşuyu üreten model eski veriyle eğitildi**: 4 000 örnek, parafrazsız, 500 adım.
+
+## Kapı sertleştirildi — 2026-08-07
+
+Kapıya plan özelliği başına **sinyal denetimi** eklendi: plan `or` içeriyorsa cümlede
+"veya/ya da", `limit:5` varsa "5" (yazıyla da olur), `contains` varsa "geçen/içeren",
+`groupBy` varsa "göre/bazında", `having` varsa eşik ifadesi, `notIn`/`ne` varsa dışlama
+sözcüğü bulunmalı. Yanına iki denetim daha kondu: planda karşılığı **olmayan** bir
+yeteneği cümleye sokan parafraz ("kaç satış" → "kaç FARKLI marka"), ve dönem etiketinin
+başka bir döneme kayması ("dün" → "Bugünün"). Sonuncusu anahtar kelime denetimlerinin
+kaçırdığı en sinsi bozulmaydı: cümle kusursuz, plan kurulabilir, ama artık başka bir günü
+sorguluyor. Ayrıca planın dokunmadığı bir veri seti adını cümleye ekleyen parafraz eleniyor.
+
+| Küme | Önce | Sonra | Elenen |
+|---|---|---|---|
+| Eğitim havuzu | 9 839 | **8 452** | 1 387 |
+| Değerlendirme parafrazı | 923 | **779** | 144 |
+
+**Dayanıklılık temiz kümeyle yeniden ölçüldü** — ve elle okuyarak varılan ~%96-98 tahmini
+tutmadı:
+
+| Küme | Geçerli | Doğru | **Sorgu** |
+|---|---|---|---|
+| Parafraz — ham (257 soru) | %99,2 | %70,4 | %81,7 |
+| **Parafraz — temiz kapıdan geçen (211 soru)** | %99,1 | %73,9 | **%87,7** |
+
+Beklenti %95 üstüydü. Aradaki fark elle okumanın iyimserliğinden geliyor: bozuk parafrazlar
+tek tek bakıldığında haklı görünüyor, ama toplu ve ölçütlü elendiğinde geriye kalan hataların
+önemli kısmı gerçek model hatası çıkıyor. Şablon cümlede %100 olan Sorgu ölçütü, cümle
+yeniden kurulduğunda %88'e düşüyor — yani model plan dilini öğrenmiş, **şablonun dışına
+çıkan Türkçeyi** yeterince öğrenmemiş. Sebebi açık: koşu 1'in eğitim verisinde hiç parafraz
+yoktu.
+
+**Karar: koşu 2 başlatıldı.** Temizlenmiş 8 452 örnekli parafrazlı havuz, `max_steps = 400`.
 
 Sorgunun kendisini yanlış kuran hatalar (baz, en sık 6'sı):
 
@@ -290,8 +319,8 @@ ince ayarın bu işte ne işe yaradığının en somut kanıtı bu tablo.
 | **250 → 500** | 0,004 → 0,005 | **Hiçbir şey — gürültü** |
 
 Yani 500 adımın ~400'ü (≈5,8 saat GPU) hiçbir şey öğretmedi. Koşu 2'de
-`num_train_epochs` yerine **`max_steps = 400`** kullanılacak: 9 839 örnekli parafrazlı
-havuzdan 6 400 **farklı** örnek görülür, süre 8,9 saat yerine ~5,8 saat olur.
+`num_train_epochs` yerine **`max_steps = 400`** kullanılıyor: temizlenmiş 8 452 örnekli
+parafrazlı havuzdan 6 400 **farklı** örnek görülür, süre 8,9 saat yerine ~5,8 saat olur.
 
 **GGUF dönüşümü Kaggle'da patladı** — sebep disk değil, Unsloth'un llama.cpp kurucusunun
 bozuk olması (`make clean` çağırıyor ama llama.cpp CMake'e geçmiş; ayrıca
