@@ -100,7 +100,18 @@ public static class PlanValidator
     // nitelikli yazdığı için yalnız temel modeli cezalandırırdı ve ince ayarın kazancını
     // olduğundan büyük gösterirdi. Referanslar çözümlenip "SetAdı.kolon" biçimine
     // getiriliyor; belirsiz kalan bir ad zaten doğrulamada elenmiş olurdu.
-    public static string Canonical(QueryPlan plan, TenantCatalog catalog)
+    //
+    // includeSelect=false ile İKİNCİ bir ölçüm daha alınıyor: "aynı sorgu ama gösterilecek
+    // kolonlar farklı". Buna neden ihtiyaç var? Bazı sorular kolon adı GEÇİRMİYOR:
+    //
+    //   Soru     : "bugün girilen kayıtlar"
+    //   Şablon   : select ["hat","fire"]
+    //   Model    : select ["vardiya","uretilen"]
+    //
+    // İkisi de doğru — soru hangi kolonun gösterileceğini söylemiyor. Tam eşleşmeyi tek
+    // ölçüt saymak, cevaplanamayan bir soruda modeli yanlış saymak olur. İki sayı birden
+    // raporlanıyor: tam eşleşme (katı) ve select hariç eşleşme (sorgunun kendisi doğru mu).
+    public static string Canonical(QueryPlan plan, TenantCatalog catalog, bool includeSelect = true)
     {
         var kind = (plan.Kind ?? "").Trim().ToLowerInvariant();
         var node = new JsonObject { ["kind"] = kind };
@@ -132,7 +143,7 @@ public static class PlanValidator
 
         if (kind == "rows")
         {
-            node["select"] = Listed(plan.Select, scope);
+            if (includeSelect) node["select"] = Listed(plan.Select, scope);
             node["sort"] = Column(plan.Sort, scope);
             node["dir"] = Dir(plan.Dir);
             node["limit"] = plan.Limit ?? QueryPlanMapper.DefaultRowLimit;

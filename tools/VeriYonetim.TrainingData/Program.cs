@@ -508,12 +508,12 @@ static async Task<int> Evaluate(Dictionary<string, string> options)
         }
         catch (Exception ex)
         {
-            results.Add(new EvalResult(row, "", false, false, false, ex.Message));
+            results.Add(new EvalResult(row, "", false, false, false, false, ex.Message));
             continue;
         }
 
-        var (parsed, valid, exact, note) = Score(row, raw, catalogCache[row.Catalog]);
-        results.Add(new EvalResult(row, raw, parsed, valid, exact, note));
+        var (parsed, valid, exact, sameQuery, note) = Score(row, raw, catalogCache[row.Catalog]);
+        results.Add(new EvalResult(row, raw, parsed, valid, exact, sameQuery, note));
 
         if ((i + 1) % 10 == 0)
         {
@@ -532,7 +532,8 @@ static async Task<int> Evaluate(Dictionary<string, string> options)
         foreach (var result in results)
             writer.WriteLine(JsonSerializer.Serialize(new SavedResult(
                 result.Row.Question, result.Row.Split, result.Row.Recipe,
-                result.Row.Completion, result.Raw, result.Valid, result.Exact, result.Note), Jsonl));
+                result.Row.Completion, result.Raw, result.Valid, result.Exact,
+                result.SameQuery, result.Note), Jsonl));
 
     Console.WriteLine($"Ayrıntılı sonuç: {reportPath}");
     return 0;
@@ -541,7 +542,7 @@ static async Task<int> Evaluate(Dictionary<string, string> options)
 // Üç ayrı ölçüm: ayrıştırılabildi mi, çalıştırılabilir mi, DOĞRU sorgu mu.
 // Aradaki fark önemli — çalışan ama yanlış soruyu cevaplayan bir plan, hata verenden
 // daha tehlikelidir (kullanıcı yanlış sayıya inanır).
-static (bool Parsed, bool Valid, bool Exact, string Note) Score(
+static (bool Parsed, bool Valid, bool Exact, bool SameQuery, string Note) Score(
     TrainingRow row, string raw, TenantCatalog catalog)
 {
     JsonObject? node;
@@ -551,27 +552,35 @@ static (bool Parsed, bool Valid, bool Exact, string Note) Score(
     }
     catch (JsonException ex)
     {
-        return (false, false, false, $"JSON değil: {ex.Message}");
+        return (false, false, false, false, $"JSON değil: {ex.Message}");
     }
 
-    if (node is null) return (false, false, false, "Boş yanıt.");
+    if (node is null) return (false, false, false, false, "Boş yanıt.");
 
     var error = PlanValidator.Validate(row.Question, node, catalog);
-    if (error is not null) return (true, false, false, error);
+    if (error is not null) return (true, false, false, false, error);
 
     var produced = QueryPlanJson.Parse(PlanValidator.ToJson(node));
     var expected = QueryPlanJson.Parse(row.Completion);
-    if (produced is null || expected is null) return (true, true, false, "Plan okunamadı.");
+    if (produced is null || expected is null) return (true, true, false, false, "Plan okunamadı.");
 
     var exact = PlanValidator.Canonical(produced, catalog) == PlanValidator.Canonical(expected, catalog);
-    return (true, true, exact, exact ? "" : "Farklı sorgu.");
+
+    // Select hariç karşılaştırma: soru gösterilecek kolonu söylemiyorsa modelin başka
+    // bir kolon seçmesi hata değildir (bkz. PlanValidator.Canonical).
+    var sameQuery = exact || PlanValidator.Canonical(produced, catalog, includeSelect: false)
+                          == PlanValidator.Canonical(expected, catalog, includeSelect: false);
+
+    var note = exact ? "" : sameQuery ? "Aynı sorgu, farklı kolonlar." : "Farklı sorgu.";
+    return (true, true, exact, sameQuery, note);
 }
 
 static void Report(string model, IReadOnlyList<EvalResult> results)
 {
     Console.WriteLine();
     Console.WriteLine($"=== {model} ===");
-    Console.WriteLine($"{"Bölüm",-16}{"Adet",6}{"Ayrıştı",10}{"Geçerli",10}{"Doğru",10}");
+    Console.WriteLine(
+        $"{"Bölüm",-16}{"Adet",6}{"Ayrıştı",10}{"Geçerli",10}{"Doğru",10}{"Sorgu",10}");
 
     foreach (var group in results.GroupBy(r => r.Row.Split).OrderBy(g => g.Key))
         WriteLineFor(group.Key, group.ToList());
@@ -579,8 +588,8 @@ static void Report(string model, IReadOnlyList<EvalResult> results)
     WriteLineFor("TOPLAM", results);
 
     Console.WriteLine();
-    Console.WriteLine("En çok hata veren tarifler:");
-    foreach (var group in results.Where(r => !r.Exact)
+    Console.WriteLine("En çok hata veren tarifler (sorgunun kendisi yanlış olanlar):");
+    foreach (var group in results.Where(r => !r.SameQuery)
                  .GroupBy(r => r.Row.Recipe)
                  .OrderByDescending(g => g.Count())
                  .Take(10))
@@ -593,7 +602,8 @@ static void Report(string model, IReadOnlyList<EvalResult> results)
             $"{label,-16}{rows.Count,6}" +
             $"{Percent(rows.Count(r => r.Parsed), rows.Count),10}" +
             $"{Percent(rows.Count(r => r.Valid), rows.Count),10}" +
-            $"{Percent(rows.Count(r => r.Exact), rows.Count),10}");
+            $"{Percent(rows.Count(r => r.Exact), rows.Count),10}" +
+            $"{Percent(rows.Count(r => r.SameQuery), rows.Count),10}");
     }
 
     static string Percent(int part, int total) => $"%{100.0 * part / total:0.0}";
@@ -643,8 +653,8 @@ static int Rescore(Dictionary<string, string> options)
         var row = new TrainingRow(
             "", sample.Plan, sample.Question, sample.Recipe, sample.Catalog, sample.Split, sample.Source);
 
-        var (parsed, valid, exact, note) = Score(row, saved.Uretilen, catalogCache[sample.Catalog]);
-        results.Add(new EvalResult(row, saved.Uretilen, parsed, valid, exact, note));
+        var (parsed, valid, exact, sameQuery, note) = Score(row, saved.Uretilen, catalogCache[sample.Catalog]);
+        results.Add(new EvalResult(row, saved.Uretilen, parsed, valid, exact, sameQuery, note));
     }
 
     if (unmatched > 0)

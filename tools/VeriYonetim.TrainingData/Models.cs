@@ -51,14 +51,19 @@ public record SavedResult(
     string Uretilen,
     bool Gecerli,
     bool Dogru,
+    bool SorguAyni,
     string Not);
 
+// Exact: plan birebir aynı mı.
+// SameQuery: gösterilecek kolonlar (select) hariç aynı mı — soru kolon adı geçirmiyorsa
+// modelin başka kolon seçmesi hata değildir (bkz. PlanValidator.Canonical).
 public record EvalResult(
     TrainingRow Row,
     string Raw,
     bool Parsed,
     bool Valid,
     bool Exact,
+    bool SameQuery,
     string Note);
 
 // Ollama'ya konuşan ince istemci.
