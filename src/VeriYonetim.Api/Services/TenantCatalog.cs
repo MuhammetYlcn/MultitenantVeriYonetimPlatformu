@@ -42,6 +42,8 @@ public class TenantCatalog
         if (datasetNames.Count == 0)
             throw new InvalidQueryException("Sorgunun hangi veri setini kullanacağı belirtilmemiş.");
 
+        datasetNames = DropUnusedDatasets(datasetNames, requiredColumns);
+
         var sources = new List<QuerySource>(datasetNames.Count);
         var seen = new HashSet<Guid>();
 
@@ -66,6 +68,75 @@ public class TenantCatalog
         AddSourcesForMissingColumns(sources, seen, requiredColumns);
 
         return new QueryScope(sources, BuildJoins(sources), LocateColumn);
+    }
+
+    // Bir öncekinin AYNADAKİ hâli: model, sorunun hiç dokunmadığı bir veri setini join'e
+    // ekleyebiliyor. Ölçümde görülen örnek: "kursu Excel ve Muhasebe dışında olan kayıtların
+    // adedi" sorusuna Katilimlar + Kursiyerler planı üretildi; oysa hem sayaç hem filtre
+    // Katilimlar'da.
+    //
+    // Bu zararsız bir fazlalık DEĞİL. Bağ INNER JOIN olarak kuruluyor (bkz. DatasetSqlExpr.
+    // BuildFrom), dolayısıyla karşılığı olmayan satırlar DÜŞER, birden çok karşılığı olanlar
+    // ÇOĞALIR — sayı sessizce bozulur. Kullanıcı çalışan bir sorgudan makul görünen yanlış
+    // bir sayı alır.
+    //
+    // Kural: from'a hiç dokunulmaz; join'e eklenmiş bir set, planın hiçbir kolon referansına
+    // sahip değilse düşürülür. Düşürme gizli kalmıyor — "şöyle anladım" özeti veri setlerini
+    // plandan değil bu kapsamdan okuyor (bkz. AskController.ExecuteAsync).
+    //
+    // Hiç kolon referansı yoksa DOKUNULMUYOR: "{from:A, join:[B], metrics:[count]}" planında
+    // bağın kendisi sorunun anlamı olabilir (B'de karşılığı olan A satırları). Orada tahmin
+    // yürütmek, düzeltmeye çalıştığımız hatanın aynısını ters yönde yapmak olurdu.
+    private IReadOnlyList<string> DropUnusedDatasets(
+        IReadOnlyList<string> datasetNames, IReadOnlyList<string>? requiredColumns)
+    {
+        if (datasetNames.Count < 2) return datasetNames;
+        if (requiredColumns is null || requiredColumns.Count == 0) return datasetNames;
+
+        var kept = new List<string>(datasetNames.Count) { datasetNames[0] };
+
+        foreach (var name in datasetNames.Skip(1))
+        {
+            // Tanınmayan ad düşürülmez: "böyle bir veri seti yok" hatasını çağıran döngü
+            // versin, hata mesajı orada daha anlaşılır.
+            var dataset = Find(name);
+            if (dataset is null || IsReferenced(dataset, requiredColumns))
+                kept.Add(name);
+        }
+
+        return kept;
+    }
+
+    private bool IsReferenced(DatasetInfo dataset, IReadOnlyList<string> requiredColumns)
+    {
+        foreach (var reference in requiredColumns)
+        {
+            var (qualifier, column) = SplitReference(reference);
+
+            // Başka bir sete nitelenmiş referans bu seti gerekçelendirmez.
+            if (qualifier is not null &&
+                !string.Equals(qualifier, dataset.Name, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (dataset.Columns.ContainsKey(column)) return true;
+        }
+
+        return false;
+    }
+
+    // QueryScope.Resolve ile aynı okuma: nokta içeren ad gerçek bir kolon adı da olabilir
+    // ("2026.ciro"). Öndeki parça bilinen bir veri seti değilse referans bölünmez.
+    private (string? Qualifier, string Column) SplitReference(string reference)
+    {
+        var text = reference.Trim();
+        var dot = text.IndexOf('.');
+
+        if (dot <= 0 || dot >= text.Length - 1) return (null, text);
+
+        var qualifier = text[..dot];
+        return Datasets.Any(d => string.Equals(d.Name, qualifier, StringComparison.OrdinalIgnoreCase))
+            ? (qualifier, text[(dot + 1)..])
+            : (null, text);
     }
 
     // Model gerekli veri setini join'e eklemeyi unutabilir: "şehirlere göre toplam satış"
