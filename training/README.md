@@ -348,3 +348,92 @@ verilmez.
 ```bash
 ollama cp hf.co/rhymali/veriyonetim-planlayici-gguf:Q4_K_M veriyonetim-planlayici:7b
 ```
+
+## Eğitim koşusu 2 — 2026-08-07 → 08
+
+| | |
+|---|---|
+| Süre | 469 dk (7 sa 49 dk), **70,3 sn/adım** |
+| Adım | 400 (`max_steps`; 400 × 16 = 6 400 örnek görüldü, havuzun ~2 000'i hiç görülmedi) |
+| Son kayıp | **0,0306** |
+| Veri | Parafraz sadakat kapısından geçmiş 8 452 örnek |
+| LoRA eklentisi | `rhymali/veriyonetim-planlayici-lora-k2` |
+| GGUF | `rhymali/veriyonetim-planlayici-gguf-k2`, Ollama'da `veriyonetim-planlayici:7b-k2` |
+
+Adım başına süre koşu 1'e göre %35 arttı; ayarlarda sebebi yok, Kaggle donanım varyansı.
+**52 sn/adım varsayımına güvenilmemeli.**
+
+**Kayıp iki koşu arasında karşılaştırılamaz.** Koşu 1'de her örnek iki kez görüldü
+(0,0183'ün bir kısmı ezber); koşu 2'de hiçbir örnek tekrar etmedi ve veri zorlaştı.
+0,0306'nın daha yüksek olması beklenen ve daha dürüst bir sayı. Karar kayba değil yerel
+ölçüme bakılarak verildi.
+
+### Ölçüm
+
+Kontrol kümesi (300 soru, yarısı eğitime hiç girmemiş `Filo` ve `Kurs` kataloglarından):
+
+| Model | Geçerli | Doğru | Sorgu |
+|---|---|---|---|
+| `qwen2.5-coder:7b` (baz, örnekli istem) | %94,0 | %45,7 | %66,3 |
+| `veriyonetim-planlayici:7b` (koşu 1) | %100 | %88,3 | %100 |
+| **`veriyonetim-planlayici:7b-k2` (koşu 2)** | **%100** | **%89,7** | **%99,7** |
+
+Kontrol kümesinde iki koşu aynı yerde; orada zaten tavan yakındı. Asıl soru parafraz
+dayanıklılığıydı — koşu 2'nin varlık sebebi buydu:
+
+| Model | Sorgu (779 parafraz sorusu) |
+|---|---|
+| koşu 1 | %87,7 |
+| **koşu 2** | **%92,6** |
+
+Görülmüş/görülmemiş şema farkı parafrazda 1,4 puan (%93,3 / %91,9) → **ezber yok.**
+
+### 58 hatanın elle etiketlenmesi
+
+Ölçüt "referans plana uy" diyor, ama referans plan **parafrazdan önceki** cümlenin planı;
+parafraz cümleyi bozmuşsa model doğru davranıp yanlış puan alır. 58 kalemin tamamı tek tek
+okundu (`training/kosu2_hata_etiketleri.md`):
+
+| Etiket | Adet |
+|---|---|
+| Ölçüm kusuru (cümle planı anlatmıyor) | 31 |
+| Belirsiz (iki okuma da savunulabilir) | 16 |
+| **Gerçek model hatası** | **11** |
+
+| Okuma | Sorgu |
+|---|---|
+| Ham ölçüm | %92,6 |
+| **Ölçüm kusurları ayıklanınca** | **%96,5** |
+| Belirsizler de modele yazılmazsa | %98,6 |
+
+En sık ölçüm kusuru, parafrazın fiilin yönünü çevirmesi: "en **düşük** ilk 10" sorusunda
+referans `desc` sıralıyor, model `asc` yapıp hata alıyor. Bir kalemde parafraz "önümüzdeki
+yıl"ı "son bir yıl"a çevirmiş; referans hâlâ "gelecek tahmini yapılamıyor" diyor, model
+geçmiş yılı doğru sorgulayıp hata almış. Üç kalem ise doğrudan puanlama kusuru: yalnız
+`groupBy` **sırası** farklı, oysa SQL'de sonuç aynı.
+
+Kalan 11 gerçek hatanın karakteri: ikisi sınır hatası ("500'den az" → `lte`, 500 dahil
+edilmiş), biri arama metnini "düzeltmiş" (`'Servi'` → `Servis`) — üçü de **sessiz**, sorgu
+çalışır ve sayı makul görünür. En ciddisi: "önümüzdeki çeyrekte" sorusunda reddetmesi
+gerekirken dönem karşılaştırması üretmesi.
+
+**Karar: koşu 3 yapılmadı.** Kaldıraç adım sayısı değil veri çeşitliliğiydi, ama kalan
+açığın çoğu modelde değil ölçümde. Bozuk bir cetvele göre model ayarlamak, kazanç
+görünümü üretir, kazanç üretmez. Koşu 3 ileride gerekirse başlangıç noktası
+`kosu2_hata_etiketleri.md`'nin sonundaki dört madde.
+
+### Ölçümden çıkan sunucu düzeltmesi
+
+Gereksiz `join`: model, katalogda ilişkili iki set görünce sorunun dokunmadığı seti bağa
+ekleyebiliyor. Bağ INNER JOIN kurulduğu için karşılığı olmayan satırlar düşer, birden çok
+karşılığı olanlar çoğalır — sorgu hata vermez, **sayı sessizce bozulur**.
+
+`TenantCatalog.DropUnusedDatasets` artık planın hiçbir kolon referansına sahip olmayan
+`join` girdisini düşürüyor. `from`'a dokunulmuyor; plandaki kolon referansı hiç yoksa da
+dokunulmuyor, çünkü `{from:A, join:[B], metrics:[count]}` planında bağın kendisi sorunun
+anlamı olabilir. Düzeltme gizli değil: "şöyle anladım" özeti veri setlerini plandan değil
+kapsamdan okuyor. 9 test (`UnusedJoinTests`).
+
+Bu düzeltme **ölçüm sayılarını değiştirmez** — değerlendirme aracı planı `PlanValidator`
+ile puanlar, sunucunun çalışma anındaki düzeltmesinden habersizdir ve öyle kalmalıdır:
+orada ölçülen şey modelin ne ürettiğidir.
