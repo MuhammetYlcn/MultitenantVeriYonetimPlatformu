@@ -25,6 +25,7 @@ Kullanım:
 
 import argparse
 import base64
+import io
 import json
 import re
 import time
@@ -32,6 +33,8 @@ import unicodedata
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
 
 OLLAMA = "http://localhost:11434/api/generate"
 
@@ -126,7 +129,7 @@ TARIHSEL = {"tarih"}
 # ------------------------------ istem ------------------------------
 
 
-def istem_semali(sablon: str) -> str:
+def istem_semali(sablon: str, surum: str = "v1") -> str:
     sema = SEMALAR[sablon]
     kalem_bolum = (
         f"""
@@ -149,10 +152,49 @@ Kurallar:
 - Sayıları ondalık nokta ile yaz: 1.500,75 -> 1500.75
 - Tarihi YYYY-AA-GG biçiminde yaz.
 - Belgede kalem tablosu yoksa "kalemler": [] yaz, kalem uydurma.
-- Yalnız JSON döndür, açıklama yazma.
+- Yalnız JSON döndür, açıklama yazma.{
+    EK_KURALLAR_V2 if surum == "v2" else EK_KURALLAR_V3 if surum == "v3" else ""}
 
 Biçim: {{"alanlar": {{...}}, "kalemler": [{{...}}]}}"""
 
+
+# İkinci istem sürümü. Ölçümde iki açık kaldı ve ikisi de istemde karşılanabilir gibi
+# duruyor; bu sürüm o varsayımı sınıyor:
+#   1) `liste` şablonunda model satır ATLIYOR (4 satırdan 3 döndürüyor, ilk satırı da
+#      kaydırıyor). Sayıyı önce kendisine saydırmak, atlamayı görünür kılabilir.
+#   2) Belgede açıkça yazan tek kelimelik başlığı (`Kasa`) başlık olarak tanımıyor.
+# Değişen yalnız bu iki madde; gerisi v1 ile birebir aynı tutuldu ki fark ölçülebilsin.
+EK_KURALLAR_V2 = """
+- Kalem tablosundaki satırları saymadan yazmaya başlama: kaç satır olduğunu belirle, sonra
+  HEPSİNİ sırayla yaz. Hiçbir satırı atlama, satır birleştirme, sıra değiştirme.
+- Belgenin en üstünde tek kelimelik bir yazı varsa (örneğin "Kasa", "Borçlar") bu belgenin
+  başlığıdır; kolon adı sanıp atlama."""
+
+# Üçüncü sürüm: v2 ÖLÇÜLDÜ ve `liste`de işi KÖTÜLEŞTİRDİ (satırların tamamı doğru: v1'de
+# 13/24, v2'de 5/24). Sebebi anlaşıldı — "en üstteki tek kelimelik yazı başlıktır" maddesi
+# modeli belgenin üstünü başlık saymaya daha çok itti, o da ilk VERİ satırını harcadı.
+#
+# Teşhis şu: başlık satırı olmayan bir tabloda model ilk satırı kolon adı sanıyor. Eksik
+# isim her belgede birinci satır, başkası değil. v3 bu mekanizmayı doğrudan hedefliyor ve
+# BAŞKA HİÇBİR ŞEY eklemiyor — v1'den tek maddelik fark, ki etkisi ölçülebilsin.
+EK_KURALLAR_V3 = """
+- Tabloda başlık satırı olmayabilir. Böyle bir tabloda EN ÜSTTEKİ satır da bir veri
+  satırıdır; onu kolon adı sanıp atlama, kalemlerin arasına yaz."""
+
+# Sayı denetimi: çıkarımdan AYRI, tek amaçlı küçük bir çağrı.
+#
+# Gerekçesi ölçülmüş bir kayıp: `liste` şablonunda model ilk veri satırını başlık sanıp
+# harcıyor ve 24 belgenin 11'inde bir satır eksik geliyor. İstem ayarıyla kapatılamadı (v1
+# 13/24, v2 5/24, v3 13/24). Eksik satır boş bir alan gibi göze çarpmadığı için sessizdir.
+#
+# Bu çağrının kapatıp kapatmadığı değil, KAPATABİLECEĞİ bile varsayım: model saymayı da
+# çıkarımla aynı yanlış yapıyorsa denetim hiçbir şey söylemez. Ölçülen tam olarak bu.
+ISTEM_SAYI = """Bu görüntüde bir tablo ya da liste var.
+
+Kaç VERİ satırı olduğunu say. Kolon başlığı satırını sayma; yalnız içinde veri olan
+satırları say.
+
+Yalnız sayıyı yaz. Açıklama, birim, noktalama yazma."""
 
 ISTEM_SERBEST = """Bu bir Türkçe ticari belge görüntüsü. İçindeki bilgileri JSON olarak çıkar.
 
@@ -168,8 +210,66 @@ Biçim: {"belge_turu": "...", "alanlar": {...}, "kalemler": [{...}]}"""
 # ------------------------------ model çağrısı ------------------------------
 
 
-def cagir(yol: Path, istem: str, model: str, num_ctx: int) -> tuple[str, float, int]:
-    b64 = base64.b64encode(yol.read_bytes()).decode()
+def baslik_seridi_ekle(gorsel: Image.Image, kolonlar: list[str]) -> Image.Image:
+    """Görüntünün üstüne kolon adlarından bir başlık şeridi ekler.
+
+    Gerekçe ölçülmüş bir kayıp: başlık satırı olmayan tabloda model İLK VERİ SATIRINI kolon
+    adı sanıp harcıyor (24 belgenin 11'inde bir satır eksik). İstem ayarı bunu kapatamadı
+    (v1 13/24, v2 5/24, v3 13/24), satır sayısını ayrıca sormak da işe yaramadı (model saymayı
+    çıkarımdan kötü yapıyor). Kalan fikir bu: harcayacağı başlığı kendimiz verelim ki veri
+    satırına dokunmasın.
+
+    Adlar üretimde hedef veri setinin kolonlarından gelir — yani bu hile ancak şema
+    bilindiğinde uygulanabilir, keşif geçişinde uygulanamaz. Kolonların gerçek konumu
+    bilinmediği için adlar genişliğe eşit aralıklarla dağıtılıyor; hizanın kaba olması
+    modelin kolonları karıştırmasına yol açabilir, ölçüm bunu da gösterecek.
+    """
+    genislik = gorsel.width
+    punto = max(14, genislik // 38)
+    yazi = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", punto)
+    yuksek = int(punto * 2.4)
+
+    yeni = Image.new("RGB", (genislik, gorsel.height + yuksek), (255, 255, 255))
+    cizim = ImageDraw.Draw(yeni)
+    dilim = genislik / max(1, len(kolonlar))
+    for sira, ad in enumerate(kolonlar):
+        cizim.text((int(sira * dilim) + punto // 2, punto // 2), ad, font=yazi, fill=(20, 20, 20))
+    cizim.line([0, yuksek - 3, genislik, yuksek - 3], fill=(110, 110, 110), width=2)
+
+    yeni.paste(gorsel, (0, yuksek))
+    return yeni
+
+
+def gorsel_b64(yol: Path, kucult: int, kolonlar: list[str] | None = None) -> str:
+    """Görüntüyü (gerekirse küçültüp) base64'e çevirir.
+
+    Küçültme iki işe yarıyor: belirteç sayısı düşer (bağlam rahatlar, süre kısalır). Bedeli
+    okunabilirlik — küçük puntolu fişte rakamlar bulanınca kalem hücreleri kaybediliyor.
+    Sınırın nerede olduğu ölçülmeli, varsayılmamalı; bu seçenek o ölçüm için var.
+    """
+    if kucult <= 0 and not kolonlar:
+        return base64.b64encode(yol.read_bytes()).decode()
+
+    with Image.open(yol) as acilan:
+        gorsel = acilan.convert("RGB")
+        if kucult > 0:
+            olcek = kucult / max(gorsel.size)
+            if olcek < 1:
+                gorsel = gorsel.resize(
+                    (max(1, int(gorsel.width * olcek)), max(1, int(gorsel.height * olcek))),
+                    Image.LANCZOS)
+        if kolonlar:
+            gorsel = baslik_seridi_ekle(gorsel, kolonlar)
+
+        tampon = io.BytesIO()
+        gorsel.save(tampon, format="JPEG", quality=90)
+
+    return base64.b64encode(tampon.getvalue()).decode()
+
+
+def cagir(yol: Path, istem: str, model: str, num_ctx: int, kucult: int = 0,
+          kolonlar: list[str] | None = None) -> tuple[str, float, int]:
+    b64 = gorsel_b64(yol, kucult, kolonlar)
     govde = json.dumps({
         "model": model,
         "prompt": istem,
@@ -185,6 +285,13 @@ def cagir(yol: Path, istem: str, model: str, num_ctx: int) -> tuple[str, float, 
     with urllib.request.urlopen(istek, timeout=1800) as yanit:
         sonuc = json.loads(yanit.read())
     return sonuc["response"], time.time() - bas, sonuc.get("prompt_eval_count", 0)
+
+
+def sayi_sor(yol: Path, model: str, num_ctx: int, kucult: int) -> tuple[int | None, float]:
+    """Belgedeki veri satırı sayısını tek başına sorar."""
+    ham, sure, _ = cagir(yol, ISTEM_SAYI, model, num_ctx, kucult)
+    eslesme = re.search(r"\d+", ham)
+    return (int(eslesme.group()) if eslesme else None), sure
 
 
 def json_coz(metin: str):
@@ -372,6 +479,12 @@ def main() -> None:
     a.add_argument("--sablon", default="", help="yalnız bu şablon")
     a.add_argument("--varyant", default="", help="temiz | foto")
     a.add_argument("--num-ctx", type=int, default=8192)
+    a.add_argument("--kucult", type=int, default=0, help="uzun kenar sınırı (0 = küçültme yok)")
+    a.add_argument("--istem", choices=["v1", "v2", "v3"], default="v1", help="istem sürümü")
+    a.add_argument("--baslik-seridi", action="store_true",
+                   help="görüntünün üstüne kolon adlarından başlık şeridi ekle")
+    a.add_argument("--sayi-denetimi", action="store_true",
+                   help="satır sayısını ayrı bir çağrıyla sorup çıkarımla karşılaştır")
     a.add_argument("--out", default="", help="ham yanıtların yazılacağı jsonl")
     # Puanlama kusuru bulunduğunda modeli yeniden koşturmak gereksiz (ve bir saat):
     # kaydedilmiş ham yanıtlar düzeltilmiş ölçütle yeniden puanlanır. NL→SQL adımındaki
@@ -401,17 +514,48 @@ def main() -> None:
     kirilim = defaultdict(lambda: defaultdict(int))
     sureler = []
 
-    print(f"{len(kayitlar)} belge · model {s.model} · kip {s.kip} · bağlam {s.num_ctx}\n")
+    print(f"{len(kayitlar)} belge · model {s.model} · kip {s.kip} · istem {s.istem} · "
+          f"bağlam {s.num_ctx} · küçültme {s.kucult or 'yok'}\n")
 
     for sira, kayit in enumerate(kayitlar, 1):
         if kaydedilmis:
             önceki = kaydedilmis[kayit["id"]]
             ham, sure, belirtec = önceki["ham"], önceki["sure"], önceki["belirtec"]
         else:
-            istem = ISTEM_SERBEST if s.kip == "serbest" else istem_semali(kayit["sablon"])
-            ham, sure, belirtec = cagir(kok / kayit["dosya"], istem, s.model, s.num_ctx)
-        sonuc = puanla(kayit, json_coz(ham))
+            istem = (ISTEM_SERBEST if s.kip == "serbest"
+                     else istem_semali(kayit["sablon"], s.istem))
+            kolonlar = (list(SEMALAR[kayit["sablon"]]["kalemler"])
+                        if s.baslik_seridi else None)
+            ham, sure, belirtec = cagir(
+                kok / kayit["dosya"], istem, s.model, s.num_ctx, s.kucult, kolonlar)
+        cevap = json_coz(ham)
+        sonuc = puanla(kayit, cevap)
         sureler.append(sure)
+
+        if s.sayi_denetimi and not kaydedilmis:
+            beklenen_satir = len(kayit["kalemler"])
+            okunan_satir = len(duzlestir(cevap)[1]) if cevap else 0
+            sayilan, sayi_suresi = sayi_sor(kok / kayit["dosya"], s.model, s.num_ctx, s.kucult)
+            sureler[-1] += sayi_suresi
+
+            # Denetimin değeri, çıkarımın YANLIŞ olduğu belgelerde ne söylediğinde:
+            #   yakaladi   çıkarım eksik/fazla, sayım doğruyu biliyor -> uyarı üretilebilir
+            #   kacirdi    çıkarım eksik, sayım da aynı yanlışı yapıyor -> denetim işe yaramaz
+            #   yanlis_alarm çıkarım doğru ama sayım farklı -> boşuna uyarı
+            dogru_cikarim = okunan_satir == beklenen_satir
+            dogru_sayim = sayilan == beklenen_satir
+            toplam["sayim_dogru"] += int(dogru_sayim)
+            if not dogru_cikarim and dogru_sayim:
+                toplam["yakaladi"] += 1
+            elif not dogru_cikarim and sayilan == okunan_satir:
+                toplam["kacirdi"] += 1
+            elif dogru_cikarim and sayilan != okunan_satir:
+                toplam["yanlis_alarm"] += 1
+            elif not dogru_cikarim:
+                toplam["ikisi_de_baska"] += 1
+
+            print(f"        satır: belgede {beklenen_satir}, çıkarım {okunan_satir}, "
+                  f"sayım {sayilan}")
 
         anahtar = (kayit["sablon"], kayit["varyant"])
         for ad in ("alan_dogru", "alan_toplam", "kalem_dogru", "kalem_toplam"):
@@ -447,6 +591,14 @@ def main() -> None:
           f"{yuzde(toplam['alan_dogru'], toplam['alan_toplam']):>8}"
           f"{yuzde(toplam['kalem_dogru'], toplam['kalem_toplam']):>8}"
           f"{yuzde(toplam['kalem_sayisi_dogru'], toplam['belge']):>14}")
+
+    if s.sayi_denetimi:
+        print(f"\nsayı denetimi ({toplam['belge']} belge)")
+        print(f"  sayım doğru                        : {toplam['sayim_dogru']}")
+        print(f"  çıkarım yanlış, sayım YAKALADI     : {toplam['yakaladi']}")
+        print(f"  çıkarım yanlış, sayım da kaçırdı   : {toplam['kacirdi']}")
+        print(f"  çıkarım doğru, boşuna uyarı        : {toplam['yanlis_alarm']}")
+        print(f"  ikisi de başka sayı söyledi        : {toplam['ikisi_de_baska']}")
 
     print(f"\nkalem uydurma (kalemsiz belgede kalem üretti): {toplam['uydurma_kalem']}/{toplam['belge']}")
     print(f"düz yapı (alanlar sarmalayıcısını atladı)     : {toplam['duz_yapi']}/{toplam['belge']}")
