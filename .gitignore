@@ -10,6 +10,10 @@
 *rapor.docx
 ~$*.docx
 
+# Kod inceleme belgesi (kişisel hazırlık, repoya girmesin)
+raporlar/Kod Incelemesi.docx
+raporlar/Kod Incelemesi.pdf
+
 # Kişisel plan/ilerleme takibi (kapsam KAPSAM.md'de, o repoda kalır)
 PLAN.md
 PLAN.html
