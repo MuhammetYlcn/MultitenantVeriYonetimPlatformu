@@ -41,6 +41,18 @@ builder.Services.AddHttpClient<IQueryPlannerService, QueryPlannerService>((sp, c
     client.Timeout = TimeSpan.FromSeconds(ollama.TimeoutSeconds);
 });
 
+// Belgeden veri çıkarımı. Ayrı bir istemci çünkü görsel model metin modelinden çok daha
+// yavaş (belge başına ~30 sn) ve kendi bağlam ayarını taşıyor (bkz. VisionOptions).
+builder.Services.Configure<VisionOptions>(builder.Configuration.GetSection("Vision"));
+builder.Services.AddHttpClient<IOllamaVisionClient, OllamaVisionClient>((sp, client) =>
+{
+    var ollama = sp.GetRequiredService<IOptions<OllamaOptions>>().Value;
+    var vision = sp.GetRequiredService<IOptions<VisionOptions>>().Value;
+    client.BaseAddress = new Uri(ollama.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(vision.TimeoutSeconds);
+});
+builder.Services.AddScoped<IDocumentVisionService, DocumentVisionService>();
+
 var jwt = builder.Configuration.GetSection("Jwt");
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
