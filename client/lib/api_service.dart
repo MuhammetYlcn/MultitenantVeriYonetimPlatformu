@@ -890,6 +890,14 @@ class AiModel {
   String get sizeLabel => sizeBytes <= 0
       ? ''
       : '${(sizeBytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+
+  /// Dar alanda (seçici düğmesi) gösterilecek kısa ad.
+  ///
+  /// Kendi ince ayarlı modellerimizin adı `veriyonetim-` önekiyle başlıyor
+  /// ("veriyonetim-planlayici:7b-k2"). Önek her modelimizde aynı olduğu için ayırt edici
+  /// bilgi taşımıyor, yalnız yer kaplıyor. Tam ad menüde ve ipucunda duruyor.
+  String get shortName =>
+      name.startsWith('veriyonetim-') ? name.substring('veriyonetim-'.length) : name;
 }
 
 /// Satır listesi sonucu. Kolon adları ayrı taşınır: birleştirilmiş sorguda sütunlar

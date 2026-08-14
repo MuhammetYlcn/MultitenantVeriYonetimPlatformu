@@ -41,6 +41,12 @@ public class VisionOptions
     // Görsel model metin modelinden yavaş: belge başına ~30 sn, ilk çağrıda model belleğe
     // yüklendiği için çok daha uzun.
     public int TimeoutSeconds { get; set; } = 300;
+
+    // Şemalı geçişte görüntünün üstüne sentetik başlık şeridi eklensin mi?
+    // Ölçümde hücre doğruluğunu %51 → %94 çıkaran tek müdahale bu (bkz. DocumentImagePrep).
+    // Kapatılabilir olması, şeridin bir belge türünde ters tepmesi durumunda kodu
+    // değiştirmeden ölçüm yapabilmek için.
+    public bool HeaderBand { get; set; } = true;
 }
 
 // Tek bir model çağrısının ham sonucu.
@@ -116,28 +122,47 @@ public class DocumentVisionService : IDocumentVisionService
         _logger = logger;
     }
 
-    public Task<DocumentExtractionResult> ExtractAsync(Stream image,
+    public async Task<DocumentExtractionResult> ExtractAsync(Stream image,
         IReadOnlyList<ColumnSchema> schema, CancellationToken ct = default)
     {
         if (schema.Count == 0)
             throw new InvalidQueryException(
                 "Bu veri setinin şeması tanımlı değil; belge hangi alanlara yazılacağını bilemez.");
 
-        return RunAsync(image, DocumentPromptBuilder.Build(schema), ct);
-    }
-
-    public Task<DocumentExtractionResult> DiscoverAsync(Stream image, CancellationToken ct = default)
-        => RunAsync(image, DocumentPromptBuilder.BuildDiscovery(), ct);
-
-    // İki geçişin ORTAK yolu: küçültme, taşma tespiti, yeniden deneme, ayrıştırma.
-    // Aralarındaki tek fark istem — o yüzden bu mantık iki kez yazılmıyor. (İkiye
-    // bölünseydi taşma tespiti gibi bir düzeltme yalnız birine uygulanır, diğeri
-    // sessizce eski davranışta kalırdı.)
-    private async Task<DocumentExtractionResult> RunAsync(Stream image, string prompt,
-        CancellationToken ct)
-    {
         using var source = await LoadAsync(image, ct);
 
+        // Başlık şeridi YALNIZ burada eklenir: adlar hedef şemadan geliyor, keşif
+        // geçişinde böyle bir şema yok (bkz. DocumentImagePrep).
+        Image? banded = null;
+        if (_options.HeaderBand
+            && DocumentImagePrep.TryAddHeaderBand(source, schema.Select(c => c.Name).ToList(),
+                out banded))
+        {
+            using (banded)
+                return await RunAsync(banded!, DocumentPromptBuilder.Build(schema), ct);
+        }
+
+        if (_options.HeaderBand)
+            _logger.LogWarning("Başlık şeridi eklenemedi (yazı tipi bulunamadı); " +
+                               "başlıksız tabloda ilk satır kaybı riski sürüyor.");
+
+        return await RunAsync(source, DocumentPromptBuilder.Build(schema), ct);
+    }
+
+    public async Task<DocumentExtractionResult> DiscoverAsync(Stream image,
+        CancellationToken ct = default)
+    {
+        using var source = await LoadAsync(image, ct);
+        return await RunAsync(source, DocumentPromptBuilder.BuildDiscovery(), ct);
+    }
+
+    // İki geçişin ORTAK yolu: küçültme, taşma tespiti, yeniden deneme, ayrıştırma.
+    // Aralarındaki tek fark istem (ve şeridin eklenip eklenmemesi) — o yüzden bu mantık
+    // iki kez yazılmıyor. İkiye bölünseydi taşma tespiti gibi bir düzeltme yalnız birine
+    // uygulanır, diğeri sessizce eski davranışta kalırdı.
+    private async Task<DocumentExtractionResult> RunAsync(Image source, string prompt,
+        CancellationToken ct)
+    {
         var budget = _options.NumCtx - _options.ReserveTokens - PromptTextTokens;
         var longEdge = Math.Min(_options.MaxLongEdge, FitLongEdge(source.Width, source.Height, budget));
 

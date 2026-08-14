@@ -25,6 +25,7 @@ public class DocumentVisionTests
         public List<(int Bytes, int NumCtx)> Calls { get; } = new();
         public List<string> Prompts { get; } = new();
         public List<int> ImageLongEdges { get; } = new();
+        public List<(int Width, int Height)> ImageSizes { get; } = new();
 
         public Task<VisionCall> GenerateAsync(string prompt, byte[] jpeg, string model,
             int numCtx, CancellationToken ct = default)
@@ -34,6 +35,7 @@ public class DocumentVisionTests
 
             using var image = Image.Load(jpeg);
             ImageLongEdges.Add(Math.Max(image.Width, image.Height));
+            ImageSizes.Add((image.Width, image.Height));
 
             // Yanıt biterse sonuncusu tekrarlanır (deneme sayısı testleri için).
             return Task.FromResult(_responses.Count > 1 ? _responses.Dequeue() : _responses.Peek());
@@ -279,6 +281,66 @@ public class DocumentVisionTests
         Assert.Equal(2, result.Attempts);
         Assert.False(result.Suspect);
         Assert.True(client.ImageLongEdges[1] < client.ImageLongEdges[0]);
+    }
+
+    // ---- başlık şeridi (ölçümde %51 → %94) ----
+
+    // Görüntünün oranı: şerit eklenince yükseklik artar, genişlik değişmez.
+    private static double Oran((int Width, int Height) size) => (double)size.Height / size.Width;
+
+    [Fact(DisplayName = "Şerit: şemalı geçişte görüntünün üstüne başlık şeridi EKLENİR")]
+    public async Task SemaliGecisteSeritEklenir()
+    {
+        var seritli = new FakeVisionClient(new VisionCall(GecerliYanit, 1500, 120));
+        var seritsiz = new FakeVisionClient(new VisionCall(GecerliYanit, 1500, 120));
+
+        await Service(seritli).ExtractAsync(JpegOf(1200, 900), Schema);
+        await Service(seritsiz, new VisionOptions { HeaderBand = false })
+            .ExtractAsync(JpegOf(1200, 900), Schema);
+
+        // Şerit yalnız yükseklik ekler: aynı belge daha uzun bir görüntü olarak gider.
+        Assert.True(Oran(seritli.ImageSizes[0]) > Oran(seritsiz.ImageSizes[0]),
+            $"şerit eklenmemiş görünüyor: {seritli.ImageSizes[0]} vs {seritsiz.ImageSizes[0]}");
+    }
+
+    [Fact(DisplayName = "Şerit: KEŞİF geçişinde eklenmez (şerit hedef şemadan üretilir)")]
+    public async Task KesifGecisindeSeritEklenmez()
+    {
+        var kesif = new FakeVisionClient(new VisionCall(KesifYaniti, 1500, 120));
+        var semali = new FakeVisionClient(new VisionCall(GecerliYanit, 1500, 120));
+
+        await Service(kesif).DiscoverAsync(JpegOf(1200, 900));
+        await Service(semali).ExtractAsync(JpegOf(1200, 900), Schema);
+
+        Assert.True(Oran(kesif.ImageSizes[0]) < Oran(semali.ImageSizes[0]),
+            "keşif geçişine de şerit eklenmiş");
+    }
+
+    [Fact(DisplayName = "Şerit: kolon adlarından üretilir ve orijinal görüntüyü BOZMAZ")]
+    public void SeritOrijinaliBozmaz()
+    {
+        using var kaynak = new Image<Rgb24>(1000, 700);
+
+        var eklendi = DocumentImagePrep.TryAddHeaderBand(kaynak,
+            Schema.Select(c => c.Name).ToList(), out var seritli);
+
+        Assert.True(eklendi, "yazı tipi bulunamadı — bu ortamda şerit çizilemiyor");
+        using (seritli)
+        {
+            Assert.Equal(kaynak.Width, seritli!.Width);         // genişlik korunur
+            Assert.True(seritli.Height > kaynak.Height);        // yalnız üste eklenir
+            Assert.True(seritli.Height - kaynak.Height < kaynak.Height / 4,
+                "şerit belgenin kendisini gölgeleyecek kadar yüksek");
+        }
+    }
+
+    [Fact(DisplayName = "Şerit: kolon yoksa çizilmez (boş şerit belgeyi büyütmekten başka işe yaramaz)")]
+    public void KolonsuzSeritCizilmez()
+    {
+        using var kaynak = new Image<Rgb24>(800, 600);
+
+        Assert.False(DocumentImagePrep.TryAddHeaderBand(kaynak, Array.Empty<string>(), out var yok));
+        Assert.Null(yok);
     }
 
     [Fact(DisplayName = "İstem: keşif istemi adlandırma kurallarını ve belge türünü ister")]

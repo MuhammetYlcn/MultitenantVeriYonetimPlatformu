@@ -416,19 +416,24 @@ class _ModelPicker extends StatelessWidget {
                   color: m.name == current.name ? AppColors.accent : AppColors.muted,
                 ),
                 const SizedBox(width: 10),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(m.name, style: const TextStyle(fontSize: 13.5)),
-                    Text(
-                      [
-                        if (m.parameterSize != null) m.parameterSize!,
-                        if (m.quantization != null) m.quantization!,
-                        if (m.sizeLabel.isNotEmpty) m.sizeLabel,
-                      ].join(' · '),
-                      style: const TextStyle(fontSize: 11, color: AppColors.muted),
-                    ),
-                  ],
+                Flexible(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(m.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 13.5)),
+                      Text(
+                        [
+                          if (m.parameterSize != null) m.parameterSize!,
+                          if (m.quantization != null) m.quantization!,
+                          if (m.sizeLabel.isNotEmpty) m.sizeLabel,
+                        ].join(' · '),
+                        style: const TextStyle(fontSize: 11, color: AppColors.muted),
+                      ),
+                    ],
+                  ),
                 ),
                 if (m.isDefault) ...[
                   const SizedBox(width: 10),
@@ -450,8 +455,18 @@ class _ModelPicker extends StatelessWidget {
           children: [
             const Icon(Icons.memory, size: 16, color: AppColors.accent),
             const SizedBox(width: 8),
-            Text(current.name,
-                style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+            // Kısa ad + Flexible + ellipsis: düğme dar bir alana düşerse taşma yerine
+            // kırpılsın. Tam ad ipucunda ve menüde duruyor, bilgi kaybolmuyor.
+            Flexible(
+              child: Tooltip(
+                message: current.name,
+                child: Text(current.shortName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 12.5, fontWeight: FontWeight.w600)),
+              ),
+            ),
             const SizedBox(width: 4),
             const Icon(Icons.expand_more, size: 16, color: AppColors.muted),
           ],
