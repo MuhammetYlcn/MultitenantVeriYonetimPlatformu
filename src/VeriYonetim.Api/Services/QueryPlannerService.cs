@@ -10,7 +10,23 @@ namespace VeriYonetim.Api.Services;
 public class OllamaOptions
 {
     public string BaseUrl { get; set; } = "http://localhost:11434";
-    public string Model { get; set; } = "qwen2.5-coder:7b";
+
+    // Varsayılan planlayıcı: PROJEYE ÖZEL İNCE AYARLI model (bkz. PLAN.md "Adım 11").
+    // Ölçümde temel modelin parafraz doğruluğu %87,7 iken bu model %96,5'e çıkıyor ve
+    // few-shot örnek gerektirmediği için istemi de kısa tutuyor.
+    public string Model { get; set; } = "veriyonetim-planlayici:7b-k2";
+
+    // Plan DIŞINDAKİ serbest metin işleri (ör. örnek soru üretimi) temel modele gider.
+    // İnce ayarlı model yalnız plan üretmeye eğitildi: ondan {"questions": [...]} isteyince
+    // alışkanlıkla plan biçiminde yanıt verme eğilimi var. Temel model burada daha güvenli.
+    public string SuggestionModel { get; set; } = "qwen2.5-coder:7b";
+
+    // Arayüzdeki model seçicide GÖSTERİLMEYECEK modeller.
+    //
+    // Gizlemek yasaklamak DEĞİL: buradaki modeller API'den hâlâ seçilebilir (karşılaştırma
+    // ölçümleri için gerekli) ve kurulu model doğrulaması onları görmeye devam eder.
+    // Sadece son kullanıcıya sunulan listeden düşerler.
+    public string[] HiddenModels { get; set; } = Array.Empty<string>();
 
     // 7B model bu donanımda ~10 sn'de yanıt veriyor; ilk çağrıda model belleğe yüklendiği
     // için çok daha uzun sürebilir. Sınır ona göre geniş tutuldu.
@@ -48,7 +64,10 @@ public interface IQueryPlannerService
     Task<PlanResult> PlanAsync(string question, TenantCatalog catalog,
         string? model = null, CancellationToken ct = default);
 
-    Task<IReadOnlyList<OllamaModel>> ListModelsAsync(CancellationToken ct = default);
+    /// Kurulu modeller. `includeHidden` yalnız DOĞRULAMA yolunda true verilir: gizlenen
+    /// bir model arayüzde görünmez ama API'den seçilebilir olmayı sürdürür.
+    Task<IReadOnlyList<OllamaModel>> ListModelsAsync(bool includeHidden = false,
+        CancellationToken ct = default);
 
     // Ham istem → ham JSON yanıt. Plan üretimi dışındaki JSON işleri (ör. örnek soru
     // üretimi) ayrı bir Ollama istemcisi yazmak yerine bunu kullanır.
@@ -75,7 +94,8 @@ public class QueryPlannerService : IQueryPlannerService
 
     // Kurulu modeller (Ollama /api/tags). Liste kullanıcıya sunulduğu için ayrıca
     // doğrulama kaynağı: seçilen model bu listede yoksa isteği hiç göndermiyoruz.
-    public async Task<IReadOnlyList<OllamaModel>> ListModelsAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<OllamaModel>> ListModelsAsync(bool includeHidden = false,
+        CancellationToken ct = default)
     {
         OllamaTagsResponse? tags;
         try
@@ -90,6 +110,7 @@ public class QueryPlannerService : IQueryPlannerService
 
         return (tags?.Models ?? new List<OllamaTag>())
             .Where(m => !string.IsNullOrWhiteSpace(m.Name))
+            .Where(m => includeHidden || !IsHidden(m.Name!))
             .Select(m => new OllamaModel(
                 m.Name!,
                 m.Size,
@@ -100,6 +121,12 @@ public class QueryPlannerService : IQueryPlannerService
             .ThenBy(m => m.Name)
             .ToList();
     }
+
+    // Varsayılan model asla gizlenmez: seçicide hiçbir şey görünmeyen bir ekran, kullanıcıya
+    // "yapay zekâ yok" izlenimi verirdi.
+    private bool IsHidden(string model) =>
+        !string.Equals(model, _options.Model, StringComparison.OrdinalIgnoreCase)
+        && _options.HiddenModels.Contains(model, StringComparer.OrdinalIgnoreCase);
 
     public async Task<PlanResult> PlanAsync(string question, TenantCatalog catalog,
         string? model = null, CancellationToken ct = default)
@@ -121,7 +148,9 @@ public class QueryPlannerService : IQueryPlannerService
         var selected = _options.Model;
         if (!string.IsNullOrWhiteSpace(model) && model.Trim() != _options.Model)
         {
-            var installed = await ListModelsAsync(ct);
+            // Gizlenenler dahil: arayüzde görünmeyen bir model API'den seçilebilir olmalı
+            // (karşılaştırma ölçümleri temel modeli böyle çağırıyor).
+            var installed = await ListModelsAsync(includeHidden: true, ct);
             var match = installed.FirstOrDefault(m =>
                 string.Equals(m.Name, model.Trim(), StringComparison.OrdinalIgnoreCase));
 
@@ -168,9 +197,15 @@ public class QueryPlannerService : IQueryPlannerService
         !string.IsNullOrWhiteSpace(_options.FineTunedPrefix) &&
         model.StartsWith(_options.FineTunedPrefix, StringComparison.OrdinalIgnoreCase);
 
+    // Model verilmezse SuggestionModel kullanılır, varsayılan planlayıcı değil: buradan
+    // geçen işler plan üretimi değil (bkz. OllamaOptions.SuggestionModel).
     public Task<string> CompleteJsonAsync(string prompt, string? model = null,
         CancellationToken ct = default) =>
-        GenerateAsync(prompt, string.IsNullOrWhiteSpace(model) ? _options.Model : model.Trim(), ct);
+        GenerateAsync(prompt, string.IsNullOrWhiteSpace(model) ? FreeTextModel : model.Trim(), ct);
+
+    private string FreeTextModel => string.IsNullOrWhiteSpace(_options.SuggestionModel)
+        ? _options.Model
+        : _options.SuggestionModel;
 
     // Ollama'ya tek bir üretim isteği atar ve ham yanıt metnini döndürür.
     private async Task<string> GenerateAsync(string prompt, string model, CancellationToken ct)

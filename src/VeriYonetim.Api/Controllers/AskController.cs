@@ -49,7 +49,7 @@ public class AskController : ControllerBase
     {
         try
         {
-            return Ok(await _planner.ListModelsAsync(ct));
+            return Ok(await _planner.ListModelsAsync(ct: ct));
         }
         catch (QueryPlannerException ex)
         {
