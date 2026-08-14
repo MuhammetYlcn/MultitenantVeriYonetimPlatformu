@@ -12,10 +12,15 @@ namespace VeriYonetim.Api.Services;
 //
 // Notlar kullanıcıya gösterilmek üzere: çıkarımda yapılan her müdahale (düşürülen satır,
 // uyuşmayan toplam) burada birikiyor. Onay ekranı bunları gösterir — sessiz düzeltme yok.
+//
+// DocumentType yalnız KEŞİF geçişinde dolar (şemalı istem belgenin türünü sormaz, hedef
+// set zaten bellidir). Kolon olarak yazılmaz: "fatura" değeri belgenin verisi değil,
+// yeni set açılacaksa ona verilecek adın kaynağıdır.
 public record ExtractedDocument(
     IReadOnlyDictionary<string, string?> Fields,
     IReadOnlyList<IReadOnlyDictionary<string, string?>> Items,
-    IReadOnlyList<string> Notes);
+    IReadOnlyList<string> Notes,
+    string? DocumentType = null);
 
 // Görsel modelin ham metnini ExtractedDocument'a çeviren katman.
 //
@@ -57,10 +62,21 @@ public static class DocumentExtractionParser
             notlar.Add("Model beklenen \"alanlar\" sarmalayıcısını atladı; alanlar en üst düzeyden okundu.");
 
         var alanlar = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        string? belgeTuru = BelgeTuru(kok.Value);
+
         foreach (var özellik in alanlarDugum)
         {
             // Kalem dizisi alanların içine düşmüş olabilir; alan olarak yazılmaz.
             if (özellik.NameEquals("kalemler")) continue;
+
+            // Belge türü de alanların içine düşebiliyor. Kolon yapılmaz: her satırda aynı
+            // değeri taşıyan bir kolon veri değil gürültüdür ve tip algılamayı da kirletir.
+            if (özellik.NameEquals("belge_turu"))
+            {
+                belgeTuru ??= Deger(özellik.Value);
+                continue;
+            }
+
             alanlar[özellik.Name] = Deger(özellik.Value);
         }
 
@@ -77,7 +93,7 @@ public static class DocumentExtractionParser
                        "belgede kalem tablosu yok sayıldı.");
         }
 
-        return new ExtractedDocument(alanlar, kalemler, notlar);
+        return new ExtractedDocument(alanlar, kalemler, notlar, belgeTuru);
     }
 
     /// Kalem tutarlarının toplamı belge toplamıyla uyuşuyor mu?
@@ -212,6 +228,14 @@ public static class DocumentExtractionParser
 
         return sonuc;
     }
+
+    // Belge türü kökte istendi ama model onu `alanlar`ın içine de koyabiliyor (kalem
+    // dizisinde olduğu gibi). Kökteki değer önceliklidir; ikincisini çağıran arar.
+    private static string? BelgeTuru(JsonElement kok) =>
+        kok.ValueKind == JsonValueKind.Object
+        && kok.TryGetProperty("belge_turu", out var tur)
+            ? Deger(tur)
+            : null;
 
     private static bool TryKalemDizisi(JsonElement kaynak, out JsonElement dizi)
     {

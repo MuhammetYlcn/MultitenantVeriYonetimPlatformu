@@ -253,6 +253,11 @@ public class DocumentUploadTests : IClassFixture<ApiFactory>, IAsyncLifetime
                 DurationMs: 42,
                 Warnings: new[] { "Model beklenen \"alanlar\" sarmalayıcısını atladı." }));
         }
+
+        // Keşif geçişi bu testlerde kullanılmıyor; ayrı testlerin kendi sahtesi var.
+        public Task<DocumentExtractionResult> DiscoverAsync(Stream image,
+            CancellationToken ct = default) =>
+            throw new NotSupportedException();
     }
 
     [Fact(DisplayName = "Belge ucu: çıkarım önizleme döner — satır KAYDEDİLMEZ, uymayan hücre işaretlenir")]

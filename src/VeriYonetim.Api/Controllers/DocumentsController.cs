@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -18,8 +19,10 @@ namespace VeriYonetim.Api.Controllers;
 /// Sınıf düzeyindeki politika DatasetsController ile aynı — platform yöneticisi buraya da
 /// giremez. Yazma yetkisi Editor/Admin: belge yüklemek veri girişidir.
 /// </summary>
+/// Yol şablonu eylem başına yazılıyor çünkü iki uç iki farklı düzeyde duruyor: çıkarım bir
+/// veri setinin altında (hedef bellidir), keşif firma düzeyinde (hedef henüz yoktur).
 [ApiController]
-[Route("api/datasets/{datasetId:guid}/document")]
+[Route("api")]
 [Authorize(Policy = AuthPolicies.TenantUser)]
 public class DocumentsController : ControllerBase
 {
@@ -27,6 +30,12 @@ public class DocumentsController : ControllerBase
     private const long MaxUploadBytes = 15 * 1024 * 1024; // 15 MB
 
     private static readonly string[] AllowedExtensions = { ".jpg", ".jpeg", ".png", ".webp" };
+
+    // Keşifte karşılaştırılacak en fazla set sayısı.
+    private const int MaxCandidateDatasets = 25;
+
+    // "fiş" gibi adlarda ilk harfin doğru büyütülmesi için (i → İ).
+    private static readonly CultureInfo TurkishCulture = new("tr-TR");
 
     private readonly AppDbContext _db;
     private readonly IDocumentVisionService _vision;
@@ -44,7 +53,7 @@ public class DocumentsController : ControllerBase
     /// Belgeyi okur ve çıkan tabloyu ÖNİZLEME olarak döndürür — hiçbir şey kaydedilmez.
     /// Kaydetme, onay ekranından gelecek ayrı bir çağrıyla yapılacak.
     /// </summary>
-    [HttpPost("extract")]
+    [HttpPost("datasets/{datasetId:guid}/document/extract")]
     [Authorize(Roles = "Editor,Admin")]
     public async Task<IActionResult> Extract(Guid datasetId, IFormFile? file,
         CancellationToken ct)
@@ -103,6 +112,86 @@ public class DocumentsController : ControllerBase
             result.LongEdge,
             result.Attempts,
             result.DurationMs));
+    }
+
+    /// <summary>
+    /// Belgeyi ŞEMASIZ okur (keşif geçişi) ve hangi veri setine ait olabileceğini önerir.
+    /// Hiçbir şey kaydedilmez; set seçimi ve kaydetme onay ekranından gelecek.
+    ///
+    /// Bu uç neden var: `extract` hedef seti bilmek zorunda. İlk kez görülen bir belge
+    /// türünde böyle bir set yoktur — kullanıcıya "önce elle set açın, kolonlarını yazın,
+    /// sonra belgeyi yükleyin" demek, belgeden veri çıkarmanın bütün anlamını götürürdü.
+    /// </summary>
+    [HttpPost("documents/discover")]
+    [Authorize(Roles = "Editor,Admin")]
+    public async Task<IActionResult> Discover(IFormFile? file, CancellationToken ct)
+    {
+        if (ValidateUpload(file) is { } error) return error;
+
+        DocumentExtractionResult result;
+        try
+        {
+            await using var stream = file!.OpenReadStream();
+            result = await _vision.DiscoverAsync(stream, ct);
+        }
+        catch (InvalidQueryException ex)
+        {
+            return Problem(statusCode: StatusCodes.Status400BadRequest, title: ex.Message);
+        }
+        catch (QueryPlannerException ex)
+        {
+            return Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: ex.Message);
+        }
+
+        // Kolon adları modelden, TİPLER değerlerden geliyor. Tipi de modele sordurmak
+        // ikinci bir tip algılayıcı demek olurdu; CSV/Excel ile aynı katmandan geçmesi
+        // hem tutarlılığı hem "1.500" gibi tuzakların tek yerde çözülmesini sağlıyor.
+        var columns = _importService.DetectSchema(result.Table);
+
+        // Adaylar: firmanın var olan setleri (global filtre başka firmanınkini zaten
+        // getirmez). Sayı sınırlı — eşleme tarafı ucuz ama sorgu sınırsız büyümemeli;
+        // en son dokunulanlar en olası adaylar.
+        var candidates = await _db.Datasets
+            .OrderByDescending(d => d.UpdatedAt ?? d.CreatedAt)
+            .Take(MaxCandidateDatasets)
+            .Select(d => new DatasetSchema(
+                d.Id,
+                d.Name,
+                _db.DatasetColumns
+                    .Where(c => c.DatasetId == d.Id)
+                    .OrderBy(c => c.Ordinal)
+                    .Select(c => new ColumnSchema(c.Name, c.Type))
+                    .ToList()))
+            .ToListAsync(ct);
+
+        var matches = SchemaMatcher.Match(columns, candidates);
+
+        return Ok(new DocumentDiscoveryResponse(
+            result.Document.DocumentType,
+            columns,
+            result.Table.Rows,
+            matches.Select(m => new DatasetMatchDto(
+                m.DatasetId, m.Name, m.Score, m.Mappings, m.MissingColumns, m.ExtraColumns)).ToList(),
+            SuggestName(result.Document.DocumentType),
+            result.Warnings,
+            result.Suspect,
+            result.Model,
+            result.PromptTokens,
+            result.NumCtx,
+            result.LongEdge,
+            result.Attempts,
+            result.DurationMs));
+    }
+
+    // Yeni set açılacaksa ad önerisi. Çoğul yapmaya çalışılmıyor: Türkçede ekin ünlü
+    // uyumuna göre değişmesi ("fatura" → "faturalar", "fiş" → "fişler") bu ekranda
+    // çözülecek bir sorun değil; kullanıcı adı zaten düzenleyebiliyor.
+    private static string SuggestName(string? documentType)
+    {
+        if (string.IsNullOrWhiteSpace(documentType)) return "Belgeden gelen veriler";
+
+        var text = documentType.Trim();
+        return char.ToUpper(text[0], TurkishCulture) + text[1..];
     }
 
     private IActionResult? ValidateUpload(IFormFile? file)

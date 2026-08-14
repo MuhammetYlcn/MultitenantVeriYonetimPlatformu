@@ -76,6 +76,11 @@ public interface IDocumentVisionService
 {
     Task<DocumentExtractionResult> ExtractAsync(Stream image,
         IReadOnlyList<ColumnSchema> schema, CancellationToken ct = default);
+
+    /// KEŞİF geçişi: hedef şema olmadan okur, kolon adlarını modelin kendisi seçer.
+    /// İlk kez görülen belge türü için tek yol — hangi sete yazılacağı, çıkan kolonlara
+    /// bakılarak sonra kararlaştırılır (bkz. SchemaMatcher).
+    Task<DocumentExtractionResult> DiscoverAsync(Stream image, CancellationToken ct = default);
 }
 
 // Belge görüntüsünden yapılandırılmış veri çıkaran katman.
@@ -111,16 +116,28 @@ public class DocumentVisionService : IDocumentVisionService
         _logger = logger;
     }
 
-    public async Task<DocumentExtractionResult> ExtractAsync(Stream image,
+    public Task<DocumentExtractionResult> ExtractAsync(Stream image,
         IReadOnlyList<ColumnSchema> schema, CancellationToken ct = default)
     {
         if (schema.Count == 0)
             throw new InvalidQueryException(
                 "Bu veri setinin şeması tanımlı değil; belge hangi alanlara yazılacağını bilemez.");
 
+        return RunAsync(image, DocumentPromptBuilder.Build(schema), ct);
+    }
+
+    public Task<DocumentExtractionResult> DiscoverAsync(Stream image, CancellationToken ct = default)
+        => RunAsync(image, DocumentPromptBuilder.BuildDiscovery(), ct);
+
+    // İki geçişin ORTAK yolu: küçültme, taşma tespiti, yeniden deneme, ayrıştırma.
+    // Aralarındaki tek fark istem — o yüzden bu mantık iki kez yazılmıyor. (İkiye
+    // bölünseydi taşma tespiti gibi bir düzeltme yalnız birine uygulanır, diğeri
+    // sessizce eski davranışta kalırdı.)
+    private async Task<DocumentExtractionResult> RunAsync(Stream image, string prompt,
+        CancellationToken ct)
+    {
         using var source = await LoadAsync(image, ct);
 
-        var prompt = DocumentPromptBuilder.Build(schema);
         var budget = _options.NumCtx - _options.ReserveTokens - PromptTextTokens;
         var longEdge = Math.Min(_options.MaxLongEdge, FitLongEdge(source.Width, source.Height, budget));
 

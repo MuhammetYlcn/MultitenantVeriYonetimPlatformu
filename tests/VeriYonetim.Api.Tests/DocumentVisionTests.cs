@@ -216,4 +216,83 @@ public class DocumentVisionTests
         Assert.Contains("başka ad uydurma", prompt);
         Assert.Contains("Kalem UYDURMA", prompt);
     }
+
+    // ---- keşif geçişi: hedef şema YOK ----
+
+    private const string KesifYaniti = """
+        {"belge_turu":"fatura",
+         "alanlar":{"fatura_no":"F-1001","fatura_tarihi":"2026-08-01"},
+         "kalemler":[{"urun_adi":"Kalem","tutar":"1500.75"},{"urun_adi":"Defter","tutar":"250.00"}]}
+        """;
+
+    [Fact(DisplayName = "Keşif: şema verilmeden okunur, kolon adları modelden gelir")]
+    public async Task KesifSemasizCalisir()
+    {
+        var client = new FakeVisionClient(new VisionCall(KesifYaniti, 1700, 140));
+
+        var result = await Service(client).DiscoverAsync(JpegOf(1200, 900));
+
+        // Şemalı geçişte olmayan tek şart: burada set seçilmediği için istem de şema
+        // listesi taşımaz.
+        Assert.DoesNotContain("Alanlar (tam bu adlarla", client.Prompts[0]);
+        Assert.Equal(new[] { "fatura_no", "fatura_tarihi", "urun_adi", "tutar" },
+            result.Table.Headers);
+        Assert.Equal(2, result.Table.Rows.Count);
+    }
+
+    [Fact(DisplayName = "Keşif: belge türü okunur ama KOLON yapılmaz (her satırda aynı değer veri değildir)")]
+    public async Task BelgeTuruKolonOlmaz()
+    {
+        var client = new FakeVisionClient(new VisionCall(KesifYaniti, 1700, 140));
+
+        var result = await Service(client).DiscoverAsync(JpegOf(1200, 900));
+
+        Assert.Equal("fatura", result.Document.DocumentType);
+        Assert.DoesNotContain("belge_turu", result.Table.Headers);
+    }
+
+    [Fact(DisplayName = "Keşif: belge türü alanların içine düşse de kolon yapılmaz")]
+    public void BelgeTuruAlanlarinIcindeOlabilir()
+    {
+        // Gözlenen davranış: model sözleşmedeki yeri tutturamayıp değeri `alanlar`a koyuyor
+        // (kalem dizisinde de aynısı oluyordu). Katı ayrıştırıcı burada kolon uydururdu.
+        const string yanit = """
+            {"alanlar":{"belge_turu":"fis","tutar":"120,50"},"kalemler":[]}
+            """;
+
+        var belge = DocumentExtractionParser.Parse(yanit)!;
+
+        Assert.Equal("fis", belge.DocumentType);
+        Assert.DoesNotContain("belge_turu", belge.Fields.Keys);
+        Assert.Equal("120.50", belge.Fields["tutar"]);
+    }
+
+    [Fact(DisplayName = "Keşif: taşma tespiti ve küçültme şemalı geçişle AYNI yoldan geçer")]
+    public async Task KesifDeTasmaTespitiCalisir()
+    {
+        var client = new FakeVisionClient(
+            new VisionCall(KesifYaniti, PromptTokens: 3900, EvalCount: 0),
+            new VisionCall(KesifYaniti, PromptTokens: 1500, EvalCount: 140));
+
+        var result = await Service(client).DiscoverAsync(JpegOf(2400, 1800));
+
+        Assert.Equal(2, result.Attempts);
+        Assert.False(result.Suspect);
+        Assert.True(client.ImageLongEdges[1] < client.ImageLongEdges[0]);
+    }
+
+    [Fact(DisplayName = "İstem: keşif istemi adlandırma kurallarını ve belge türünü ister")]
+    public void KesifIstemiKurallariIcerir()
+    {
+        var prompt = DocumentPromptBuilder.BuildDiscovery();
+
+        Assert.Contains("hazır bir alan listesi verilmedi", prompt);
+        Assert.Contains("belge_turu", prompt);
+        Assert.Contains("küçük harf ve alt çizgili", prompt);
+        Assert.Contains("UYDURMA", prompt);
+
+        // Şerit keşifte eklenemiyor (şemadan üretiliyor); ilk satır kaybına karşı elde
+        // yalnız bu madde var, düşmemeli.
+        Assert.Contains("EN ÜSTTEKİ satır da", prompt);
+    }
 }
