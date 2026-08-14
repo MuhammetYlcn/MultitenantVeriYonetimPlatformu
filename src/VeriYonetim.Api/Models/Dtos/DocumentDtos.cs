@@ -56,6 +56,20 @@ public record DocumentDiscoveryResponse(
     int DurationMs);
 
 /// <summary>
+/// Onay ekranından gelen KESİNLEŞMİŞ tablo — kullanıcı düzeltmelerini yaptı, kaydedilecek.
+///
+/// Neden belgenin kendisi değil de tablo gönderiliyor: kaydedilen şey modelin okuduğu değil,
+/// kullanıcının ONAYLADIĞI hâldir. Belgeyi ikinci kez okutmak hem 30-45 saniye daha sürer
+/// hem de kullanıcının ekranda düzelttiği hücreleri geri alırdı.
+/// </summary>
+public record DocumentConfirmRequest(
+    IReadOnlyList<string>? Columns,
+    IReadOnlyList<string[]>? Rows);
+
+/// <summary>Kaydetme sonucu. Satırlar EKLENİR (içe aktarma gibi eskileri silmez).</summary>
+public record DocumentConfirmResponse(Guid DatasetId, int SavedRows, int TotalRows);
+
+/// <summary>
 /// Bir aday veri setiyle eşleşme. Puan tek başına yeterli değil: kullanıcının kararı
 /// verebilmesi için NEYİN eşleştiği, neyin eksik ve neyin fazla kaldığı da gönderiliyor.
 /// </summary>

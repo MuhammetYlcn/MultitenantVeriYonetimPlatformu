@@ -43,10 +43,20 @@ public class VisionOptions
     public int TimeoutSeconds { get; set; } = 300;
 
     // Şemalı geçişte görüntünün üstüne sentetik başlık şeridi eklensin mi?
-    // Ölçümde hücre doğruluğunu %51 → %94 çıkaran tek müdahale bu (bkz. DocumentImagePrep).
-    // Kapatılabilir olması, şeridin bir belge türünde ters tepmesi durumunda kodu
-    // değiştirmeden ölçüm yapabilmek için.
-    public bool HeaderBand { get; set; } = true;
+    //
+    // VARSAYILAN KAPALI ve gerekçesi ölçüldü (2026-08-14, gerçek modelle):
+    //   fatura_001, şerit AÇIK, yanlış sırayla (şerit → küçültme): 1 satır, kalemler tek
+    //     hücrede dizi olarak döndü — yapısal bozulma.
+    //   aynı belge, sıra düzeltildikten sonra: 7/7 satır, hatasız. Yani zarar sıradandı.
+    //   liste_001 (başlıksız tablo, şeridin hedefi): şeritli de şeritsiz de 2/3 satır —
+    //     ölçümdeki fayda ÜRETİM YOLUNDA ÜRETİLEMEDİ.
+    //
+    // Sebebi anlaşıldı: ölçüm aracının istemi belge düzeyi alanlarla kalem tablosu
+    // kolonlarını AYRI listeler hâlinde veriyor; sunucunun elinde bu ayrım yok
+    // (DatasetColumns düz bir kolon listesi). Yani ölçülen %94, üretimde bulunmayan bir
+    // bilgiyle alınmış. O açık kapanmadan şeridi açmak, faydası kanıtlanmamış bir
+    // müdahaleyi varsayılan yapmak olurdu.
+    public bool HeaderBand { get; set; } = false;
 }
 
 // Tek bir model çağrısının ham sonucu.
@@ -131,29 +141,18 @@ public class DocumentVisionService : IDocumentVisionService
 
         using var source = await LoadAsync(image, ct);
 
-        // Başlık şeridi YALNIZ burada eklenir: adlar hedef şemadan geliyor, keşif
+        // Başlık şeridi YALNIZ burada eklenebilir: adlar hedef şemadan geliyor, keşif
         // geçişinde böyle bir şema yok (bkz. DocumentImagePrep).
-        Image? banded = null;
-        if (_options.HeaderBand
-            && DocumentImagePrep.TryAddHeaderBand(source, schema.Select(c => c.Name).ToList(),
-                out banded))
-        {
-            using (banded)
-                return await RunAsync(banded!, DocumentPromptBuilder.Build(schema), ct);
-        }
+        var bandColumns = _options.HeaderBand ? schema.Select(c => c.Name).ToList() : null;
 
-        if (_options.HeaderBand)
-            _logger.LogWarning("Başlık şeridi eklenemedi (yazı tipi bulunamadı); " +
-                               "başlıksız tabloda ilk satır kaybı riski sürüyor.");
-
-        return await RunAsync(source, DocumentPromptBuilder.Build(schema), ct);
+        return await RunAsync(source, DocumentPromptBuilder.Build(schema), bandColumns, ct);
     }
 
     public async Task<DocumentExtractionResult> DiscoverAsync(Stream image,
         CancellationToken ct = default)
     {
         using var source = await LoadAsync(image, ct);
-        return await RunAsync(source, DocumentPromptBuilder.BuildDiscovery(), ct);
+        return await RunAsync(source, DocumentPromptBuilder.BuildDiscovery(), null, ct);
     }
 
     // İki geçişin ORTAK yolu: küçültme, taşma tespiti, yeniden deneme, ayrıştırma.
@@ -161,7 +160,7 @@ public class DocumentVisionService : IDocumentVisionService
     // iki kez yazılmıyor. İkiye bölünseydi taşma tespiti gibi bir düzeltme yalnız birine
     // uygulanır, diğeri sessizce eski davranışta kalırdı.
     private async Task<DocumentExtractionResult> RunAsync(Image source, string prompt,
-        CancellationToken ct)
+        IReadOnlyList<string>? bandColumns, CancellationToken ct)
     {
         var budget = _options.NumCtx - _options.ReserveTokens - PromptTextTokens;
         var longEdge = Math.Min(_options.MaxLongEdge, FitLongEdge(source.Width, source.Height, budget));
@@ -175,7 +174,7 @@ public class DocumentVisionService : IDocumentVisionService
         while (attempt < Math.Max(1, _options.MaxAttempts))
         {
             attempt++;
-            var jpeg = Encode(source, longEdge);
+            var jpeg = Encode(source, longEdge, bandColumns);
 
             call = await _client.GenerateAsync(prompt, jpeg, _options.Model, _options.NumCtx, ct);
 
@@ -264,7 +263,11 @@ public class DocumentVisionService : IDocumentVisionService
 
     // Görüntüyü verilen uzun kenara indirip JPEG'e çevirir. Büyütme YAPILMAZ: küçük bir
     // fotoğrafı esnetmek belirteç sayısını artırır, okunabilirliği artırmaz.
-    private static byte[] Encode(Image source, int longEdge)
+    //
+    // Sıra önemli ve ölçüm aracıyla aynı olmalı: ÖNCE küçült, SONRA şeridi ekle. Ters
+    // sırada şerit de küçülür, yazısı bulanıklaşır ve şeridin puntosu gönderilen görüntünün
+    // genişliğine göre değil ham genişliğe göre hesaplanmış olur.
+    private static byte[] Encode(Image source, int longEdge, IReadOnlyList<string>? bandColumns)
     {
         using var copy = source.Clone(ctx =>
         {
@@ -279,7 +282,18 @@ public class DocumentVisionService : IDocumentVisionService
         });
 
         using var buffer = new MemoryStream();
-        copy.SaveAsJpeg(buffer, new JpegEncoder { Quality = 90 });
+
+        if (bandColumns is { Count: > 0 }
+            && DocumentImagePrep.TryAddHeaderBand(copy, bandColumns, out var banded))
+        {
+            using (banded)
+                banded!.SaveAsJpeg(buffer, new JpegEncoder { Quality = 90 });
+        }
+        else
+        {
+            copy.SaveAsJpeg(buffer, new JpegEncoder { Quality = 90 });
+        }
+
         return buffer.ToArray();
     }
 }

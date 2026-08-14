@@ -288,32 +288,44 @@ public class DocumentVisionTests
     // Görüntünün oranı: şerit eklenince yükseklik artar, genişlik değişmez.
     private static double Oran((int Width, int Height) size) => (double)size.Height / size.Width;
 
-    [Fact(DisplayName = "Şerit: şemalı geçişte görüntünün üstüne başlık şeridi EKLENİR")]
+    [Fact(DisplayName = "Şerit: AÇIKKEN şemalı geçişte görüntünün üstüne eklenir")]
     public async Task SemaliGecisteSeritEklenir()
     {
         var seritli = new FakeVisionClient(new VisionCall(GecerliYanit, 1500, 120));
         var seritsiz = new FakeVisionClient(new VisionCall(GecerliYanit, 1500, 120));
 
-        await Service(seritli).ExtractAsync(JpegOf(1200, 900), Schema);
-        await Service(seritsiz, new VisionOptions { HeaderBand = false })
+        await Service(seritli, new VisionOptions { HeaderBand = true })
             .ExtractAsync(JpegOf(1200, 900), Schema);
+        await Service(seritsiz).ExtractAsync(JpegOf(1200, 900), Schema);
 
         // Şerit yalnız yükseklik ekler: aynı belge daha uzun bir görüntü olarak gider.
         Assert.True(Oran(seritli.ImageSizes[0]) > Oran(seritsiz.ImageSizes[0]),
             $"şerit eklenmemiş görünüyor: {seritli.ImageSizes[0]} vs {seritsiz.ImageSizes[0]}");
     }
 
-    [Fact(DisplayName = "Şerit: KEŞİF geçişinde eklenmez (şerit hedef şemadan üretilir)")]
+    [Fact(DisplayName = "Şerit: AÇIK olsa bile KEŞİF geçişinde eklenmez (şerit hedef şemadan üretilir)")]
     public async Task KesifGecisindeSeritEklenmez()
     {
+        var acik = new VisionOptions { HeaderBand = true };
         var kesif = new FakeVisionClient(new VisionCall(KesifYaniti, 1500, 120));
         var semali = new FakeVisionClient(new VisionCall(GecerliYanit, 1500, 120));
 
-        await Service(kesif).DiscoverAsync(JpegOf(1200, 900));
-        await Service(semali).ExtractAsync(JpegOf(1200, 900), Schema);
+        await Service(kesif, acik).DiscoverAsync(JpegOf(1200, 900));
+        await Service(semali, acik).ExtractAsync(JpegOf(1200, 900), Schema);
 
         Assert.True(Oran(kesif.ImageSizes[0]) < Oran(semali.ImageSizes[0]),
             "keşif geçişine de şerit eklenmiş");
+    }
+
+    [Fact(DisplayName = "Şerit: VARSAYILAN KAPALI — faydası üretim yolunda üretilemedi (bkz. VisionOptions)")]
+    public async Task VarsayilanKapali()
+    {
+        var client = new FakeVisionClient(new VisionCall(GecerliYanit, 1500, 120));
+
+        await Service(client).ExtractAsync(JpegOf(1200, 900), Schema);
+
+        // Şerit eklenseydi yükseklik artar, oran büyürdü.
+        Assert.Equal(900.0 / 1200, Oran(client.ImageSizes[0]), 3);
     }
 
     [Fact(DisplayName = "Şerit: kolon adlarından üretilir ve orijinal görüntüyü BOZMAZ")]

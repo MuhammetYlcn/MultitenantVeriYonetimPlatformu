@@ -14,10 +14,17 @@ import 'platform_api.dart';
 /// belgeye bağlı olmayan bir dosya girdisinin click'ini yok sayar; dosya penceresi
 /// hiç açılmaz ve buton çalışmıyormuş gibi görünür. Burada girdi gerçekten
 /// `document.body`'ye ekleniyor (`appendChild`), tıklanıyor ve iş bitince siliniyor.
-Future<PickedFile?> pickCsvOrExcelFile() async {
+Future<PickedFile?> pickCsvOrExcelFile() => _pickFile('.csv,.xlsx');
+
+/// Belge görüntüsü seçtirir (fatura/fiş fotoğrafı). Kabul edilen türler sunucudaki
+/// beyaz listeyle aynı tutulmalı; aksi halde kullanıcı seçtiği dosyayı yükleyip
+/// 400 alır.
+Future<PickedFile?> pickImageFile() => _pickFile('.jpg,.jpeg,.png,.webp');
+
+Future<PickedFile?> _pickFile(String accept) async {
   final input = web.HTMLInputElement()
     ..type = 'file'
-    ..accept = '.csv,.xlsx'
+    ..accept = accept
     ..multiple = false;
   // Görünmez ama DOM'da: tarayıcının dosya penceresini açması için bağlı olmalı.
   input.style.display = 'none';

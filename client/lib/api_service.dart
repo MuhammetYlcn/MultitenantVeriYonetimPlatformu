@@ -797,6 +797,54 @@ class ApiService {
     if (res.statusCode != 200) throw ApiException(_message(res));
   }
 
+  // --- belge / OCR ---------------------------------------------------------------------
+
+  /// POST /api/datasets/{id}/document/extract — hedef şema BİLİNİYOR.
+  /// Sunucu hiçbir şey kaydetmez; dönen tablo onay ekranında düzeltilip `confirmDocument`
+  /// ile yazılır.
+  static Future<DocumentExtraction> extractDocument(
+      String datasetId, List<int> bytes, String filename) async {
+    final body = await _uploadDocument(
+        '$baseUrl/api/datasets/$datasetId/document/extract', bytes, filename);
+    return DocumentExtraction.fromExtract(body);
+  }
+
+  /// POST /api/documents/discover — hedef şema YOK (keşif geçişi).
+  /// Kolon adlarını model seçer, sunucu bunları var olan setlerle eşleştirip öneri döner.
+  static Future<DocumentExtraction> discoverDocument(
+      List<int> bytes, String filename) async {
+    final body = await _uploadDocument('$baseUrl/api/documents/discover', bytes, filename);
+    return DocumentExtraction.fromDiscovery(body);
+  }
+
+  /// POST /api/datasets/{id}/document/confirm — onaylanan tabloyu EKLER.
+  /// Tek hücre bile uymuyorsa sunucu hiçbir şey yazmaz ve hata fırlar.
+  static Future<int> confirmDocument(
+      String datasetId, List<String> columns, List<List<String>> rows) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/datasets/$datasetId/document/confirm'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode({'columns': columns, 'rows': rows}),
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return (jsonDecode(res.body) as Map<String, dynamic>)['savedRows'] as int;
+  }
+
+  // Belge görüntüsünü multipart olarak yükler. Model çağrısı 30-45 saniye sürebildiği
+  // için varsayılan zaman aşımı yetmez; akış tamamlanana kadar beklenir.
+  static Future<Map<String, dynamic>> _uploadDocument(
+      String url, List<int> bytes, String filename) async {
+    await _ensureFreshToken();
+    final req = http.MultipartRequest('POST', Uri.parse(url));
+    req.headers['Authorization'] = 'Bearer $_token';
+    req.files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
+
+    final res = await http.Response.fromStream(await req.send());
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   // Başarılı auth yanıtından access + refresh token'ı çıkar ve seçilen moda göre sakla;
   // başarısızsa hata fırlat.
   static void _storeAuth(http.Response res, bool rememberMe) {
@@ -1209,4 +1257,165 @@ class DatasetRelation {
       );
 
   String get label => '$fromDatasetName.$fromColumn = $toDatasetName.$toColumn';
+}
+
+// --- belge / OCR -----------------------------------------------------------------------
+
+/// Belgedeki bir hücrenin şemaya uymadığını söyler (sunucudaki RowError'ın karşılığı).
+/// Satır numarası 1 tabanlıdır ve başlık sayılmaz.
+class DocumentCellError {
+  final int row;
+  final String column;
+  final String? value;
+  final String expectedType;
+
+  DocumentCellError({
+    required this.row,
+    required this.column,
+    this.value,
+    required this.expectedType,
+  });
+
+  factory DocumentCellError.fromJson(Map<String, dynamic> j) => DocumentCellError(
+        row: j['row'] as int,
+        column: j['column'] as String,
+        value: j['value'] as String?,
+        expectedType: j['expectedType'] as String,
+      );
+}
+
+/// Belgeden çıkarılan tablonun ÖNİZLEMESİ — sunucu hiçbir şey kaydetmedi.
+///
+/// `suspect` ve `warnings` bilerek taşınıyor: modelin yanıldığı durumu kullanıcının
+/// fark etmesinin tek yolu bunları göstermek. Gizlenirse yarım okunmuş bir belge,
+/// tam okunmuş gibi görünür.
+class DocumentExtraction {
+  final List<String> columns;
+  final List<List<String>> rows;
+  final List<DocumentCellError> errors;
+  final List<String> warnings;
+  final bool suspect;
+  final String model;
+  final int durationMs;
+
+  /// Yalnız keşif geçişinde dolu.
+  final String? documentType;
+  final List<DatasetSuggestion> matches;
+  final String suggestedName;
+
+  /// Kolon tipleri — keşifte değerlerden algılandı, şemalı geçişte boş kalır.
+  final List<SchemaColumn> detectedColumns;
+
+  DocumentExtraction({
+    required this.columns,
+    required this.rows,
+    required this.errors,
+    required this.warnings,
+    required this.suspect,
+    required this.model,
+    required this.durationMs,
+    this.documentType,
+    this.matches = const [],
+    this.suggestedName = '',
+    this.detectedColumns = const [],
+  });
+
+  /// `POST /document/extract` yanıtı: şema biliniyor, kolonlar düz metin listesi.
+  factory DocumentExtraction.fromExtract(Map<String, dynamic> j) => DocumentExtraction(
+        columns: (j['columns'] as List).map((e) => e as String).toList(),
+        rows: _rows(j['rows']),
+        errors: (j['errors'] as List? ?? [])
+            .map((e) => DocumentCellError.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        warnings: (j['warnings'] as List? ?? []).map((e) => e as String).toList(),
+        suspect: j['suspect'] as bool? ?? false,
+        model: j['model'] as String? ?? '',
+        durationMs: j['durationMs'] as int? ?? 0,
+      );
+
+  /// `POST /documents/discover` yanıtı: kolonlar tipleriyle gelir, üstüne set önerileri.
+  factory DocumentExtraction.fromDiscovery(Map<String, dynamic> j) {
+    final detected = (j['columns'] as List)
+        .map((e) => SchemaColumn.fromJson({...e as Map<String, dynamic>, 'ordinal': 0}))
+        .toList();
+
+    return DocumentExtraction(
+      columns: detected.map((c) => c.name).toList(),
+      detectedColumns: detected,
+      rows: _rows(j['rows']),
+      errors: const [],
+      warnings: (j['warnings'] as List? ?? []).map((e) => e as String).toList(),
+      suspect: j['suspect'] as bool? ?? false,
+      model: j['model'] as String? ?? '',
+      durationMs: j['durationMs'] as int? ?? 0,
+      documentType: j['documentType'] as String?,
+      matches: (j['matches'] as List? ?? [])
+          .map((e) => DatasetSuggestion.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      suggestedName: j['suggestedName'] as String? ?? 'Belgeden gelen veriler',
+    );
+  }
+
+  static List<List<String>> _rows(dynamic raw) => (raw as List)
+      .map((r) => (r as List).map((c) => (c as String?) ?? '').toList())
+      .toList();
+
+  /// (satır, kolon) → hata. Onay ekranı hücreyi bununla işaretler.
+  Map<String, DocumentCellError> get errorIndex => {
+        for (final e in errors) '${e.row - 1}:${e.column}': e,
+      };
+}
+
+/// Keşif geçişinin "bu belge şu veri setine ait olabilir" önerisi.
+class DatasetSuggestion {
+  final String datasetId;
+  final String name;
+  final double score;
+  final List<ColumnMapping> mappings;
+  final List<String> missingColumns;
+  final List<String> extraColumns;
+
+  DatasetSuggestion({
+    required this.datasetId,
+    required this.name,
+    required this.score,
+    required this.mappings,
+    required this.missingColumns,
+    required this.extraColumns,
+  });
+
+  factory DatasetSuggestion.fromJson(Map<String, dynamic> j) => DatasetSuggestion(
+        datasetId: j['datasetId'] as String,
+        name: j['name'] as String,
+        score: (j['score'] as num).toDouble(),
+        mappings: (j['mappings'] as List? ?? [])
+            .map((e) => ColumnMapping.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        missingColumns:
+            (j['missingColumns'] as List? ?? []).map((e) => e as String).toList(),
+        extraColumns:
+            (j['extraColumns'] as List? ?? []).map((e) => e as String).toList(),
+      );
+
+  /// Yüzde olarak benzerlik — kullanıcıya 0-1 arası ondalık göstermek anlamsız.
+  int get percent => (score * 100).round();
+}
+
+/// Belgedeki bir kolonun hedef setteki karşılığı.
+class ColumnMapping {
+  final String discovered;
+  final String target;
+  final bool typeConflict;
+
+  ColumnMapping({
+    required this.discovered,
+    required this.target,
+    required this.typeConflict,
+  });
+
+  factory ColumnMapping.fromJson(Map<String, dynamic> j) => ColumnMapping(
+        discovered: j['discovered'] as String,
+        target: j['target'] as String,
+        typeConflict: j['typeConflict'] as bool? ?? false,
+      );
 }

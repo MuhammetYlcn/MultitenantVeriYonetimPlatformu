@@ -13,6 +13,12 @@ Future<PickedFile?> pickCsvOrExcelFile() async {
       'Dosya seçme yalnız web hedefinde çalışır (platform_web.dart).');
 }
 
+/// Belge görüntüsü seçme — yukarıdakiyle aynı gerekçe.
+Future<PickedFile?> pickImageFile() async {
+  throw UnsupportedError(
+      'Dosya seçme yalnız web hedefinde çalışır (platform_web.dart).');
+}
+
 // Bellekte tutulan depo. Testler token yazma/okuma akışını gerçek tarayıcı olmadan
 // koşabilsin diye atmak yerine çalışan bir karşılık veriyor; süreç bitince uçar.
 class _MemoryStore implements KeyValueStore {

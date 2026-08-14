@@ -224,6 +224,119 @@ public class DocumentUploadTests : IClassFixture<ApiFactory>, IAsyncLifetime
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    // ---- onay: ekrandaki tablonun kaydedilmesi ----
+    //
+    // Bu uç modele HİÇ dokunmuyor: kaydedilen şey modelin okuduğu değil, kullanıcının
+    // onayladığı hâl. O yüzden testler de sahte görsel servise ihtiyaç duymuyor.
+
+    private record ConfirmDto(Guid DatasetId, int SavedRows, int TotalRows);
+
+    private Task<HttpResponseMessage> ConfirmAsync(Guid datasetId, string token,
+        IEnumerable<string> columns, IEnumerable<string[]> rows) =>
+        _client.SendAsync(WithToken(HttpMethod.Post,
+            $"/api/datasets/{datasetId}/document/confirm", token,
+            new { columns, rows }));
+
+    [Fact(DisplayName = "Onay: satırlar EKLENİR (içe aktarma gibi eskilerin üstüne yazmaz)")]
+    public async Task OnaySatirlariEkler()
+    {
+        var admin = await RegisterAsync("belge-onay", "a@bonay.com");
+        var dataset = await CreateDatasetAsync(admin.Token, "Faturalar");
+        await SetSchemaAsync(admin.Token, dataset.Id, "fatura_no,tutar\nF-0,1\n");
+
+        var ilk = await ConfirmAsync(dataset.Id, admin.Token,
+            new[] { "fatura_no", "tutar" },
+            new[] { new[] { "F-1001", "1500.75" }, new[] { "F-1001", "250.00" } });
+
+        ilk.EnsureSuccessStatusCode();
+        var sonuc = (await ilk.Content.ReadFromJsonAsync<ConfirmDto>())!;
+        Assert.Equal(2, sonuc.SavedRows);
+
+        // İkinci belge birincisini SİLMEMELİ: her belge bir kayıttır.
+        var ikinci = await ConfirmAsync(dataset.Id, admin.Token,
+            new[] { "fatura_no", "tutar" },
+            new[] { new[] { "F-1002", "90.00" } });
+
+        ikinci.EnsureSuccessStatusCode();
+        var toplam = (await ikinci.Content.ReadFromJsonAsync<ConfirmDto>())!;
+        Assert.Equal(1, toplam.SavedRows);
+        Assert.Equal(3, toplam.TotalRows);
+
+        var rows = await _client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/datasets/{dataset.Id}/rows", admin.Token));
+        var body = await rows.Content.ReadAsStringAsync();
+        Assert.Contains("\"total\":3", body);
+        Assert.Contains("F-1001", body);
+        Assert.Contains("F-1002", body);
+    }
+
+    [Fact(DisplayName = "Onay: tek hücre bile uymuyorsa HİÇBİR satır yazılmaz")]
+    public async Task UymayanHucreVarsaHicbiriYazilmaz()
+    {
+        var admin = await RegisterAsync("belge-onay-hata", "a@bonayh.com");
+        var dataset = await CreateDatasetAsync(admin.Token, "Faturalar");
+        await SetSchemaAsync(admin.Token, dataset.Id, "fatura_no,tutar\nF-0,1\n");
+
+        var response = await ConfirmAsync(dataset.Id, admin.Token,
+            new[] { "fatura_no", "tutar" },
+            new[]
+            {
+                new[] { "F-1001", "1500.75" },   // geçerli
+                new[] { "F-1002", "yok" },       // tutar sayı değil
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+        // Hangi hücrenin uymadığı geri dönmeli: onay ekranı onu işaretleyecek.
+        var problem = await response.Content.ReadAsStringAsync();
+        Assert.Contains("tutar", problem);
+
+        // Ve yarısı yazılmış bir belge bırakılmamalı.
+        var rows = await _client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/datasets/{dataset.Id}/rows", admin.Token));
+        Assert.Contains("\"total\":0", await rows.Content.ReadAsStringAsync());
+    }
+
+    [Fact(DisplayName = "Onay: hücre sayısı kolon sayısıyla uyuşmazsa reddedilir (sessiz kayma olmasın)")]
+    public async Task HucreSayisiUyusmazsaReddedilir()
+    {
+        var admin = await RegisterAsync("belge-onay-kayma", "a@bonayk.com");
+        var dataset = await CreateDatasetAsync(admin.Token, "Faturalar");
+        await SetSchemaAsync(admin.Token, dataset.Id, "fatura_no,tutar\nF-0,1\n");
+
+        var response = await ConfirmAsync(dataset.Id, admin.Token,
+            new[] { "fatura_no", "tutar" },
+            new[] { new[] { "F-1001" } });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact(DisplayName = "Onay: Viewer kaydedemez (403), başka firmanın setine yazılamaz (404)")]
+    public async Task OnayYetkiVeIzolasyon()
+    {
+        var admin = await RegisterAsync("belge-onay-yetki", "admin@bonayy.com");
+        var dataset = await CreateDatasetAsync(admin.Token, "Faturalar");
+        await SetSchemaAsync(admin.Token, dataset.Id, "fatura_no,tutar\nF-0,1\n");
+
+        var invite = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users/invite",
+            admin.Token, new { email = "izleyici@bonayy.com", role = "Viewer" }));
+        var link = (await invite.Content.ReadFromJsonAsync<InviteDto>())!;
+        (await _client.PostAsJsonAsync($"/api/invitations/{link.Token}/accept",
+            new { password = "KendiSifrem123!" })).EnsureSuccessStatusCode();
+        var login = await _client.PostAsJsonAsync("/api/auth/login",
+            new { email = "izleyici@bonayy.com", password = "KendiSifrem123!" });
+        var viewer = (await login.Content.ReadFromJsonAsync<TokenResponse>())!;
+
+        var izleyici = await ConfirmAsync(dataset.Id, viewer.Token,
+            new[] { "fatura_no", "tutar" }, new[] { new[] { "F-1", "5" } });
+        Assert.Equal(HttpStatusCode.Forbidden, izleyici.StatusCode);
+
+        var baska = await RegisterAsync("belge-onay-b", "b@bonayy.com");
+        var caprazi = await ConfirmAsync(dataset.Id, baska.Token,
+            new[] { "fatura_no", "tutar" }, new[] { new[] { "F-1", "5" } });
+        Assert.Equal(HttpStatusCode.NotFound, caprazi.StatusCode);
+    }
+
     // ---- uçtan uca: görsel servis sahte, gerisi gerçek ----
 
     // Sabit bir çıkarım döndürür: bir hücre bilerek şemaya uymuyor (tutar = "yok").

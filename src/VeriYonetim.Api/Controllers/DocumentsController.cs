@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using VeriYonetim.Api.Data;
 using VeriYonetim.Api.Models.Dtos;
+using VeriYonetim.Api.Models.Entities;
 using VeriYonetim.Api.Services;
 
 namespace VeriYonetim.Api.Controllers;
@@ -33,6 +34,10 @@ public class DocumentsController : ControllerBase
 
     // Keşifte karşılaştırılacak en fazla set sayısı.
     private const int MaxCandidateDatasets = 25;
+
+    // Tek belgeden kaydedilebilecek en fazla satır. Bir fatura onlarca kalem taşır, yüzlerce
+    // değil; bu sınır kötü niyetli ya da bozuk bir isteğin veritabanını şişirmesini engeller.
+    private const int MaxConfirmRows = 500;
 
     // "fiş" gibi adlarda ilk harfin doğru büyütülmesi için (i → İ).
     private static readonly CultureInfo TurkishCulture = new("tr-TR");
@@ -112,6 +117,81 @@ public class DocumentsController : ControllerBase
             result.LongEdge,
             result.Attempts,
             result.DurationMs));
+    }
+
+    /// <summary>
+    /// Onay ekranındaki tabloyu veri setine EKLER — belgeden veri girişinin son adımı.
+    ///
+    /// İçe aktarmadan (`POST /rows`) farkı bilinçli: o "değiştir" semantiğiyle çalışır,
+    /// çünkü bir dosya setin tamamıdır. Belge ise bir KAYITTIR; her fatura eskilerin
+    /// üstüne yazsaydı ikinci belge birinciyi silerdi.
+    ///
+    /// Ya hep ya hiç: tek bir hücre bile şemaya uymuyorsa hiçbir satır yazılmaz ve hangi
+    /// hücrenin uymadığı geri döner. Yarısı yazılmış bir belge, kullanıcının hangi satırın
+    /// içeride olduğunu bilemediği bir durum bırakırdı.
+    /// </summary>
+    [HttpPost("datasets/{datasetId:guid}/document/confirm")]
+    [Authorize(Roles = "Editor,Admin")]
+    public async Task<IActionResult> Confirm(Guid datasetId, DocumentConfirmRequest request,
+        CancellationToken ct)
+    {
+        var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == datasetId, ct);
+        if (dataset is null)
+            return Problem(statusCode: StatusCodes.Status404NotFound, title: "Veri seti bulunamadı.");
+
+        var columns = request.Columns ?? Array.Empty<string>();
+        var rows = request.Rows ?? Array.Empty<string[]>();
+
+        if (columns.Count == 0 || rows.Count == 0)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Kaydedilecek satır yok.");
+
+        if (rows.Count > MaxConfirmRows)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: $"Tek belgeden en fazla {MaxConfirmRows} satır kaydedilebilir.");
+
+        // Satır uzunluğu başlık sayısıyla uyuşmuyorsa hücreler kayar ve veri SESSİZCE
+        // yanlış kolona yazılır — bu yüzden kırpmak/tamamlamak yerine reddediyoruz.
+        if (rows.Any(r => r.Length != columns.Count))
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Satırlardaki hücre sayısı kolon sayısıyla uyuşmuyor.");
+
+        var schema = await _db.DatasetColumns
+            .Where(c => c.DatasetId == datasetId)
+            .OrderBy(c => c.Ordinal)
+            .Select(c => new ColumnSchema(c.Name, c.Type))
+            .ToListAsync(ct);
+
+        if (schema.Count == 0)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Bu veri seti için önce şema tanımlayın (POST /api/datasets/{id}/schema).");
+
+        // Doğrulama içe aktarmayla BİREBİR aynı katmandan geçiyor: belgeden gelen satır ile
+        // CSV'den gelen satır aynı kurallara tabi, yoksa iki kapı iki farklı veri üretirdi.
+        var validation = _importService.ValidateRows(new ParsedTable(columns, rows), schema);
+
+        if (validation.Errors.Count > 0)
+            return ValidationProblem(new ValidationProblemDetails
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "Bazı hücreler şemaya uymuyor; düzeltip tekrar deneyin.",
+                Extensions = { ["cells"] = validation.Errors }
+            });
+
+        foreach (var values in validation.ValidRows)
+            _db.DatasetRows.Add(new DatasetRow
+            {
+                Id = Guid.NewGuid(),
+                DatasetId = datasetId,
+                Data = values
+            });
+
+        dataset.RowCount += validation.ValidRows.Count;
+        dataset.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(ct);
+
+        return Ok(new DocumentConfirmResponse(datasetId, validation.ValidRows.Count,
+            dataset.RowCount));
     }
 
     /// <summary>
