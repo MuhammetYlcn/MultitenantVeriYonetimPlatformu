@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
+using System.Text.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using SixLabors.ImageSharp;
@@ -158,10 +160,45 @@ public class DocumentDiscoveryTests : IClassFixture<ApiFactory>, IAsyncLifetime
         return dataset;
     }
 
-    private HttpClient FakeModelClient() => _factory
+    private WebApplicationFactory<Program> FakeModelFactory() => _factory
         .WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
-            services.AddScoped<IDocumentVisionService, FakeDiscoveryService>()))
-        .CreateClient();
+            services.AddScoped<IDocumentVisionService, FakeDiscoveryService>()));
+
+    // Kuyruğa alınan işi çalıştırıp sonucunu okur.
+    //
+    // Uç artık sonucu değil bir iş kaydı döndürüyor (202). Testlerde arka plan işçisi
+    // KAPALI (bkz. ApiFactory, "Hangfire:RunServer") — iş burada elle tetikleniyor.
+    // Böylece sonuç bir zamanlamaya değil, açık bir çağrıya bağlı: işçi açık olsaydı
+    // test "acaba bitti mi" diye beklemek zorunda kalır ve kırılgan hâle gelirdi.
+    private static async Task<T> RunJobAsync<T>(WebApplicationFactory<Program> factory,
+        HttpClient client, string token, HttpResponseMessage accepted)
+    {
+        Assert.Equal(HttpStatusCode.Accepted, accepted.StatusCode);
+
+        var queued = (await accepted.Content.ReadFromJsonAsync<JobDto>())!;
+        Assert.Equal("discover", queued.Kind);
+        Assert.Equal("queued", queued.Status);
+
+        using (var scope = factory.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<IDocumentJobRunner>()
+                .RunAsync(queued.Id);
+
+        var read = await client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/jobs/{queued.Id}", token));
+        read.EnsureSuccessStatusCode();
+
+        var job = (await read.Content.ReadFromJsonAsync<JobDto>())!;
+        Assert.Equal("succeeded", job.Status);
+        Assert.Null(job.Error);
+
+        return job.Result!.Value.Deserialize<T>(JsonWeb)!;
+    }
+
+    private static readonly JsonSerializerOptions JsonWeb = new(JsonSerializerDefaults.Web);
+
+    private record JobDto(Guid Id, string Kind, string Status, Guid? DatasetId, string? FileName,
+        string? Error, DateTime CreatedAt, DateTime? StartedAt, DateTime? CompletedAt,
+        JsonElement? Result);
 
     // ---- kapı testleri ----
 
@@ -215,13 +252,12 @@ public class DocumentDiscoveryTests : IClassFixture<ApiFactory>, IAsyncLifetime
     [Fact(DisplayName = "Keşif ucu: taslak şema döner — TİPLER değerlerden algılanır, modelden değil")]
     public async Task TaslakSemaDegerlerdenTiplenir()
     {
-        using var client = FakeModelClient();
+        var factory = FakeModelFactory();
+        using var client = factory.CreateClient();
         var admin = await RegisterAsync(client, "kesif-taslak", "a@ktaslak.com");
 
         var response = await client.SendAsync(DiscoverRequest(admin.Token));
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-
-        var result = (await response.Content.ReadFromJsonAsync<DiscoverDto>())!;
+        var result = await RunJobAsync<DiscoverDto>(factory, client, admin.Token, response);
 
         Assert.Equal("fatura", result.DocumentType);
         Assert.Equal(new[] { "fatura_no", "fatura_tarihi", "urun_adi", "tutar" },
@@ -238,7 +274,8 @@ public class DocumentDiscoveryTests : IClassFixture<ApiFactory>, IAsyncLifetime
     [Fact(DisplayName = "Keşif ucu: uyan veri seti bulunursa eşleme ayrıntısıyla önerilir")]
     public async Task UyanSetOnerilir()
     {
-        using var client = FakeModelClient();
+        var factory = FakeModelFactory();
+        using var client = factory.CreateClient();
         var admin = await RegisterAsync(client, "kesif-oneri", "a@koneri.com");
 
         // Kolon adları belgedekiyle birebir aynı değil (tarih ve ürün nitelenmiş yazılmış):
@@ -247,7 +284,7 @@ public class DocumentDiscoveryTests : IClassFixture<ApiFactory>, IAsyncLifetime
             "Fatura No,Fatura Tarihi,Ürün Adı,Tutar\nF-1,2026-01-05,Kalem,100\n");
 
         var response = await client.SendAsync(DiscoverRequest(admin.Token));
-        var result = (await response.Content.ReadFromJsonAsync<DiscoverDto>())!;
+        var result = await RunJobAsync<DiscoverDto>(factory, client, admin.Token, response);
 
         var match = Assert.Single(result.Matches);
         Assert.Equal(dataset.Id, match.DatasetId);
@@ -265,14 +302,15 @@ public class DocumentDiscoveryTests : IClassFixture<ApiFactory>, IAsyncLifetime
     [Fact(DisplayName = "Keşif ucu: alakasız setler önerilmez — yeni set adı belgenin türünden gelir")]
     public async Task AlakasizSetOnerilmezYeniSetOnerilir()
     {
-        using var client = FakeModelClient();
+        var factory = FakeModelFactory();
+        using var client = factory.CreateClient();
         var admin = await RegisterAsync(client, "kesif-yeni", "a@kyeni.com");
 
         await CreateDatasetAsync(client, admin.Token, "Personel",
             "ad,soyad,departman,maas\nAli,Yılmaz,Satış,50000\n");
 
         var response = await client.SendAsync(DiscoverRequest(admin.Token));
-        var result = (await response.Content.ReadFromJsonAsync<DiscoverDto>())!;
+        var result = await RunJobAsync<DiscoverDto>(factory, client, admin.Token, response);
 
         Assert.Empty(result.Matches);
         Assert.Equal("Fatura", result.SuggestedName);
@@ -281,7 +319,8 @@ public class DocumentDiscoveryTests : IClassFixture<ApiFactory>, IAsyncLifetime
     [Fact(DisplayName = "Keşif ucu: BAŞKA FİRMANIN uyan veri seti asla önerilmez")]
     public async Task BaskaFirmaninSetiOnerilmez()
     {
-        using var client = FakeModelClient();
+        var factory = FakeModelFactory();
+        using var client = factory.CreateClient();
 
         var baska = await RegisterAsync(client, "kesif-b", "b@kizole.com");
         await CreateDatasetAsync(client, baska.Token, "Faturalar",
@@ -290,22 +329,30 @@ public class DocumentDiscoveryTests : IClassFixture<ApiFactory>, IAsyncLifetime
         var admin = await RegisterAsync(client, "kesif-a", "a@kizole.com");
 
         var response = await client.SendAsync(DiscoverRequest(admin.Token));
-        var result = (await response.Content.ReadFromJsonAsync<DiscoverDto>())!;
+        var result = await RunJobAsync<DiscoverDto>(factory, client, admin.Token, response);
 
         // Tam uyan bir set VAR ama başka firmanın; görünmemeli.
+        //
+        // Bu testin ağırlığı asenkron akışla ARTTI: eşleme artık HTTP isteğinin içinde
+        // değil, arka planda çalışıyor. Orada firma kimliği token'dan okunamaz; iş kaydından
+        // kurulur. Bağlam yanlış kurulsaydı ya da hiç kurulmasaydı, bu satır düşerdi.
         Assert.Empty(result.Matches);
     }
 
     [Fact(DisplayName = "Keşif ucu: hiçbir şey KAYDEDİLMEZ — ne satır ne yeni set")]
     public async Task HicbirSeyKaydedilmez()
     {
-        using var client = FakeModelClient();
+        var factory = FakeModelFactory();
+        using var client = factory.CreateClient();
         var admin = await RegisterAsync(client, "kesif-kayit", "a@kkayit.com");
 
         var dataset = await CreateDatasetAsync(client, admin.Token, "Faturalar",
             "fatura_no,fatura_tarihi,urun_adi,tutar\nF-1,2026-01-05,Kalem,100\n");
 
-        (await client.SendAsync(DiscoverRequest(admin.Token))).EnsureSuccessStatusCode();
+        // İş SONUNA KADAR çalıştırılıyor: kaydetmediğini göstermek için okumanın gerçekten
+        // yapılmış olması gerekir, yoksa test yalnızca "kuyrukta bekleyen iş yazmıyor" der.
+        var response = await client.SendAsync(DiscoverRequest(admin.Token));
+        await RunJobAsync<DiscoverDto>(factory, client, admin.Token, response);
 
         var rows = await client.SendAsync(
             WithToken(HttpMethod.Get, $"/api/datasets/{dataset.Id}/rows", admin.Token));

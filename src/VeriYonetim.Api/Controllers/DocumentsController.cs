@@ -1,7 +1,9 @@
-using System.Globalization;
+using System.Security.Claims;
+using Hangfire;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SixLabors.ImageSharp;
 using VeriYonetim.Api.Data;
 using VeriYonetim.Api.Models.Dtos;
 using VeriYonetim.Api.Models.Entities;
@@ -32,31 +34,36 @@ public class DocumentsController : ControllerBase
 
     private static readonly string[] AllowedExtensions = { ".jpg", ".jpeg", ".png", ".webp" };
 
-    // Keşifte karşılaştırılacak en fazla set sayısı.
-    private const int MaxCandidateDatasets = 25;
-
     // Tek belgeden kaydedilebilecek en fazla satır. Bir fatura onlarca kalem taşır, yüzlerce
     // değil; bu sınır kötü niyetli ya da bozuk bir isteğin veritabanını şişirmesini engeller.
     private const int MaxConfirmRows = 500;
 
-    // "fiş" gibi adlarda ilk harfin doğru büyütülmesi için (i → İ).
-    private static readonly CultureInfo TurkishCulture = new("tr-TR");
+    // Saklanan görüntünün uzun kenarı. Modele giden boydan bağımsız: bu değer insan gözüne
+    // göre seçildi (fatura kalem satırları okunabilsin), o ise bağlam bütçesine göre.
+    private const int StoredImageLongEdge = 2000;
 
     private readonly AppDbContext _db;
-    private readonly IDocumentVisionService _vision;
     private readonly IDatasetImportService _importService;
+    private readonly IBackgroundJobClient _jobs;
+    private readonly ITenantContext _tenantContext;
 
-    public DocumentsController(AppDbContext db, IDocumentVisionService vision,
-        IDatasetImportService importService)
+    public DocumentsController(AppDbContext db, IDatasetImportService importService,
+        IBackgroundJobClient jobs, ITenantContext tenantContext)
     {
         _db = db;
-        _vision = vision;
         _importService = importService;
+        _jobs = jobs;
+        _tenantContext = tenantContext;
     }
 
     /// <summary>
-    /// Belgeyi okur ve çıkan tabloyu ÖNİZLEME olarak döndürür — hiçbir şey kaydedilmez.
-    /// Kaydetme, onay ekranından gelecek ayrı bir çağrıyla yapılacak.
+    /// Belgeyi okuma işini KUYRUĞA ALIR ve hemen döner — sonucu beklemez.
+    ///
+    /// Neden senkron değil: belge okuma 30-150 saniye sürüyor, çok sayfalıda daha da
+    /// uzuyor. Bu süreyi HTTP isteğinin içinde geçirmek üç yerde kırılıyordu — vekil
+    /// sunucu bağlantıyı kesiyor, kullanıcı sekmeyi kapatınca iş kayboluyor, ekran o
+    /// süre boyunca kilitli kalıyor. Uç artık işi kaydedip 202 dönüyor; sonuç hazır
+    /// olunca kullanıcıya canlı kanaldan haber gidiyor (bkz. JobsHub).
     /// </summary>
     [HttpPost("datasets/{datasetId:guid}/document/extract")]
     [Authorize(Roles = "Editor,Admin")]
@@ -72,51 +79,14 @@ public class DocumentsController : ControllerBase
         if (ValidateUpload(file) is { } error) return error;
 
         // Hedef şema ZORUNLU: model neyi arayacağını bilmeden serbest çıkarım yapar ve alan
-        // adlarını uydurur — çıkan sonuç hiçbir veri setine yazılamaz (bkz. DocumentPromptBuilder).
-        var schema = await _db.DatasetColumns
-            .Where(c => c.DatasetId == datasetId)
-            .OrderBy(c => c.Ordinal)
-            .Select(c => new ColumnSchema(c.Name, c.Type))
-            .ToListAsync(ct);
-
-        if (schema.Count == 0)
+        // adlarını uydurur (bkz. DocumentPromptBuilder). Denetim BURADA yapılıyor, işin
+        // içinde değil: kullanıcı iki dakika bekleyip "şema yok" hatası almamalı.
+        var hasSchema = await _db.DatasetColumns.AnyAsync(c => c.DatasetId == datasetId, ct);
+        if (!hasSchema)
             return Problem(statusCode: StatusCodes.Status400BadRequest,
                 title: "Bu veri seti için önce şema tanımlayın (POST /api/datasets/{id}/schema).");
 
-        DocumentExtractionResult result;
-        try
-        {
-            await using var stream = file!.OpenReadStream();
-            result = await _vision.ExtractAsync(stream, schema, ct);
-        }
-        catch (InvalidQueryException ex)
-        {
-            // Belge okunamadı / şema yok gibi kullanıcının düzeltebileceği durumlar.
-            return Problem(statusCode: StatusCodes.Status400BadRequest, title: ex.Message);
-        }
-        catch (QueryPlannerException ex)
-        {
-            // Model servisi kapalı ya da yanıt vermiyor: kullanıcının yapabileceği bir şey yok.
-            return Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: ex.Message);
-        }
-
-        // Hücreler şemaya uyuyor mu? Satırlar ELENMEZ — onay ekranı yanlış hücreyi
-        // işaretleyip kullanıcıya düzelttirecek. Buradaki tek amaç neyin uymadığını söylemek.
-        var validation = _importService.ValidateRows(result.Table, schema);
-
-        return Ok(new DocumentExtractionResponse(
-            datasetId,
-            result.Table.Headers,
-            result.Table.Rows,
-            validation.Errors,
-            result.Warnings,
-            result.Suspect,
-            result.Model,
-            result.PromptTokens,
-            result.NumCtx,
-            result.LongEdge,
-            result.Attempts,
-            result.DurationMs));
+        return await QueueAsync(DocumentJobKind.Extract, datasetId, file!, ct);
     }
 
     /// <summary>
@@ -166,6 +136,22 @@ public class DocumentsController : ControllerBase
             return Problem(statusCode: StatusCodes.Status400BadRequest,
                 title: "Bu veri seti için önce şema tanımlayın (POST /api/datasets/{id}/schema).");
 
+        // Aynı belge iki kez kaydedilemez.
+        //
+        // Denetim SUNUCUDA: arayüz onaylanmış işte düğmeyi kapatıyor, ama iş listesi
+        // kalıcı olduğu için kullanıcı eski bir işi açıp tekrar gönderebilir — o zaman
+        // aynı satırlar sete ikinci kez eklenir ve bu sessiz bir mükerrer kayıt olur.
+        // Ekran doğruluğun bekçisi olamaz.
+        DocumentJob? job = null;
+        if (request.JobId is { } requestedJobId)
+        {
+            job = await _db.DocumentJobs.FirstOrDefaultAsync(j => j.Id == requestedJobId, ct);
+
+            if (job?.ConfirmedAt is not null)
+                return Problem(statusCode: StatusCodes.Status409Conflict,
+                    title: "Bu belge zaten kaydedilmiş; satırlar ikinci kez eklenmez.");
+        }
+
         // Doğrulama içe aktarmayla BİREBİR aynı katmandan geçiyor: belgeden gelen satır ile
         // CSV'den gelen satır aynı kurallara tabi, yoksa iki kapı iki farklı veri üretirdi.
         var validation = _importService.ValidateRows(new ParsedTable(columns, rows), schema);
@@ -188,6 +174,16 @@ public class DocumentsController : ControllerBase
 
         dataset.RowCount += validation.ValidRows.Count;
         dataset.UpdatedAt = DateTime.UtcNow;
+
+        // Onaylanan belge artık gerekmiyor: görüntü işin ömrüne bağlı bir ara üründü,
+        // kalıcı olan az önce yazılan satırlar. Onay damgası ile aynı işlemde yazılıyor —
+        // ikisi ayrılırsa "kaydedildi ama işaretlenmedi" hâli mükerrer kayda kapı açardı.
+        if (job is not null)
+        {
+            job.Image = null;
+            job.ConfirmedAt = DateTime.UtcNow;
+        }
+
         await _db.SaveChangesAsync(ct);
 
         return Ok(new DocumentConfirmResponse(datasetId, validation.ValidRows.Count,
@@ -195,8 +191,8 @@ public class DocumentsController : ControllerBase
     }
 
     /// <summary>
-    /// Belgeyi ŞEMASIZ okur (keşif geçişi) ve hangi veri setine ait olabileceğini önerir.
-    /// Hiçbir şey kaydedilmez; set seçimi ve kaydetme onay ekranından gelecek.
+    /// Belgeyi ŞEMASIZ okuma işini (keşif geçişi) kuyruğa alır — hangi veri setine ait
+    /// olabileceği iş bitince önerilecek.
     ///
     /// Bu uç neden var: `extract` hedef seti bilmek zorunda. İlk kez görülen bir belge
     /// türünde böyle bir set yoktur — kullanıcıya "önce elle set açın, kolonlarını yazın,
@@ -208,70 +204,68 @@ public class DocumentsController : ControllerBase
     {
         if (ValidateUpload(file) is { } error) return error;
 
-        DocumentExtractionResult result;
-        try
-        {
-            await using var stream = file!.OpenReadStream();
-            result = await _vision.DiscoverAsync(stream, ct);
-        }
-        catch (InvalidQueryException ex)
-        {
-            return Problem(statusCode: StatusCodes.Status400BadRequest, title: ex.Message);
-        }
-        catch (QueryPlannerException ex)
-        {
-            return Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: ex.Message);
-        }
-
-        // Kolon adları modelden, TİPLER değerlerden geliyor. Tipi de modele sordurmak
-        // ikinci bir tip algılayıcı demek olurdu; CSV/Excel ile aynı katmandan geçmesi
-        // hem tutarlılığı hem "1.500" gibi tuzakların tek yerde çözülmesini sağlıyor.
-        var columns = _importService.DetectSchema(result.Table);
-
-        // Adaylar: firmanın var olan setleri (global filtre başka firmanınkini zaten
-        // getirmez). Sayı sınırlı — eşleme tarafı ucuz ama sorgu sınırsız büyümemeli;
-        // en son dokunulanlar en olası adaylar.
-        var candidates = await _db.Datasets
-            .OrderByDescending(d => d.UpdatedAt ?? d.CreatedAt)
-            .Take(MaxCandidateDatasets)
-            .Select(d => new DatasetSchema(
-                d.Id,
-                d.Name,
-                _db.DatasetColumns
-                    .Where(c => c.DatasetId == d.Id)
-                    .OrderBy(c => c.Ordinal)
-                    .Select(c => new ColumnSchema(c.Name, c.Type))
-                    .ToList()))
-            .ToListAsync(ct);
-
-        var matches = SchemaMatcher.Match(columns, candidates);
-
-        return Ok(new DocumentDiscoveryResponse(
-            result.Document.DocumentType,
-            columns,
-            result.Table.Rows,
-            matches.Select(m => new DatasetMatchDto(
-                m.DatasetId, m.Name, m.Score, m.Mappings, m.MissingColumns, m.ExtraColumns)).ToList(),
-            SuggestName(result.Document.DocumentType),
-            result.Warnings,
-            result.Suspect,
-            result.Model,
-            result.PromptTokens,
-            result.NumCtx,
-            result.LongEdge,
-            result.Attempts,
-            result.DurationMs));
+        return await QueueAsync(DocumentJobKind.Discover, datasetId: null, file!, ct);
     }
 
-    // Yeni set açılacaksa ad önerisi. Çoğul yapmaya çalışılmıyor: Türkçede ekin ünlü
-    // uyumuna göre değişmesi ("fatura" → "faturalar", "fiş" → "fişler") bu ekranda
-    // çözülecek bir sorun değil; kullanıcı adı zaten düzenleyebiliyor.
-    private static string SuggestName(string? documentType)
+    /// <summary>
+    /// İki geçişin ORTAK kuyruğa alma yolu: görüntüyü saklanacak hâle getir, iş kaydını
+    /// aç, kuyruğa bırak.
+    /// </summary>
+    /// Sıra gevşetilemez: kayıt ÖNCE veritabanına yazılır, kuyruğa SONRA bırakılır. Tersi
+    /// olsaydı işçi, kaydı henüz görünmeyen bir işi çalıştırmaya kalkar ve "bulunamadı"
+    /// diyerek sessizce düşerdi.
+    private async Task<IActionResult> QueueAsync(string kind, Guid? datasetId, IFormFile file,
+        CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(documentType)) return "Belgeden gelen veriler";
+        if (_tenantContext.TenantId is not { } tenantId)
+            return Problem(statusCode: StatusCodes.Status401Unauthorized,
+                title: "Firma kimliği bulunamadı.");
 
-        var text = documentType.Trim();
-        return char.ToUpper(text[0], TurkishCulture) + text[1..];
+        if (!Guid.TryParse(User.FindFirstValue("sub"), out var userId))
+            return Problem(statusCode: StatusCodes.Status401Unauthorized,
+                title: "Kullanıcı kimliği bulunamadı.");
+
+        StoredImage stored;
+        try
+        {
+            await using var stream = file.OpenReadStream();
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer, ct);
+
+            var contentType = DocumentImagePrep.ContentTypeFor(
+                Path.GetExtension(file.FileName));
+
+            stored = await DocumentImagePrep.PrepareForStorageAsync(
+                buffer.ToArray(), contentType, StoredImageLongEdge, ct);
+        }
+        catch (Exception ex) when (ex is UnknownImageFormatException or InvalidImageContentException)
+        {
+            // Uzantı doğruydu ama içerik görüntü değil. Kuyruğa almak, kullanıcıyı boşuna
+            // bekletip aynı hatayı iki dakika sonra vermek olurdu.
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Görüntü okunamadı; dosya bozuk olabilir.");
+        }
+
+        var job = new DocumentJob
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            UserId = userId,
+            Kind = kind,
+            DatasetId = datasetId,
+            Status = DocumentJobStatus.Queued,
+            Image = stored.Bytes,
+            ImageContentType = stored.ContentType,
+            FileName = file.FileName
+        };
+
+        _db.DocumentJobs.Add(job);
+        await _db.SaveChangesAsync(ct);
+
+        _jobs.Enqueue<IDocumentJobRunner>(runner => runner.RunAsync(job.Id));
+
+        // 202: "aldım, henüz bitmedi". 200 dönmek, sonucun hazır olduğu izlenimini verirdi.
+        return Accepted(DocumentJobMapper.ToResponse(job));
     }
 
     private IActionResult? ValidateUpload(IFormFile? file)

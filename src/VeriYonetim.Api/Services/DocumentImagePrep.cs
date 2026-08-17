@@ -1,12 +1,19 @@
 using SixLabors.Fonts;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Drawing.Processing;
+using SixLabors.ImageSharp.Formats.Jpeg;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 
 namespace VeriYonetim.Api.Services;
 
-// Modele GÖNDERİLMEDEN ÖNCE görüntüye yapılan müdahale.
+/// Saklanmaya hazır görüntü: baytlar ve içerik türü.
+public record StoredImage(byte[] Bytes, string ContentType);
+
+// Belge görüntüsüne yapılan hazırlıklar. İki ayrı amaç var ve ikisi de burada:
+// modele gönderilecek hâl (başlık şeridi) ve saklanacak hâl (küçültme).
+//
+// Modele GÖNDERİLMEDEN ÖNCE yapılan müdahale:
 //
 // Buradaki tek iş, ölçümün en şaşırtıcı sonucunun karşılığı: bazı davranışlar istemle
 // düzeltilemiyor, GİRDİYİ DEĞİŞTİREREK düzeltiliyor. Model, başlık satırı olmayan bir
@@ -70,6 +77,58 @@ public static class DocumentImagePrep
         banded = canvas;
         return true;
     }
+
+    /// <summary>
+    /// Görüntüyü SAKLANACAK hâline getirir: gösterime yetecek boya indirir ve JPEG'e çevirir.
+    ///
+    /// Neden saklıyoruz: asenkron akışta kullanıcı işi başlatıp ekrandan çıkabiliyor; geri
+    /// döndüğünde onay ekranı belgeyi hücrelerin yanında göstermek zorunda, ama istemcinin
+    /// elindeki dosya çoktan gitmiş olur.
+    ///
+    /// Neden küçülterek: yüklenen dosya 15 MB'a kadar olabiliyor, oysa ekranda gösterilecek
+    /// bir görüntü için bu boy gereksiz. Uzun kenar sınırı okunabilirlik gözetilerek
+    /// seçildi — fatura kalem satırları hâlâ okunuyor, dosya ise birkaç yüz kilobayta
+    /// iniyor. MODELE giden görüntü bundan bağımsız hazırlanıyor (bkz. DocumentVisionService):
+    /// oradaki boy bağlam bütçesine göre hesaplanıyor, buradaki insan gözüne göre.
+    /// </summary>
+    public static async Task<StoredImage> PrepareForStorageAsync(byte[] original,
+        string originalContentType, int maxLongEdge, CancellationToken ct = default)
+    {
+        using var input = new MemoryStream(original);
+        using var image = await Image.LoadAsync(input, ct);
+
+        // Büyütme yapılmaz: küçük bir fotoğrafı esnetmek dosyayı büyütür, okunabilirliği artırmaz.
+        if (Math.Max(image.Width, image.Height) > maxLongEdge)
+            image.Mutate(ctx => ctx.Resize(new ResizeOptions
+            {
+                Size = new Size(maxLongEdge, maxLongEdge),
+                Mode = ResizeMode.Max,          // en-boy oranını korur
+                Sampler = KnownResamplers.Lanczos3
+            }));
+
+        using var buffer = new MemoryStream();
+        await image.SaveAsJpegAsync(buffer, new JpegEncoder { Quality = 85 }, ct);
+        var encoded = buffer.ToArray();
+
+        // Yeniden kodlama HER ZAMAN kazandırmaz ve bu ölçülerek görüldü: sınırın altındaki
+        // bir fotoğrafta (66 KB) çıktı 87 KB'a çıktı. Sebebi açık — kaynak zaten sıkıştırılmış
+        // bir JPEG'se, onu çözüp yeniden kodlamak hem kalite kaybettirir hem dosyayı
+        // büyütebilir. Bu yüzden sonuç orijinalden küçük DEĞİLSE orijinal saklanıyor.
+        //
+        // İçerik türü istemcinin gönderdiği başlıktan değil, doğrulanmış uzantıdan
+        // türetiliyor: başlığı gönderen taraf istemci, uzantıyı ise sunucu denetliyor.
+        return encoded.Length < original.Length
+            ? new StoredImage(encoded, "image/jpeg")
+            : new StoredImage(original, originalContentType);
+    }
+
+    /// Doğrulanmış dosya uzantısından içerik türü.
+    public static string ContentTypeFor(string extension) => extension.ToLowerInvariant() switch
+    {
+        ".png" => "image/png",
+        ".webp" => "image/webp",
+        _ => "image/jpeg",
+    };
 
     private static bool TryResolveFontFamily(out FontFamily family)
     {

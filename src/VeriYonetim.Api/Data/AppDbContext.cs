@@ -27,6 +27,7 @@ public class AppDbContext : DbContext
     public DbSet<AskConversation> AskConversations => Set<AskConversation>();
     public DbSet<AskMessage> AskMessages => Set<AskMessage>();
     public DbSet<AccountToken> AccountTokens => Set<AccountToken>();
+    public DbSet<DocumentJob> DocumentJobs => Set<DocumentJob>();
 
     // Platform katmanı: tenant'ların üstünde durur, bu yüzden global query filter YOK.
     public DbSet<PlatformAdmin> PlatformAdmins => Set<PlatformAdmin>();
@@ -215,6 +216,41 @@ public class AppDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
 
             message.HasQueryFilter(m => m.Conversation.User.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<DocumentJob>(job =>
+        {
+            job.Property(j => j.Kind).HasMaxLength(20);
+            job.Property(j => j.Status).HasMaxLength(20);
+            job.Property(j => j.ImageContentType).HasMaxLength(100);
+            job.Property(j => j.FileName).HasMaxLength(260); // dosya adı sınırı
+
+            // Sonuç JSON olarak duruyor; jsonb seçilmesinin sebebi ileride sorgulanabilmesi
+            // değil, tipin ne olduğunu tabloda da görünür kılmak (satırlar da jsonb).
+            job.Property(j => j.ResultJson).HasColumnType("jsonb");
+
+            // Kullanıcı silinince işleri de gitsin: iş kaydı kişiye ait bir çalışma izidir.
+            job.HasOne(j => j.User)
+                .WithMany()
+                .HasForeignKey(j => j.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Hedef set silinirse iş de anlamını yitirir (sonucu yazılacağı yer yok).
+            job.HasOne(j => j.Dataset)
+                .WithMany()
+                .HasForeignKey(j => j.DatasetId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Liste "kullanıcının son işleri" biçiminde okunuyor.
+            job.HasIndex(j => new { j.UserId, j.CreatedAt });
+
+            // Temizlik işi bitmiş ve eskimiş kayıtları tarıyor.
+            job.HasIndex(j => j.CreatedAt);
+
+            // İzolasyon: iş kaydı doğrudan tenant taşıyor (Dataset deseni). Arka plan işi
+            // bu alanı bilinçli olarak filtresiz okuyup bağlamı ondan kurar — yumurta-tavuk
+            // sorununun tek kırıldığı yer orasıdır (bkz. DocumentJobRunner).
+            job.HasQueryFilter(j => j.TenantId == _tenantContext.TenantId);
         });
     }
 }

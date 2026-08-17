@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using SixLabors.ImageSharp;
@@ -37,6 +38,10 @@ public class DocumentUploadTests : IClassFixture<ApiFactory>, IAsyncLifetime
         DateTime CreatedAt, DateTime? UpdatedAt);
 
     private record InviteDto(string Token, string Email, string? Role);
+
+    private record JobDto(Guid Id, string Kind, string Status, Guid? DatasetId, string? FileName,
+        string? Error, DateTime CreatedAt, DateTime? StartedAt, DateTime? CompletedAt,
+        JsonElement? Result);
 
     private record ExtractDto(
         Guid DatasetId,
@@ -413,10 +418,32 @@ public class DocumentUploadTests : IClassFixture<ApiFactory>, IAsyncLifetime
         { Content = upload };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", admin.Token);
 
+        // Uç artık sonucu değil bir İŞ döndürüyor (202): belge okuma 30-150 saniye sürüyor
+        // ve bu süre HTTP isteğinin içinde geçirilemez. Testlerde arka plan işçisi kapalı
+        // olduğundan iş elle çalıştırılıyor — sonuç zamanlamaya değil çağrıya bağlı.
         var response = await client.SendAsync(request);
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 
-        var result = (await response.Content.ReadFromJsonAsync<ExtractDto>())!;
+        var queued = (await response.Content.ReadFromJsonAsync<JobDto>())!;
+        Assert.Equal("extract", queued.Kind);
+        Assert.Equal("queued", queued.Status);
+        Assert.Equal(created.Id, queued.DatasetId);
+
+        using (var scope = factory.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<IDocumentJobRunner>()
+                .RunAsync(queued.Id);
+
+        var read = await client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/jobs/{queued.Id}", admin.Token));
+        read.EnsureSuccessStatusCode();
+
+        var job = (await read.Content.ReadFromJsonAsync<JobDto>())!;
+        Assert.Equal("succeeded", job.Status);
+        Assert.Null(job.Error);
+        Assert.NotNull(job.CompletedAt);
+
+        var result = job.Result!.Value.Deserialize<ExtractDto>(
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
 
         // Belge alanı her kalem satırına tekrarlanır → CSV'den gelenle aynı şekil.
         Assert.Equal(new[] { "fatura_no", "urun", "tutar" }, result.Columns);

@@ -1,3 +1,5 @@
+using System.Text.Json;
+using VeriYonetim.Api.Models.Entities;
 using VeriYonetim.Api.Services;
 
 namespace VeriYonetim.Api.Models.Dtos;
@@ -62,15 +64,74 @@ public record DocumentDiscoveryResponse(
 /// kullanıcının ONAYLADIĞI hâldir. Belgeyi ikinci kez okutmak hem 30-45 saniye daha sürer
 /// hem de kullanıcının ekranda düzelttiği hücreleri geri alırdı.
 /// </summary>
+/// <param name="JobId">Bu tablonun geldiği iş. Verilirse belge görüntüsü onaydan sonra
+/// silinir: görüntü işin ömrüne bağlı bir ara üründür, kalıcı olan kaydedilen satırlardır.</param>
 public record DocumentConfirmRequest(
     IReadOnlyList<string>? Columns,
-    IReadOnlyList<string[]>? Rows);
+    IReadOnlyList<string[]>? Rows,
+    Guid? JobId = null);
 
 /// <summary>Kaydetme sonucu. Satırlar EKLENİR (içe aktarma gibi eskileri silmez).</summary>
 public record DocumentConfirmResponse(Guid DatasetId, int SavedRows, int TotalRows);
 
 /// <summary>
-/// Bir aday veri setiyle eşleşme. Puan tek başına yeterli değil: kullanıcının kararı
+/// Kuyruğa alınmış bir belge işinin durumu.
+///
+/// Belge okuma 30-150 saniye sürdüğü için uçlar sonucu değil bu kaydı döndürüyor:
+/// istek hemen kapanıyor, kullanıcı ekranda kilitli kalmıyor, iş bitince haber geliyor.
+/// </summary>
+/// <param name="Kind">"extract" (hedef şema belli) ya da "discover" (şemasız keşif).</param>
+/// <param name="Status">queued → running → succeeded | failed.</param>
+/// <param name="Result">Yalnız bittiğinde dolu. İçeriği türe göre değişir: çıkarım
+/// sonucu ya da keşif sonucu. İstemciye saklandığı biçimde geçiriliyor.</param>
+/// <param name="ConfirmedAt">Dolu ise bu belgeden çıkan satırlar zaten kaydedilmiş;
+/// ekran ikinci kaydetmeyi kapatır ve sunucu da reddeder.</param>
+public record DocumentJobResponse(
+    Guid Id,
+    string Kind,
+    string Status,
+    Guid? DatasetId,
+    string? FileName,
+    string? Error,
+    DateTime CreatedAt,
+    DateTime? StartedAt,
+    DateTime? CompletedAt,
+    DateTime? ConfirmedAt,
+    JsonElement? Result);
+
+/// <summary>
+/// İş kaydını istemciye giden biçime çevirir.
+///
+/// Sonuç JSON'u YENİDEN SERİLEŞTİRİLMİYOR: metin olarak saklanan gövde JsonElement'e
+/// ayrıştırılıp olduğu gibi geçiriliyor. Aksi hâlde aynı sözleşme iki kez tarif edilir
+/// ve iki tarafın biçimi zamanla ayrışırdı.
+/// </summary>
+public static class DocumentJobMapper
+{
+    public static DocumentJobResponse ToResponse(DocumentJob job, bool includeResult = true)
+    {
+        JsonElement? result = null;
+
+        if (includeResult && !string.IsNullOrWhiteSpace(job.ResultJson))
+            result = JsonSerializer.Deserialize<JsonElement>(job.ResultJson);
+
+        return new DocumentJobResponse(
+            job.Id,
+            job.Kind,
+            job.Status,
+            job.DatasetId,
+            job.FileName,
+            job.Error,
+            job.CreatedAt,
+            job.StartedAt,
+            job.CompletedAt,
+            job.ConfirmedAt,
+            result);
+    }
+}
+
+/// <summary>
+/// Aday veri setiyle eşleşme. Puan tek başına yeterli değil: kullanıcının kararı
 /// verebilmesi için NEYİN eşleştiği, neyin eksik ve neyin fazla kaldığı da gönderiliyor.
 /// </summary>
 /// <param name="Score">0-1 arası benzerlik (Dice). Eşiğin altındakiler hiç gönderilmez.</param>

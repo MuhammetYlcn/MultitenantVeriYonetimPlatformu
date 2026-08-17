@@ -35,7 +35,13 @@ public class ApiFactory : WebApplicationFactory<Program>
             {
                 ["ConnectionStrings:DefaultConnection"] = csb.ConnectionString,
                 ["PlatformAdmin:Email"] = PlatformAdminEmail,
-                ["PlatformAdmin:Password"] = PlatformAdminPassword
+                ["PlatformAdmin:Password"] = PlatformAdminPassword,
+
+                // Arka plan işçisi testlerde ÇALIŞMAZ. Kuyruğa alma yine gerçekleşir, ama
+                // işi kimin ne zaman çalıştıracağına test karar verir (çalıştırıcı elle
+                // tetiklenir). Açık bırakılsaydı testler zamanlamaya bağımlı hâle gelir,
+                // üstelik gerçek görsel modeli çağırmaya kalkarlardı.
+                ["Hangfire:RunServer"] = "false"
             });
         });
     }
@@ -53,7 +59,7 @@ public class ApiFactory : WebApplicationFactory<Program>
         await db.Database.ExecuteSqlRawAsync(
             """
             TRUNCATE TABLE "Datasets", "RefreshTokens", "AccountTokens", "Users", "Tenants",
-                           "PlatformAdmins", "PlatformAuditLogs" CASCADE
+                           "PlatformAdmins", "PlatformAuditLogs", "DocumentJobs" CASCADE
             """);
 
         var platformAuth = scope.ServiceProvider.GetRequiredService<IPlatformAuthService>();

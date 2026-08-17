@@ -1,10 +1,14 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
+using Hangfire;
+using Hangfire.PostgreSql;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using VeriYonetim.Api.Data;
+using VeriYonetim.Api.Hubs;
 using VeriYonetim.Api.Middleware;
 using VeriYonetim.Api.Services;
 
@@ -24,7 +28,12 @@ builder.Services.AddScoped<IDatasetImportService, DatasetImportService>();
 builder.Services.AddScoped<IDatasetQueryExecutor, DatasetQueryExecutor>();
 builder.Services.AddScoped<IRelationDetector, RelationDetector>();
 builder.Services.AddHttpContextAccessor();
-builder.Services.AddScoped<ITenantContext, TenantContext>();
+
+// Tek örnek, iki arayüz: okuma sözleşmesi her yere enjekte ediliyor, yazma yeteneği
+// (arka plan işinin tenant'ı elle kurması) yalnız ona ihtiyacı olana veriliyor.
+builder.Services.AddScoped<TenantContext>();
+builder.Services.AddScoped<ITenantContext>(sp => sp.GetRequiredService<TenantContext>());
+builder.Services.AddScoped<ITenantContextSetter>(sp => sp.GetRequiredService<TenantContext>());
 
 // Örnek soru üretimi SINGLETON: sonuçlar önbellekte tutuluyor ve üretim arka planda
 // çalışıyor (istek ömründen uzun), o yüzden scoped olamaz.
@@ -53,6 +62,56 @@ builder.Services.AddHttpClient<IOllamaVisionClient, OllamaVisionClient>((sp, cli
 });
 builder.Services.AddScoped<IDocumentVisionService, DocumentVisionService>();
 
+// ---------------------------------------------------------------------------
+// Asenkron belge işleme.
+//
+// Neden gerekli: bir belgenin okunması 30-150 saniye sürüyor (görsel model, tek GPU) ve
+// çok sayfalı belgede bu süre katlanıyor. Bu kadar uzun bir işi HTTP isteğinin içinde
+// tutmak üç yerde kırılır — vekil sunucu bağlantıyı keser, kullanıcı sekmeyi kapatınca
+// iş kaybolur, ekran o süre boyunca kilitli kalır. Kuyruk bunu tersine çevirir: istek
+// işi kaydeder ve hemen döner, sonuç hazır olunca kullanıcıya bildirilir.
+// ---------------------------------------------------------------------------
+builder.Services.AddHangfire(config => config
+    .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
+    .UseSimpleAssemblyNameTypeSerializer()
+    .UseRecommendedSerializerSettings()
+    // Hangfire kendi tablolarını AYRI bir şemada kurar: uygulama şeması onun tablolarıyla
+    // karışmasın, EF göçleri de onları görüp yönetmeye kalkmasın.
+    .UsePostgreSqlStorage(options => options.UseNpgsqlConnection(
+        builder.Configuration.GetConnectionString("DefaultConnection"))));
+
+builder.Services.AddScoped<IDocumentJobRunner, DocumentJobRunner>();
+builder.Services.AddScoped<IJobNotifier, SignalRJobNotifier>();
+builder.Services.AddScoped<IDocumentJobCleaner, DocumentJobCleaner>();
+
+// İşçi (worker) sayısı BİR — ve bu ayarın gerekçesi donanımda:
+//
+// Görsel model tek ekran kartında çalışıyor ve 8 GB'ın tamamına yakınını kullanıyor
+// (bkz. VisionOptions.NumCtx = 4096, ölçülmüş değer). İki belgeyi aynı anda işlemek
+// kuyruğu hızlandırmaz, çünkü darboğaz kuyruk değil GPU; ikisi birden sığmadığında model
+// katmanları belleğe girip çıkmaya başlar ve TOPLAM süre uzar. Sıraya dizmek, aynı işi
+// öngörülebilir sürede bitirir.
+//
+// Testlerde sunucu açılmaz (Hangfire:RunServer = false): iş kuyruğa girer ama arka planda
+// kendiliğinden çalışmaz, testler çalıştırıcıyı elle tetikleyip sonucu deterministik
+// olarak sınar. Aksi hâlde testler zamanlamaya bağımlı hâle gelirdi.
+if (builder.Configuration.GetValue("Hangfire:RunServer", true))
+    builder.Services.AddHangfireServer(options =>
+    {
+        options.WorkerCount = builder.Configuration.GetValue("Hangfire:WorkerCount", 1);
+        options.Queues = new[] { "documents", "default" };
+    });
+
+// Canlı bildirim: iş bitince kullanıcıya haber verilir. Yoklama (polling) yerine seçildi,
+// çünkü izleyiciler adımı da aynı altyapıya binecek — kurulum bir kez ödeniyor.
+//
+// Alan adları AÇIKÇA camelCase'e sabitleniyor: REST uçları bu biçimde konuşuyor ve
+// istemci tek bir ayrıştırma kuralı bilmeli. Varsayılana bırakılsaydı aynı istemci
+// kodu iki farklı yazımla uğraşırdı.
+builder.Services.AddSignalR()
+    .AddJsonProtocol(options =>
+        options.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase);
+
 var jwt = builder.Configuration.GetSection("Jwt");
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -67,6 +126,26 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
             IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt["Key"]!))
+        };
+
+        // SignalR bağlantısı için token'ı adres satırından da kabul et.
+        //
+        // Sebebi tarayıcı kısıtı: WebSocket el sıkışmasını başlatan JavaScript API'si özel
+        // başlık (Authorization) göndermeye izin vermez. SignalR bu yüzden token'ı sorgu
+        // dizesinde taşır. Kabul YALNIZ /hubs altında geçerli — normal API uçlarında
+        // token'ın adreste taşınması onu sunucu günlüklerine ve tarayıcı geçmişine
+        // düşürürdü.
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var token = context.Request.Query["access_token"];
+                if (!string.IsNullOrEmpty(token) &&
+                    context.HttpContext.Request.Path.StartsWithSegments("/hubs"))
+                    context.Token = token;
+
+                return Task.CompletedTask;
+            }
         };
     });
 
@@ -119,6 +198,10 @@ app.UseAuthorization();
 
 app.MapControllers();
 
+// Canlı bildirim kanalı. Token'ı sorgu dizesinden okuma izni yalnız bu yol için verildi
+// (bkz. JwtBearerEvents yukarıda).
+app.MapHub<JobsHub>("/hubs/jobs");
+
 // Açılışta migration + eksik tenant şemalarını tamamlama (Spring ApplicationRunner
 // karşılığı). AppDbContext scoped olduğundan istek dışında elle scope açmak gerekir.
 using (var scope = app.Services.CreateScope())
@@ -137,6 +220,16 @@ using (var scope = app.Services.CreateScope())
     var platformAuth = scope.ServiceProvider.GetRequiredService<IPlatformAuthService>();
     await platformAuth.EnsureSeedAdminAsync();
 }
+
+// Belge işlerinin bakımı: asılı kalmış işleri kapatır, onaylanmamış görüntüleri ve eski
+// kayıtları düşürür (bkz. DocumentJobCleaner). Saatlik yeterli — temizlediği şeylerin
+// hiçbiri acil değil, ama biriktiğinde veritabanını şişirirler.
+//
+// Yalnız Hangfire sunucusunun açık olduğu yerde kaydediliyor: testlerde işçi çalışmadığı
+// için bu kaydın bir karşılığı olmazdı.
+if (app.Configuration.GetValue("Hangfire:RunServer", true))
+    app.Services.GetRequiredService<IRecurringJobManager>()
+        .AddOrUpdate<IDocumentJobCleaner>("document-job-cleanup", c => c.CleanAsync(), Cron.Hourly);
 
 // Geliştirmede: uygulama ayağa kalkınca varsayılan tarayıcıyı Swagger'a aç.
 // (dotnet run, launchSettings'teki launchBrowser'ı dinlemez; bu o boşluğu doldurur.)
