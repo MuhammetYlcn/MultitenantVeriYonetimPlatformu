@@ -8,7 +8,6 @@ import 'ask_screen.dart';
 import 'dashboard_screen.dart';
 import 'data_table_screen.dart';
 import 'datasets_screen.dart';
-import 'document_screen.dart';
 import 'login_screen.dart';
 import 'relations_screen.dart';
 import 'users_screen.dart';
@@ -31,12 +30,14 @@ class _HomeShellState extends State<HomeShell> {
   Dataset? _selected;
 
   // Kullanıcı yönetimi yalnız Admin'e görünür → bölüm listesi role göre kurulur.
-  // Belge bölümü yazma yetkisi ister: Viewer'a gösterilmiyor (sunucu zaten 403 döner,
-  // ama tıklanınca hata veren bir menü öğesi kötü bir vitrindir).
+  //
+  // Belge bölümü buradan KALKTI: belge yükleme artık sohbet ekranındaki ataç düğmesinden
+  // başlıyor. Sebep, iki adımın farklı yerlere ait olması — yükleme bir konuşmanın
+  // içinde doğal, onaylama ise kendi geniş yüzeyini isteyen ayrı bir iş. Onay ekranı
+  // duruyor, sohbetin üzerinde katman olarak açılıyor (bkz. DocumentReviewPage).
   List<String> get _keys => [
         'ask',
         'datasets',
-        if (ApiService.canWrite) 'document',
         'relations',
         'dashboard',
         if (ApiService.isAdmin) 'users',
@@ -54,12 +55,6 @@ class _HomeShellState extends State<HomeShell> {
           activeIcon: Icons.folder,
           label: 'Veri setleri',
         ),
-        if (ApiService.canWrite)
-          const ShellDestination(
-            icon: Icons.document_scanner_outlined,
-            activeIcon: Icons.document_scanner,
-            label: 'Belgeden veri',
-          ),
         const ShellDestination(
           icon: Icons.link_outlined,
           activeIcon: Icons.link,
@@ -128,7 +123,6 @@ class _HomeShellState extends State<HomeShell> {
     return switch (key) {
       'ask' => ['Soru sor'],
       'datasets' => ['Veri setleri', ?name],
-      'document' => ['Belgeden veri'],
       'relations' => ['İlişkiler'],
       'dashboard' => ['Panel', ?name],
       _ => ['Kullanıcılar'],
@@ -149,16 +143,6 @@ class _HomeShellState extends State<HomeShell> {
           dataset: selected,
           onBack: _closeDataset,
           onOpenDashboard: _openDashboard,
-        );
-
-      case 'document':
-        // Kaydetme sonrası veri setleri bölümüne geçiyoruz: kullanıcı yazdığı satırları
-        // görsün. Aksi halde "kaydedildi" mesajından sonra ekran boş bir forma dönerdi.
-        return DocumentPage(
-          onSaved: () => setState(() {
-            _selected = null;
-            _index = _keys.indexOf('datasets');
-          }),
         );
 
       case 'relations':

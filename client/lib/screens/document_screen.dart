@@ -1,71 +1,101 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
 import '../api_service.dart';
-import '../job_hub.dart';
-import '../platform/platform.dart';
 import '../theme/app_theme.dart';
 import '../widgets/ui.dart';
 
-// Belgeden veri girişi — CSV/Excel'in yanındaki ÜÇÜNCÜ kapı.
+// Belgeden veri girişinin ONAY adımı — sohbet ekranının üzerinde açılan katman.
 //
 // Ekranın varlık sebebi tek cümleyle: model %100 doğru okumuyor, o yüzden okuduğu şey
 // doğrudan kaydedilmiyor. Kullanıcı belgeyi ve çıkarımı YAN YANA görüp düzeltiyor,
 // kaydetme kararını o veriyor. Ölçümde alan doğruluğu 8/8'e kadar çıktı ama kalem
 // tablosunda %94'te kaldı; kalan %6 gözle yakalanmazsa sessizce veriye karışır.
 //
-// Akış iki yoldan biriyle başlar:
-//   hedef set BELLİ  → şemalı çıkarım (istem şemayı dayatır, görüntüye başlık şeridi eklenir)
-//   hedef set BELİRSİZ → keşif geçişi (adları model seçer, sunucu var olan setlerle eşleştirir)
+// Neden ayrı bir menü öğesi değil de katman: belge yükleme artık sohbetteki ataç
+// düğmesinden başlıyor, çünkü insanlar bir konuşma alanı görünce belgeyi oraya bırakıyor.
+// Ama ONAYLAMA sohbete gömülemez — dikkat isteyen, geniş alan isteyen, yavaş bir iştir;
+// sohbet balonuna sıkıştırılsa hem sıkışık görünür hem de akış kaydıkça gözden kaybolur.
+// Bu yüzden giriş sohbette, onay kendi tam genişlikteki yüzeyinde duruyor.
 
-// Okuma artık İSTEĞİN İÇİNDE değil, arka planda oluyor. Ekranın taşıdığı sonuç bu:
-// "reading" adımı bir bekleme değil, bir izleme durumudur — kullanıcı istediği an başka
-// ekrana geçebilir, iş sunucuda devam eder ve geri döndüğünde listede bulunur.
-enum _Step { pick, reading, review, saving }
+/// Katmanın çağırana döndürdüğü sonuç.
+///
+/// İki farklı çıkış var: satırlar kaydedildi ya da belge yeni bir işle yeniden okunmaya
+/// verildi. Sohbet ekranı buna bakıp akışına ya "N satır eklendi" satırı ya da yeni bir
+/// iş kartı düşürüyor.
+class DocumentReviewResult {
+  final int? savedRows;
+  final String? datasetId;
+  final String? datasetName;
 
-class DocumentPage extends StatefulWidget {
-  /// Kaydetme başarılıysa çağrılır — veri seti listesi/tablosu tazelensin diye.
-  final VoidCallback? onSaved;
+  /// Keşiften çıkan öneri seçilip belge şemayla YENİDEN okutulduysa yeni işin kimliği.
+  final String? requeuedJobId;
 
-  const DocumentPage({super.key, this.onSaved});
+  /// Belge atıldıysa true: kart akıştan kaldırılır.
+  final bool discarded;
 
-  @override
-  State<DocumentPage> createState() => _DocumentPageState();
+  const DocumentReviewResult.saved({
+    required this.savedRows,
+    required this.datasetId,
+    required this.datasetName,
+  })  : requeuedJobId = null,
+        discarded = false;
+
+  const DocumentReviewResult.requeued(this.requeuedJobId)
+      : savedRows = null,
+        datasetId = null,
+        datasetName = null,
+        discarded = false;
+
+  const DocumentReviewResult.discarded()
+      : savedRows = null,
+        datasetId = null,
+        datasetName = null,
+        requeuedJobId = null,
+        discarded = true;
 }
 
-class _DocumentPageState extends State<DocumentPage> {
-  _Step _step = _Step.pick;
+class DocumentReviewPage extends StatefulWidget {
+  final String jobId;
 
-  List<Dataset> _datasets = [];
-  bool _loadingDatasets = true;
+  /// Belge tarayıcıda hâlâ elde ise baytları. Sunucudaki kopya gösterime yetecek boya
+  /// indirilmiş olduğundan, şemayla YENİDEN okutma yalnız bu varken yapılabiliyor.
+  final Uint8List? localBytes;
+  final String? localFileName;
 
-  /// null → keşif geçişi. Kullanıcı "hangi sete ait bilmiyorum" dediğinde böyle kalır.
+  const DocumentReviewPage({
+    super.key,
+    required this.jobId,
+    this.localBytes,
+    this.localFileName,
+  });
+
+  @override
+  State<DocumentReviewPage> createState() => _DocumentReviewPageState();
+}
+
+class _DocumentReviewPageState extends State<DocumentReviewPage> {
+  bool _loading = true;
+  bool _saving = false;
+
+  DocumentExtraction? _result;
+  String? _fileName;
+
+  /// Hedef veri seti. Keşif işinde başta boş: hangi sete yazılacağına bu ekranda,
+  /// sistemin önerilerine bakılarak karar veriliyor.
   String? _targetId;
 
-  PickedFile? _file;
-  DocumentExtraction? _result;
-
-  /// İzlenen işin kimliği. Kullanıcı ekrandan çıkıp dönerse elimizde kalan tek şey bu.
-  String? _jobId;
-
-  /// Son işler — devam edenler ve biten ama henüz onaylanmayanlar.
-  List<DocumentJob> _jobs = [];
-
-  /// Onay ekranındaki belge görüntüsü. Yeni yüklemede yereldeki dosyadan, listeden
-  /// açılan bir işte sunucudan gelir.
   Uint8List? _imageBytes;
-
-  /// Açık iş daha önce kaydedilmiş mi? İş listesi kalıcı olduğu için kullanıcı onayladığı
-  /// bir belgeyi yeniden açabiliyor; ikinci kez kaydetmek aynı satırları tekrar eklerdi.
   bool _alreadyConfirmed = false;
 
-  StreamSubscription<JobNotification>? _hubSub;
+  /// Hedef setin adı. Kaydetme sonrası sohbete düşen satırda kullanılıyor: "veri setine
+  /// 8 satır eklendi" demek, kullanıcının hangi sete yazdığını hatırlamasını gerektirirdi.
+  String? _targetName;
 
-  /// Tablonun DÜZENLENEBİLİR kopyası. Sunucudan gelen `_result.rows` dokunulmadan
-  /// duruyor; kullanıcının neyi değiştirdiği böyle görülebiliyor.
+  /// Tablonun DÜZENLENEBİLİR kopyası. Sunucudan gelen satırlar dokunulmadan duruyor;
+  /// kullanıcının neyi değiştirdiği böyle görülebiliyor.
   List<String> _columns = [];
   List<List<String>> _rows = [];
 
@@ -74,199 +104,97 @@ class _DocumentPageState extends State<DocumentPage> {
   @override
   void initState() {
     super.initState();
-    _loadDatasets();
-    _loadJobs();
-
-    // Canlı kanal bir KOLAYLIK: kurulamazsa ekran çalışmaya devam eder, kullanıcı
-    // durumu elle tazeler. Bu yüzden bağlantı beklenmiyor ve hatası yutuluyor.
-    JobHub.connect();
-    _hubSub = JobHub.updates.listen(_onJobNotification);
+    _imageBytes = widget.localBytes;
+    _fileName = widget.localFileName;
+    _load();
   }
 
-  @override
-  void dispose() {
-    _hubSub?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _loadJobs() async {
+  Future<void> _load() async {
     try {
-      final jobs = await ApiService.listDocumentJobs();
-      if (!mounted) return;
-      setState(() => _jobs = jobs);
-    } catch (_) {
-      // İş listesi ekranın çalışması için şart değil; sessizce geçiliyor.
-    }
-  }
-
-  // Bildirim geldiğinde sonucun kendisi taşınmıyor, yalnız "durum değişti" haberi.
-  // İzlenen iş bittiyse tam kayıt çekilir; değilse liste tazelenir.
-  void _onJobNotification(JobNotification note) {
-    if (!mounted) return;
-
-    if (note.jobId == _jobId && note.isFinished) {
-      _openJob(note.jobId);
-      return;
-    }
-
-    _loadJobs();
-  }
-
-  Future<void> _loadDatasets() async {
-    try {
-      final list = await ApiService.getDatasets();
-      if (!mounted) return;
-      setState(() {
-        _datasets = list;
-        _loadingDatasets = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _loadingDatasets = false);
-    }
-  }
-
-  // ---- adım 1: belgeyi oku ----
-
-  Future<void> _pickAndQueue() async {
-    PickedFile? file;
-    try {
-      file = await pickImageFile();
-    } catch (e) {
-      setState(() => _error = e.toString());
-      return;
-    }
-    if (file == null) return; // kullanıcı iptal etti
-
-    setState(() {
-      _file = file;
-      _imageBytes = file!.bytes;
-      _error = null;
-    });
-
-    await _queue();
-  }
-
-  // Belgeyi KUYRUĞA verir. İstek saniyeler içinde döner; okuma arka planda sürer.
-  Future<void> _queue() async {
-    final file = _file!;
-    try {
-      final job = _targetId == null
-          ? await ApiService.queueDiscoverDocument(file.bytes, file.name)
-          : await ApiService.queueExtractDocument(_targetId!, file.bytes, file.name);
-
-      if (!mounted) return;
-      setState(() {
-        _jobId = job.id;
-        _step = _Step.reading;
-      });
-
-      _loadJobs();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e.toString();
-        _step = _Step.pick;
-      });
-    }
-  }
-
-  /// Bir işin son durumunu okur; bittiyse onay ekranını açar.
-  ///
-  /// Hem bildirim geldiğinde hem "yenile" düğmesinde hem de listeden bir işe tıklandığında
-  /// çalışan tek yol. Durumun tek kaynağı sunucudaki kayıt.
-  Future<void> _openJob(String jobId) async {
-    try {
-      final job = await ApiService.getDocumentJob(jobId);
+      final job = await ApiService.getDocumentJob(widget.jobId);
       if (!mounted) return;
 
       if (job.status == 'failed') {
         setState(() {
           _error = job.error ?? 'Belge işlenemedi.';
-          _step = _Step.pick;
-          _jobId = null;
+          _loading = false;
         });
-        _loadJobs();
         return;
       }
 
-      if (!job.isFinished) {
-        // Henüz sürüyor: izlemeye devam.
+      final extraction = job.extraction;
+      if (extraction == null) {
         setState(() {
-          _jobId = jobId;
-          _step = _Step.reading;
+          _error = 'Bu belgenin okunması henüz tamamlanmadı.';
+          _loading = false;
         });
         return;
       }
 
-      final result = job.extraction!;
-
-      // Görüntü elimizde yoksa (kullanıcı listeden eski bir işi açtı) sunucudan çekilir.
-      // Onaylanmış işlerde silinmiş olabilir; o zaman tablo görüntüsüz gösterilir.
+      // Görüntü elde yoksa (sohbet yenilenmiş ya da iş başka oturumdan geliyor)
+      // sunucudan çekiliyor. Onaylanmış işte silinmiş olabilir; o zaman tablo
+      // görüntüsüz gösteriliyor.
       var image = _imageBytes;
-      if (image == null || _jobId != jobId) {
-        image = await ApiService.getDocumentJobImage(jobId);
+      image ??= await ApiService.getDocumentJobImage(widget.jobId);
+
+      // Hedef seti belliyse adı da alınıyor: kaydetme sonrası mesajda kullanılacak.
+      // Ad, işin kendisinde taşınmıyor (kimliği taşıyor) ve set adı sonradan değişebilir.
+      String? targetName;
+      if (job.datasetId != null) {
+        try {
+          final datasets = await ApiService.getDatasets();
+          targetName = datasets
+              .where((d) => d.id == job.datasetId)
+              .map((d) => d.name)
+              .firstOrNull;
+        } catch (_) {
+          // Ad bulunamazsa akış durmaz; mesaj sette adı olmadan yazılır.
+        }
       }
 
       if (!mounted) return;
       setState(() {
-        _jobId = jobId;
-        _targetId = job.datasetId ?? (job.isDiscovery ? null : _targetId);
-        _result = result;
+        _result = extraction;
+        _fileName = _fileName ?? job.fileName;
+        _targetId = job.datasetId;
+        _targetName = targetName;
         _imageBytes = image;
         _alreadyConfirmed = job.isConfirmed;
-        _columns = List.of(result.columns);
-        _rows = result.rows.map(List<String>.of).toList();
-        _step = _Step.review;
+        _columns = List.of(extraction.columns);
+        _rows = extraction.rows.map(List<String>.of).toList();
+        _loading = false;
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.toString());
+      setState(() {
+        _error = e.toString();
+        _loading = false;
+      });
     }
   }
-
-  // Keşiften çıkan öneriye tıklanınca belge o setin ŞEMASIYLA YENİDEN okunur.
-  //
-  // Neden ikinci bir model çağrısı göze alınıyor: ilk geçişte model adları kendi seçti ve
-  // görüntüye başlık şeridi eklenemedi (şerit şemadan üretiliyor). Şema belli olunca
-  // ikisi de devreye giriyor; ölçümde kalem doğruluğu %51'den %94'e bu şekilde çıkmıştı.
-  //
-  // İkinci okuma da kuyruğa giriyor — birinciden farkı yok, süresi de aynı.
-  Future<void> _reReadWithSchema(String datasetId) async {
-    if (_file == null) {
-      // Görüntü yerelde yok (iş listeden açılmış): şemalı okuma için belge yeniden
-      // seçilmeli. Sunucudaki kopya küçültülmüş olduğundan onu geri gönderip ikinci kez
-      // okutmak, ölçülenden düşük çözünürlükle çalışmak olurdu.
-      setState(() => _error =
-          'Bu belgeyi şemaya göre yeniden okutmak için dosyayı tekrar seçmen gerekiyor.');
-      return;
-    }
-
-    setState(() => _targetId = datasetId);
-    await _queue();
-  }
-
-  // ---- adım 2: kaydet ----
 
   Future<void> _save() async {
     setState(() {
-      _step = _Step.saving;
+      _saving = true;
       _error = null;
     });
 
     try {
       final target = _targetId;
       final int saved;
+      String? datasetName;
 
       if (target != null) {
-        // jobId gönderiliyor: sunucu satırları yazdıktan sonra belge görüntüsünü siliyor.
-        saved = await ApiService.confirmDocument(target, _columns, _rows, jobId: _jobId);
+        // jobId gönderiliyor: sunucu satırları yazdıktan sonra belge görüntüsünü siliyor
+        // ve işi onaylanmış olarak damgalıyor (aynı belge ikinci kez kaydedilemez).
+        saved = await ApiService.confirmDocument(target, _columns, _rows, jobId: widget.jobId);
       } else {
         // Yeni set: tabloyu CSV'ye çevirip VAR OLAN yükleme yolundan geçiriyoruz.
         // Böylece şema algılama ve satır doğrulama, dosyadan gelen veriyle birebir
         // aynı koddan geçiyor — belgeye özel ikinci bir içe aktarma yolu doğmuyor.
+        datasetName = _result?.suggestedName ?? 'Belgeden gelen veriler';
         await ApiService.uploadDataset(
-          name: _result?.suggestedName ?? 'Belgeden gelen veriler',
+          name: datasetName,
           bytes: utf8.encode(_toCsv()),
           filename: 'belge.csv',
         );
@@ -274,16 +202,92 @@ class _DocumentPageState extends State<DocumentPage> {
       }
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$saved satır kaydedildi.')),
-      );
-      widget.onSaved?.call();
-      _reset();
+      Navigator.of(context).pop(DocumentReviewResult.saved(
+        savedRows: saved,
+        datasetId: target,
+        datasetName: datasetName ?? _targetName,
+      ));
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _error = e.toString();
-        _step = _Step.review;
+        _saving = false;
+      });
+    }
+  }
+
+  /// Belgeyi ATAR: iş kaydı ve saklanan görüntü silinir.
+  ///
+  /// Bu yol olmadan yanlış yüklenen bir belge kalıcı olarak "kontrol bekliyor" durumunda
+  /// kalıyordu; kullanıcının elinde onu ortadan kaldıracak hiçbir araç yoktu. Kapatmak
+  /// (Vazgeç) işi bitirmez, yalnız ekranı kapatır — ikisi farklı şeyler.
+  Future<void> _discard() async {
+    final onay = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Belge atılsın mı?'),
+        content: const Text(
+            'Okunan tablo ve belge görüntüsü silinecek. Veri setine yazılmış satırlar '
+            'varsa onlar kalır.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Vazgeç')),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: AppColors.danger),
+            child: const Text('At'),
+          ),
+        ],
+      ),
+    );
+
+    if (onay != true || !mounted) return;
+
+    setState(() => _saving = true);
+    try {
+      await ApiService.deleteDocumentJob(widget.jobId);
+      if (!mounted) return;
+      Navigator.of(context).pop(const DocumentReviewResult.discarded());
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _saving = false;
+      });
+    }
+  }
+
+  // Keşiften çıkan öneriye tıklanınca belge o setin ŞEMASIYLA YENİDEN okunur.
+  //
+  // Neden ikinci bir model çağrısı göze alınıyor: ilk geçişte model adları kendi seçti ve
+  // görüntüye başlık şeridi eklenemedi (şerit şemadan üretiliyor). Şema belli olunca ikisi
+  // de devreye giriyor; ölçümde kalem doğruluğu %51'den %94'e bu şekilde çıkmıştı.
+  Future<void> _reReadWithSchema(String datasetId) async {
+    final bytes = widget.localBytes;
+    if (bytes == null) {
+      // Sunucudaki kopya gösterim için küçültülmüş; onu geri gönderip okutmak, ölçülenden
+      // düşük çözünürlükle çalışmak olurdu.
+      setState(() => _error =
+          'Bu belgeyi şemaya göre yeniden okutmak için dosyayı tekrar yüklemen gerekiyor.');
+      return;
+    }
+
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+
+    try {
+      final job = await ApiService.queueExtractDocument(
+          datasetId, bytes, widget.localFileName ?? 'belge.jpg');
+
+      if (!mounted) return;
+      Navigator.of(context).pop(DocumentReviewResult.requeued(job.id));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _saving = false;
       });
     }
   }
@@ -299,177 +303,60 @@ class _DocumentPageState extends State<DocumentPage> {
     return buffer.toString();
   }
 
-  void _reset() {
-    setState(() {
-      _step = _Step.pick;
-      _file = null;
-      _result = null;
-      _imageBytes = null;
-      _jobId = null;
-      _alreadyConfirmed = false;
-      _columns = [];
-      _rows = [];
-      _error = null;
-    });
-    _loadJobs();
-  }
-
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const PageHeader(
-          title: 'Belgeden veri',
-          subtitle: 'Fatura, fiş veya makbuz fotoğrafını okut; kaydetmeden önce kontrol et.',
+    return Scaffold(
+      backgroundColor: AppColors.surface,
+      appBar: AppBar(
+        title: Text(_fileName ?? 'Belgeyi kontrol et'),
+        // Katmandan çıkış her zaman açık: kullanıcı kaydetmeye zorlanmıyor, iş listede
+        // duruyor ve sonra dönülebiliyor.
+        leading: IconButton(
+          onPressed: _saving ? null : () => Navigator.of(context).pop(),
+          icon: const Icon(Icons.close),
+          tooltip: 'Kapat',
         ),
-        const SizedBox(height: 16),
-        if (_error != null) ...[
-          _ErrorBanner(message: _error!, onClose: () => setState(() => _error = null)),
-          const SizedBox(height: 12),
-        ],
-        Expanded(child: _body),
-      ],
-    );
-  }
-
-  Widget get _body => switch (_step) {
-        _Step.pick => _picker,
-        _Step.reading => _waiting,
-        _ => _review,
-      };
-
-  // ---- ekran: arka planda okunuyor ----
-
-  // Eski hâlinde bu bir kilitli bekleme ekranıydı: istek açık durduğu için kullanıcı
-  // hiçbir şey yapamıyordu. Artık iş sunucuda; ekran yalnız izliyor ve bunu açıkça
-  // söylüyor — kullanıcının burada beklemek zorunda olmadığını bilmesi gerekiyor.
-  Widget get _waiting => SingleChildScrollView(
-        child: SectionCard(
-          title: 'Belge okunuyor',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Row(children: [
-                SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-                SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    'Görsel model belgeyi okuyor. Bu işlem belge başına 30-150 saniye '
-                    'sürebilir.',
-                    style: TextStyle(height: 1.5),
-                  ),
-                ),
-              ]),
-              const SizedBox(height: 12),
-              const Text(
-                'Beklemek zorunda değilsin: işlem sunucuda sürüyor. Başka bir ekrana '
-                'geçebilirsin, bittiğinde haber verilecek ve sonuç bu ekranda seni '
-                'bekliyor olacak.',
-                style: TextStyle(color: AppColors.muted, height: 1.5),
-              ),
-              const SizedBox(height: 20),
-              Row(children: [
-                OutlinedButton.icon(
-                  onPressed: _jobId == null ? null : () => _openJob(_jobId!),
-                  icon: const Icon(Icons.refresh, size: 18),
-                  label: const Text('Durumu yenile'),
-                ),
-                const SizedBox(width: 12),
-                TextButton(onPressed: _reset, child: const Text('Listeye dön')),
-              ]),
-            ],
-          ),
-        ),
-      );
-
-  // ---- ekran: kaynak seçimi ----
-
-  Widget get _picker {
-    if (_loadingDatasets) return const LoadingView();
-
-    return SingleChildScrollView(
-      child: SectionCard(
-        title: 'Belge nereye yazılacak?',
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Hedef veri setini seçersen belge o setin kolonlarına göre okunur ve '
-              'doğruluk belirgin biçimde artar. Emin değilsen boş bırak: sistem belgeyi '
-              'okuyup hangi sete uyduğunu kendisi önerir.',
-              style: TextStyle(color: AppColors.muted, height: 1.5),
-            ),
-            const SizedBox(height: 16),
-            DropdownButtonFormField<String?>(
-              initialValue: _targetId,
-              decoration: const InputDecoration(labelText: 'Hedef veri seti'),
-              items: [
-                const DropdownMenuItem(
-                  value: null,
-                  child: Text('Bilmiyorum — sistem önersin'),
-                ),
-                for (final d in _datasets)
-                  DropdownMenuItem(value: d.id, child: Text(d.name)),
-              ],
-              onChanged: (v) => setState(() => _targetId = v),
-            ),
-            const SizedBox(height: 20),
-            FilledButton.icon(
-              onPressed: _pickAndQueue,
-              icon: const Icon(Icons.upload_file, size: 18),
-              label: const Text('Belge görüntüsü seç'),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              '.jpg, .png veya .webp · en fazla 15 MB',
-              style: TextStyle(fontSize: 12, color: AppColors.muted),
-            ),
-            if (_jobs.isNotEmpty) ...[
-              const SizedBox(height: 28),
-              const Divider(),
+            if (_error != null) ...[
+              _ErrorBanner(message: _error!, onClose: () => setState(() => _error = null)),
               const SizedBox(height: 12),
-              _JobList(jobs: _jobs, onOpen: _openJob, onRefresh: _loadJobs),
             ],
+            Expanded(child: _body),
           ],
         ),
       ),
     );
   }
 
-  // ---- ekran: onay ----
+  Widget get _body {
+    if (_loading) return const LoadingView();
+    if (_result == null) return const SizedBox.shrink();
 
-  Widget get _review {
     final result = _result!;
 
     // Belge ve çıkarım YAN YANA duruyor. Dar ekranda alt alta düşüyor; ama geniş ekranda
     // yan yana olması şart: kullanıcı eksik satırı ancak belgeye bakarak fark eder.
     return LayoutBuilder(builder: (context, constraints) {
       final wide = constraints.maxWidth > 1000;
-      final image = _DocumentPreview(
-        bytes: _imageBytes,
-        name: _file?.name ?? _jobs
-            .where((j) => j.id == _jobId)
-            .map((j) => j.fileName ?? 'Belge')
-            .firstOrNull ??
-            'Belge',
-      );
+      final image = _DocumentPreview(bytes: _imageBytes, name: _fileName ?? 'Belge');
       final table = _ReviewPanel(
         result: result,
         columns: _columns,
         rows: _rows,
         targetId: _targetId,
-        saving: _step == _Step.saving,
+        saving: _saving,
         alreadyConfirmed: _alreadyConfirmed,
         onCellChanged: (r, c, v) => setState(() => _rows[r][c] = v),
         onRowRemoved: (r) => setState(() => _rows.removeAt(r)),
         onPickSuggestion: _reReadWithSchema,
         onSave: _rows.isEmpty ? null : _save,
-        onCancel: _reset,
+        onCancel: () => Navigator.of(context).pop(),
+        onDiscard: _discard,
       );
 
       if (!wide) {
@@ -526,73 +413,20 @@ class _DocumentPreview extends StatelessWidget {
                 ),
               ]),
             )
-          : ClipRRect(
-              borderRadius: BorderRadius.circular(AppRadius.control),
-              // InteractiveViewer: fişin küçük yazısı ekranda okunmuyor; kullanıcı çıkarımı
-              // doğrulayabilmek için belgeye yakınlaşabilmeli.
-              child: InteractiveViewer(
-                maxScale: 6,
-                child: Image.memory(data, fit: BoxFit.contain),
+          // Expanded ŞART: kart sınırlı yükseklikte duruyor ama görüntü doğal boyutunu
+          // almaya çalışıyor. Dikey uzun bir faturada bu, kartın altından taşan bir
+          // görüntü demek oluyordu (ölçüldü: 244 piksel taşma).
+          : Expanded(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(AppRadius.control),
+                // InteractiveViewer: fişin küçük yazısı ekranda okunmuyor; kullanıcı
+                // çıkarımı doğrulayabilmek için belgeye yakınlaşabilmeli.
+                child: InteractiveViewer(
+                  maxScale: 6,
+                  child: Image.memory(data, fit: BoxFit.contain),
+                ),
               ),
             ),
-    );
-  }
-}
-
-// --- son işler ---------------------------------------------------------------------------
-
-// Asenkron akışın istemci tarafındaki karşılığı. Kullanıcı belgeyi yükleyip ekrandan
-// çıkabildiği için, geri döndüğünde işini bulabileceği bir yer olmak zorunda.
-class _JobList extends StatelessWidget {
-  final List<DocumentJob> jobs;
-  final void Function(String jobId) onOpen;
-  final VoidCallback onRefresh;
-
-  const _JobList({required this.jobs, required this.onOpen, required this.onRefresh});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(children: [
-          const Text('Son belgelerin',
-              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
-          const Spacer(),
-          IconButton(
-            onPressed: onRefresh,
-            icon: const Icon(Icons.refresh, size: 18),
-            tooltip: 'Yenile',
-          ),
-        ]),
-        const SizedBox(height: 4),
-        for (final job in jobs)
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(
-              switch (job.status) {
-                'succeeded' => Icons.check_circle_outline,
-                'failed' => Icons.error_outline,
-                _ => Icons.hourglass_empty,
-              },
-              size: 20,
-              color: job.status == 'failed' ? AppColors.danger : AppColors.muted,
-            ),
-            title: Text(job.fileName ?? 'Belge',
-                maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: Text(
-              job.status == 'failed'
-                  ? (job.error ?? 'Başarısız')
-                  : '${job.statusLabel} · ${job.isDiscovery ? 'keşif' : 'şemalı okuma'}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 12),
-            ),
-            // Biten iş açılır, süren iş izlemeye alınır; ikisi de aynı yoldan geçiyor.
-            trailing: job.status == 'failed' ? null : const Icon(Icons.chevron_right, size: 18),
-            onTap: job.status == 'failed' ? null : () => onOpen(job.id),
-          ),
-      ],
     );
   }
 }
@@ -611,6 +445,7 @@ class _ReviewPanel extends StatelessWidget {
   final void Function(String datasetId) onPickSuggestion;
   final VoidCallback? onSave;
   final VoidCallback onCancel;
+  final VoidCallback onDiscard;
 
   const _ReviewPanel({
     required this.result,
@@ -624,6 +459,7 @@ class _ReviewPanel extends StatelessWidget {
     required this.onSave,
     this.alreadyConfirmed = false,
     required this.onCancel,
+    required this.onDiscard,
   });
 
   @override
@@ -705,12 +541,36 @@ class _ReviewPanel extends StatelessWidget {
                 label: Text(targetId == null ? 'Yeni veri seti oluştur' : 'Kaydet'),
               ),
               const SizedBox(width: 10),
-              TextButton(onPressed: saving ? null : onCancel, child: const Text('Vazgeç')),
+              // "Sonra bak" ile "at" farklı şeyler ve ikisi de gerekli: ilki işi olduğu
+              // yerde bırakır, ikincisi ortadan kaldırır. Yanlış belge yüklendiğinde
+              // yalnız kapatabilmek, kullanıcıyı bitmeyen bir hatırlatmaya mahkûm ederdi.
+              TextButton(
+                  onPressed: saving ? null : onCancel, child: const Text('Sonra bak')),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: saving ? null : onDiscard,
+                icon: const Icon(Icons.delete_outline, size: 18),
+                label: const Text('Bu belgeyi at'),
+                style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+              ),
             ],
           ),
         if (alreadyConfirmed) ...[
           const SizedBox(height: 12),
-          TextButton(onPressed: onCancel, child: const Text('Listeye dön')),
+          Row(
+            children: [
+              TextButton(onPressed: onCancel, child: const Text('Kapat')),
+              const Spacer(),
+              // Kaydedilmiş işte de atma açık: satırlar veri setinde kalır, silinen
+              // yalnız okuma kaydı ve görüntüsüdür.
+              TextButton.icon(
+                onPressed: saving ? null : onDiscard,
+                icon: const Icon(Icons.delete_outline, size: 18),
+                label: const Text('Kaydı sil'),
+                style: TextButton.styleFrom(foregroundColor: AppColors.muted),
+              ),
+            ],
+          ),
         ],
       ],
     );

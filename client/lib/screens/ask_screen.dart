@@ -1,10 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'; // LogicalKeyboardKey (Enter ile gönder)
 
 import '../api_service.dart';
+import '../job_hub.dart';
+import '../platform/platform.dart';
 import '../theme/app_theme.dart';
 import '../widgets/charts.dart';
 import '../widgets/ui.dart';
+import 'document_screen.dart';
 
 // Doğal dilde sorgu ekranı — sohbet biçiminde.
 //
@@ -39,6 +44,22 @@ class _Thinking extends ChatEntry {
   const _Thinking();
 }
 
+/// Sohbete bırakılan belge. Yalnız kimliği taşıyor: işin GÜNCEL durumu ayrı bir
+/// haritada duruyor, çünkü kart okunurken değişiyor (sırada → okunuyor → hazır) ve
+/// akışın geçmişi değişmez olmalı.
+class _DocumentEntry extends ChatEntry {
+  final String jobId;
+  const _DocumentEntry(this.jobId);
+}
+
+/// Onaydan sonra akışa düşen satır: "şu sete şu kadar satır eklendi".
+/// Kullanıcının bir sonraki adımı burada başlıyor — sorusunu oracıkta yazıyor.
+class _DocumentSaved extends ChatEntry {
+  final int rows;
+  final String? datasetName;
+  const _DocumentSaved(this.rows, this.datasetName);
+}
+
 class AskPage extends StatefulWidget {
   const AskPage({super.key});
 
@@ -69,6 +90,22 @@ class _AskPageState extends State<AskPage> {
   // Açık sohbet. null ise ilk soruda sunucu yeni bir sohbet açar ve kimliğini döner.
   String? _conversationId;
 
+  // --- belge işleri ---
+  //
+  // Sohbete bırakılan belgeler. Durum ayrı tutuluyor: akıştaki kart yalnız kimliği
+  // taşıyor ve güncel hâli buradan okuyor.
+  final Map<String, DocumentJob> _jobs = {};
+
+  /// Bu oturumda yüklenen dosyaların baytları. Şemayla YENİDEN okutma yalnız bunlar
+  /// eldeyken yapılabiliyor: sunucudaki kopya gösterime yetecek boya indirilmiş.
+  final Map<String, Uint8List> _jobBytes = {};
+
+  /// Okunmuş ama henüz onaylanmamış iş sayısı — üstteki hatırlatma şeridi bunu gösterir.
+  /// Akış kaydıkça kart yukarı gidip gözden çıkabilir; şerit o boşluğu kapatıyor.
+  List<DocumentJob> _pendingJobs = [];
+
+  StreamSubscription<JobNotification>? _hubSub;
+
   static const _maxSuggestionTries = 6;
   static const _suggestionRetryDelay = Duration(seconds: 10);
 
@@ -77,6 +114,14 @@ class _AskPageState extends State<AskPage> {
     super.initState();
     _loadModels();
     _loadSuggestions();
+
+    if (ApiService.canWrite) {
+      _loadPendingJobs();
+      // Canlı kanal bir kolaylık: kurulamazsa ekran çalışmaya devam eder, durum
+      // kartlardaki yenileme ile okunur.
+      JobHub.connect();
+      _hubSub = JobHub.updates.listen(_onJobNotification);
+    }
   }
 
   Future<void> _loadSuggestions() async {
@@ -102,6 +147,7 @@ class _AskPageState extends State<AskPage> {
 
   @override
   void dispose() {
+    _hubSub?.cancel();
     _input.dispose();
     _inputFocus.dispose();
     _scroll.dispose();
@@ -141,6 +187,144 @@ class _AskPageState extends State<AskPage> {
       _modelErrorDetail = null;
     });
     await _loadModels();
+  }
+
+  // ---- belge akışı ----
+
+  // Kontrol bekleyen işler: okunmuş ama onaylanmamış olanlar. Sayfa yenilendiğinde
+  // sohbetteki kartlar gitse bile iş kaybolmasın diye sunucudan okunuyor.
+  Future<void> _loadPendingJobs() async {
+    try {
+      final jobs = await ApiService.listDocumentJobs();
+      if (!mounted) return;
+      setState(() {
+        _pendingJobs = jobs
+            .where((j) => j.status == 'succeeded' && !j.isConfirmed)
+            .toList();
+      });
+    } catch (_) {
+      // Şerit ekranın çalışması için şart değil; sessizce geçiliyor.
+    }
+  }
+
+  // Bildirim sonucu taşımıyor, yalnız "durum değişti" diyor; güncel kayıt ayrı çekiliyor.
+  void _onJobNotification(JobNotification note) {
+    if (!mounted) return;
+    if (_jobs.containsKey(note.jobId)) _refreshJob(note.jobId);
+    _loadPendingJobs();
+  }
+
+  Future<void> _refreshJob(String jobId) async {
+    try {
+      final job = await ApiService.getDocumentJob(jobId);
+      if (!mounted) return;
+      setState(() => _jobs[jobId] = job);
+    } catch (_) {
+      // Tek bir yenileme hatası kartı bozmamalı; kullanıcı yeniden deneyebilir.
+    }
+  }
+
+  /// Ataç düğmesi: belgeyi kuyruğa verip sohbete kartını bırakır.
+  ///
+  /// Hedef veri seti SORULMUYOR. Keşif geçişi tam bunun için yazılmıştı: sistem belgeyi
+  /// okuyup hangi sete uyduğunu kendisi öneriyor, karar onay ekranında veriliyor. Akışın
+  /// başında soru sormak, "belgeyi at" kolaylığını ortadan kaldırırdı.
+  Future<void> _pickAndQueueDocument() async {
+    PickedFile? file;
+    try {
+      file = await pickImageFile();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      return;
+    }
+    if (file == null) return; // kullanıcı iptal etti
+
+    try {
+      final job = await ApiService.queueDiscoverDocument(file.bytes, file.name);
+      if (!mounted) return;
+
+      setState(() {
+        _jobs[job.id] = job;
+        _jobBytes[job.id] = file!.bytes;
+        _entries.add(_DocumentEntry(job.id));
+      });
+      _scrollToEnd();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+    }
+  }
+
+  /// Belgeyi atar: sunucudaki iş kaydı silinir, kart akıştan kalkar.
+  Future<void> _discardJob(String jobId) async {
+    try {
+      await ApiService.deleteDocumentJob(jobId);
+      if (!mounted) return;
+
+      setState(() {
+        _entries.removeWhere((e) => e is _DocumentEntry && e.jobId == jobId);
+        _jobs.remove(jobId);
+        _jobBytes.remove(jobId);
+      });
+      await _loadPendingJobs();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+    }
+  }
+
+  /// Onay katmanını açar ve döndüğü sonuca göre akışı ilerletir.
+  Future<void> _openReview(String jobId) async {
+    final result = await Navigator.of(context).push<DocumentReviewResult>(
+      MaterialPageRoute(
+        builder: (_) => DocumentReviewPage(
+          jobId: jobId,
+          localBytes: _jobBytes[jobId],
+          localFileName: _jobs[jobId]?.fileName,
+        ),
+      ),
+    );
+
+    if (!mounted) return;
+
+    // Atıldıysa kart akıştan kalkıyor; kaydı yenilemeye çalışmak 404 verirdi.
+    if (result != null && result.discarded) {
+      setState(() {
+        _entries.removeWhere((e) => e is _DocumentEntry && e.jobId == jobId);
+        _jobs.remove(jobId);
+        _jobBytes.remove(jobId);
+      });
+      await _loadPendingJobs();
+      return;
+    }
+
+    await _refreshJob(jobId);
+    await _loadPendingJobs();
+    if (result == null || !mounted) return;
+
+    // Şemayla yeniden okutuldu: eski kartın yerini yeni iş alıyor, çünkü artık
+    // sonucu üretecek olan o.
+    if (result.requeuedJobId is String && result.requeuedJobId != jobId) {
+      final yeni = result.requeuedJobId!;
+      _jobBytes[yeni] = _jobBytes[jobId] ?? Uint8List(0);
+      setState(() {
+        final index = _entries.indexWhere(
+            (e) => e is _DocumentEntry && e.jobId == jobId);
+        if (index >= 0) _entries[index] = _DocumentEntry(yeni);
+      });
+      await _refreshJob(yeni);
+      return;
+    }
+
+    if (result.savedRows is int) {
+      setState(() {
+        _entries.add(_DocumentSaved(result.savedRows!, result.datasetName));
+        // Baytlar artık gerekmiyor: belge kaydedildi.
+        _jobBytes.remove(jobId);
+      });
+      _scrollToEnd();
+    }
   }
 
   Future<void> _send() async {
@@ -253,6 +437,15 @@ class _AskPageState extends State<AskPage> {
           onHistory: _openHistory,
         ),
         const SizedBox(height: 16),
+        // Kontrol bekleyen belge varsa ince bir hatırlatma. Kart akışta yukarı kayıp
+        // gözden çıkabilir; bu satır kalıcı ve tek tıkla oraya götürüyor.
+        if (_pendingJobs.isNotEmpty) ...[
+          _PendingDocumentsStrip(
+            jobs: _pendingJobs,
+            onOpen: _openReview,
+          ),
+          const SizedBox(height: 12),
+        ],
         Expanded(
           child: _entries.isEmpty
               ? _Welcome(onPick: _ask, suggestions: _suggestions)
@@ -266,6 +459,14 @@ class _AskPageState extends State<AskPage> {
                     _Thinking() => const _ThinkingBubble(),
                     _Failure(:final message) => _FailureCard(message: message),
                     _Answer(:final result) => _AnswerCard(result: result),
+                    _DocumentEntry(:final jobId) => _DocumentCard(
+                        job: _jobs[jobId],
+                        onOpen: () => _openReview(jobId),
+                        onRefresh: () => _refreshJob(jobId),
+                        onDiscard: () => _discardJob(jobId),
+                      ),
+                    _DocumentSaved(:final rows, :final datasetName) =>
+                      _DocumentSavedLine(rows: rows, datasetName: datasetName),
                   },
                 ),
         ),
@@ -275,6 +476,9 @@ class _AskPageState extends State<AskPage> {
           focusNode: _inputFocus,
           sending: _sending,
           onSend: _send,
+          // Belge yükleme veri girişidir: Viewer'da düğme hiç görünmüyor. Sunucu zaten
+          // reddederdi, ama tıklanınca hata veren bir düğme kötü bir vitrindir.
+          onAttach: ApiService.canWrite ? _pickAndQueueDocument : null,
         ),
       ],
     );
@@ -400,6 +604,15 @@ class _ModelPicker extends StatelessWidget {
 
     final current = models.firstWhere((m) => m.name == selected, orElse: () => models.first);
 
+    // Seçenek tekse seçici değil ROZET gösteriliyor.
+    //
+    // Sunucu artık "kurulu modeller"i değil "sorgu planı üretebilen modeller"i
+    // döndürüyor; belge okumak için kurulu görsel model bu listeden düştüğü için geriye
+    // tek model kalıyor. Tek seçenekli bir açılır menü kullanıcıya seçim yapabildiğini
+    // ima eder, oysa yapamaz. Model adı yine görünür kalıyor: yapay zekânın yerelde
+    // çalıştığı bu ekranda tek somut kanıt.
+    if (models.length == 1) return _ModelBadge(model: current);
+
     return PopupMenuButton<String>(
       onSelected: onSelect,
       tooltip: 'Model seç',
@@ -469,6 +682,47 @@ class _ModelPicker extends StatelessWidget {
             ),
             const SizedBox(width: 4),
             const Icon(Icons.expand_more, size: 16, color: AppColors.muted),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Çalışan modeli gösteren, tıklanmayan rozet. Seçenek tek olduğunda seçicinin yerini alır.
+class _ModelBadge extends StatelessWidget {
+  final AiModel model;
+
+  const _ModelBadge({required this.model});
+
+  @override
+  Widget build(BuildContext context) {
+    final detay = [
+      if (model.parameterSize != null) model.parameterSize!,
+      if (model.quantization != null) model.quantization!,
+      if (model.sizeLabel.isNotEmpty) model.sizeLabel,
+    ].join(' · ');
+
+    return Tooltip(
+      message: detay.isEmpty ? model.name : '${model.name}\n$detay',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          color: AppColors.surfaceAlt,
+          border: Border.all(color: AppColors.border),
+          borderRadius: BorderRadius.circular(AppRadius.control),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.memory, size: 16, color: AppColors.accent),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(model.shortName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+            ),
           ],
         ),
       ),
@@ -1152,11 +1406,15 @@ class _Composer extends StatelessWidget {
   final bool sending;
   final VoidCallback onSend;
 
+  /// Belge yükleme. null ise düğme hiç çizilmez (yazma yetkisi olmayan kullanıcı).
+  final VoidCallback? onAttach;
+
   const _Composer({
     required this.controller,
     required this.focusNode,
     required this.sending,
     required this.onSend,
+    this.onAttach,
   });
 
   @override
@@ -1171,6 +1429,13 @@ class _Composer extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
+          if (onAttach != null)
+            IconButton(
+              onPressed: sending ? null : onAttach,
+              icon: const Icon(Icons.attach_file, size: 20),
+              color: AppColors.muted,
+              tooltip: 'Belge yükle (fatura, fiş, makbuz)',
+            ),
           Expanded(
             // Enter gönderir, Shift+Enter satır atlar — sohbet arayüzlerinin alışılmış
             // davranışı; kullanıcı göndermek için fareye uzanmak zorunda kalmıyor.
@@ -1231,6 +1496,189 @@ class _Composer extends StatelessWidget {
 
 class _SendIntent extends Intent {
   const _SendIntent();
+}
+
+// --- belge kartları -----------------------------------------------------------------
+
+/// Sohbete bırakılan belgenin kartı: okunuyor → hazır → kontrol et.
+///
+/// Kart akışın içinde duruyor çünkü belge yükleme bir konuşma hamlesidir; ama üzerindeki
+/// düğme onay ekranını AÇIYOR, tabloyu buraya gömmüyor. Sekiz satırlık düzenlenebilir bir
+/// tablo sohbet balonuna sığmaz ve akış kaydıkça gözden çıkardı.
+class _DocumentCard extends StatelessWidget {
+  final DocumentJob? job;
+  final VoidCallback onOpen;
+  final VoidCallback onRefresh;
+  final VoidCallback onDiscard;
+
+  const _DocumentCard({
+    required this.job,
+    required this.onOpen,
+    required this.onRefresh,
+    required this.onDiscard,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final j = job;
+    if (j == null) return const SizedBox.shrink();
+
+    final basarisiz = j.status == 'failed';
+    final hazir = j.status == 'succeeded';
+
+    return Align(
+      alignment: Alignment.centerRight,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 460),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: AppColors.surfaceAlt,
+            border: Border.all(
+                color: basarisiz ? AppColors.danger.withValues(alpha: 0.4) : AppColors.border),
+            borderRadius: BorderRadius.circular(AppRadius.card),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                basarisiz
+                    ? Icons.error_outline
+                    : hazir
+                        ? Icons.description_outlined
+                        : Icons.hourglass_empty,
+                size: 20,
+                color: basarisiz ? AppColors.danger : AppColors.muted,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(j.fileName ?? 'Belge',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
+                    const SizedBox(height: 2),
+                    Text(
+                      basarisiz
+                          ? (j.error ?? 'Belge okunamadı')
+                          : j.isConfirmed
+                              ? 'Kaydedildi'
+                              : hazir
+                                  ? 'Okundu, kontrol bekliyor'
+                                  : 'Okunuyor… bu işlem birkaç dakika sürebilir',
+                      style: const TextStyle(fontSize: 12, color: AppColors.muted),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              if (!basarisiz && !hazir)
+                // Canlı kanal kopmuş olabilir; kullanıcı elle tazeleyebilmeli.
+                IconButton(
+                  onPressed: onRefresh,
+                  icon: const Icon(Icons.refresh, size: 18),
+                  tooltip: 'Durumu yenile',
+                )
+              else if (hazir)
+                FilledButton(
+                  onPressed: onOpen,
+                  child: Text(j.isConfirmed ? 'Görüntüle' : 'Kontrol et'),
+                ),
+              // Atma her durumda açık — okuma sürerken de. Yanlış dosya seçildiyse
+              // kullanıcıyı bitmesini beklemeye zorlamanın anlamı yok.
+              IconButton(
+                onPressed: onDiscard,
+                icon: const Icon(Icons.close, size: 17),
+                color: AppColors.muted,
+                tooltip: 'Bu belgeyi at',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Onaydan sonra akışa düşen satır. Kullanıcıyı bir sonraki adıma bırakıyor: veri artık
+/// içeride, sorusunu buradan sorabilir.
+class _DocumentSavedLine extends StatelessWidget {
+  final int rows;
+  final String? datasetName;
+
+  const _DocumentSavedLine({required this.rows, required this.datasetName});
+
+  @override
+  Widget build(BuildContext context) {
+    final hedef = datasetName == null ? 'veri setine' : '$datasetName setine';
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        const Icon(Icons.check_circle_outline, size: 16, color: AppColors.accent),
+        const SizedBox(width: 8),
+        Flexible(
+          child: Text(
+            '$hedef $rows satır eklendi. Artık bu veriye soru sorabilirsin.',
+            style: const TextStyle(fontSize: 12.5, color: AppColors.muted),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Kontrol bekleyen belgelerin hatırlatma şeridi.
+class _PendingDocumentsStrip extends StatelessWidget {
+  final List<DocumentJob> jobs;
+  final void Function(String jobId) onOpen;
+
+  const _PendingDocumentsStrip({required this.jobs, required this.onOpen});
+
+  @override
+  Widget build(BuildContext context) {
+    final tek = jobs.length == 1;
+
+    return Material(
+      color: AppColors.accent.withValues(alpha: 0.10),
+      borderRadius: BorderRadius.circular(AppRadius.control),
+      child: InkWell(
+        onTap: () => onOpen(jobs.first.id),
+        borderRadius: BorderRadius.circular(AppRadius.control),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            border: Border.all(color: AppColors.accent.withValues(alpha: 0.35)),
+            borderRadius: BorderRadius.circular(AppRadius.control),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.pending_actions_outlined, size: 18, color: AppColors.accent),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  tek
+                      ? '${jobs.first.fileName ?? "Bir belge"} okundu, kontrol bekliyor'
+                      : '${jobs.length} belge okundu, kontrol bekliyor',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12.5),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(tek ? 'Kontrol et' : 'İlkini aç',
+                  style: const TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.accent)),
+              const Icon(Icons.chevron_right, size: 18, color: AppColors.accent),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // --- geçmiş sohbetler ---------------------------------------------------------------

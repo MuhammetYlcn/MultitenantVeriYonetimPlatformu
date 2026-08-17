@@ -854,6 +854,17 @@ class ApiService {
     return res.bodyBytes;
   }
 
+  /// DELETE /api/jobs/{id} — işi ve saklanan belge görüntüsünü siler.
+  ///
+  /// Yanlış yüklenen bir belgenin tek çıkış yolu. Ekranı kapatmak işi bitirmez; bu uç
+  /// olmadan iş kalıcı olarak "kontrol bekliyor" durumunda kalırdı.
+  static Future<void> deleteDocumentJob(String jobId) async {
+    await _ensureFreshToken();
+    final res =
+        await http.delete(Uri.parse('$baseUrl/api/jobs/$jobId'), headers: _authHeader);
+    if (res.statusCode != 204) throw ApiException(_message(res));
+  }
+
   /// POST /api/datasets/{id}/document/confirm — onaylanan tabloyu EKLER.
   /// Tek hücre bile uymuyorsa sunucu hiçbir şey yazmaz ve hata fırlar.
   ///
