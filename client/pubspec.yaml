@@ -38,6 +38,7 @@ dependencies:
   web: ^1.1.1
   # Panodaki çubuk/çizgi/halka grafikler (widgets/charts.dart).
   fl_chart: ^1.0.0
+  signalr_netcore: ^1.4.4
 
 dev_dependencies:
   flutter_test:

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../api_service.dart';
+import '../job_hub.dart';
 import '../widgets/app_shell.dart';
 import '../widgets/change_password_dialog.dart';
 import '../widgets/ui.dart';
@@ -78,6 +79,9 @@ class _HomeShellState extends State<HomeShell> {
       ];
 
   Future<void> _logout() async {
+    // Canlı kanal kullanıcının kimliğine bağlı: oturum kapanırken kapatılmazsa bağlantı
+    // eski token'la açık kalır ve sonraki kullanıcı önceki kişinin bildirimlerini alır.
+    await JobHub.disconnect();
     await ApiService.logout();
     if (!mounted) return;
     Navigator.pushAndRemoveUntil(

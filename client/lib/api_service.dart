@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'platform/platform.dart';
 
@@ -800,39 +801,85 @@ class ApiService {
   // --- belge / OCR ---------------------------------------------------------------------
 
   /// POST /api/datasets/{id}/document/extract — hedef şema BİLİNİYOR.
-  /// Sunucu hiçbir şey kaydetmez; dönen tablo onay ekranında düzeltilip `confirmDocument`
-  /// ile yazılır.
-  static Future<DocumentExtraction> extractDocument(
+  ///
+  /// Belge okuma 30-150 saniye sürdüğü için uç sonucu değil bir İŞ döndürür. Sonuç hazır
+  /// olunca canlı kanaldan haber gelir (bkz. JobHub); tablo `getDocumentJob` ile alınır.
+  static Future<DocumentJob> queueExtractDocument(
       String datasetId, List<int> bytes, String filename) async {
     final body = await _uploadDocument(
         '$baseUrl/api/datasets/$datasetId/document/extract', bytes, filename);
-    return DocumentExtraction.fromExtract(body);
+    return DocumentJob.fromJson(body);
   }
 
-  /// POST /api/documents/discover — hedef şema YOK (keşif geçişi).
-  /// Kolon adlarını model seçer, sunucu bunları var olan setlerle eşleştirip öneri döner.
-  static Future<DocumentExtraction> discoverDocument(
+  /// POST /api/documents/discover — hedef şema YOK (keşif geçişi). Bu da kuyruğa girer.
+  static Future<DocumentJob> queueDiscoverDocument(
       List<int> bytes, String filename) async {
     final body = await _uploadDocument('$baseUrl/api/documents/discover', bytes, filename);
-    return DocumentExtraction.fromDiscovery(body);
+    return DocumentJob.fromJson(body);
+  }
+
+  /// GET /api/jobs/{id} — işin durumu ve bittiyse sonucu.
+  ///
+  /// Canlı kanal varken bu çağrının gerekliliği: bildirim bir kolaylıktır, doğruluk
+  /// kaynağı değil. Bağlantı kopmuşken iş bitmiş olabilir ya da kullanıcı ekranı yeni
+  /// açmış olabilir; durumun kesin hâli her zaman buradan okunur.
+  static Future<DocumentJob> getDocumentJob(String jobId) async {
+    await _ensureFreshToken();
+    final res = await http.get(Uri.parse('$baseUrl/api/jobs/$jobId'), headers: _authHeader);
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return DocumentJob.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  /// GET /api/jobs — kullanıcının son belge işleri (sonuç gövdesi HARİÇ).
+  static Future<List<DocumentJob>> listDocumentJobs() async {
+    await _ensureFreshToken();
+    final res = await http.get(Uri.parse('$baseUrl/api/jobs'), headers: _authHeader);
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return (jsonDecode(res.body) as List)
+        .map((e) => DocumentJob.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// GET /api/jobs/{id}/image — onay ekranının yan yana gösterdiği belge görüntüsü.
+  ///
+  /// Baytlar okunuyor, adres verilmiyor: uç kimlik istiyor ve `Image.network` başlık
+  /// gönderemez. Onaydan sonra görüntü silindiği için null dönebilir — bu bir hata değil,
+  /// "belge artık saklanmıyor" demektir.
+  static Future<Uint8List?> getDocumentJobImage(String jobId) async {
+    await _ensureFreshToken();
+    final res =
+        await http.get(Uri.parse('$baseUrl/api/jobs/$jobId/image'), headers: _authHeader);
+    if (res.statusCode == 404) return null;
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return res.bodyBytes;
   }
 
   /// POST /api/datasets/{id}/document/confirm — onaylanan tabloyu EKLER.
   /// Tek hücre bile uymuyorsa sunucu hiçbir şey yazmaz ve hata fırlar.
+  ///
+  /// [jobId] verilirse sunucu belge görüntüsünü siler: görüntü işin ömrüne bağlı bir ara
+  /// üründü, kalıcı olan az önce yazılan satırlardır.
   static Future<int> confirmDocument(
-      String datasetId, List<String> columns, List<List<String>> rows) async {
+      String datasetId, List<String> columns, List<List<String>> rows,
+      {String? jobId}) async {
     await _ensureFreshToken();
     final res = await http.post(
       Uri.parse('$baseUrl/api/datasets/$datasetId/document/confirm'),
       headers: {..._authHeader, 'Content-Type': 'application/json'},
-      body: jsonEncode({'columns': columns, 'rows': rows}),
+      body: jsonEncode({'columns': columns, 'rows': rows, 'jobId': jobId}),
     );
     if (res.statusCode != 200) throw ApiException(_message(res));
     return (jsonDecode(res.body) as Map<String, dynamic>)['savedRows'] as int;
   }
 
-  // Belge görüntüsünü multipart olarak yükler. Model çağrısı 30-45 saniye sürebildiği
-  // için varsayılan zaman aşımı yetmez; akış tamamlanana kadar beklenir.
+  /// Canlı bildirim kanalının kimliği. Hub bağlantısı token'ı adres satırında taşır
+  /// (tarayıcı WebSocket el sıkışmasında özel başlığa izin vermez).
+  static Future<String?> hubToken() async {
+    await _ensureFreshToken();
+    return _token;
+  }
+
+  // Belge görüntüsünü multipart olarak yükler. Yanıt 202: iş alındı, henüz bitmedi.
   static Future<Map<String, dynamic>> _uploadDocument(
       String url, List<int> bytes, String filename) async {
     await _ensureFreshToken();
@@ -841,7 +888,7 @@ class ApiService {
     req.files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
 
     final res = await http.Response.fromStream(await req.send());
-    if (res.statusCode != 200) throw ApiException(_message(res));
+    if (res.statusCode != 202) throw ApiException(_message(res));
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
@@ -1289,6 +1336,84 @@ class DocumentCellError {
 /// `suspect` ve `warnings` bilerek taşınıyor: modelin yanıldığı durumu kullanıcının
 /// fark etmesinin tek yolu bunları göstermek. Gizlenirse yarım okunmuş bir belge,
 /// tam okunmuş gibi görünür.
+/// Kuyruğa alınmış bir belge işi.
+///
+/// Belge okuma dakikalar sürebildiği için istemci artık sonucu değil bu kaydı bekliyor:
+/// yükleme anında `queued` gelir, model çalışırken `running` olur, sonunda `succeeded`
+/// ya da `failed`. Kullanıcı bu süre boyunca başka ekranlara geçebilir.
+class DocumentJob {
+  final String id;
+  final String kind; // 'extract' | 'discover'
+  final String status; // 'queued' | 'running' | 'succeeded' | 'failed'
+  final String? datasetId;
+  final String? fileName;
+  final String? error;
+  final DateTime createdAt;
+  final DateTime? completedAt;
+
+  /// Dolu ise bu belgeden çıkan satırlar zaten kaydedilmiş. Ekran ikinci kaydetmeyi
+  /// kapatıyor: iş listesi kalıcı olduğu için kullanıcı eski bir işi açabiliyor ve
+  /// tekrar kaydetmek aynı satırları sete ikinci kez eklerdi.
+  final DateTime? confirmedAt;
+
+  /// Sonuç gövdesi — yalnız bittiğinde ve tek iş sorgulandığında dolu (liste ucu taşımaz).
+  final Map<String, dynamic>? result;
+
+  DocumentJob({
+    required this.id,
+    required this.kind,
+    required this.status,
+    required this.createdAt,
+    this.datasetId,
+    this.fileName,
+    this.error,
+    this.completedAt,
+    this.confirmedAt,
+    this.result,
+  });
+
+  factory DocumentJob.fromJson(Map<String, dynamic> j) => DocumentJob(
+        id: j['id'] as String,
+        kind: j['kind'] as String,
+        status: j['status'] as String,
+        datasetId: j['datasetId'] as String?,
+        fileName: j['fileName'] as String?,
+        error: j['error'] as String?,
+        createdAt: DateTime.parse(j['createdAt'] as String),
+        completedAt: j['completedAt'] == null
+            ? null
+            : DateTime.parse(j['completedAt'] as String),
+        confirmedAt: j['confirmedAt'] == null
+            ? null
+            : DateTime.parse(j['confirmedAt'] as String),
+        result: j['result'] as Map<String, dynamic>?,
+      );
+
+  bool get isRunning => status == 'queued' || status == 'running';
+  bool get isFinished => status == 'succeeded' || status == 'failed';
+  bool get isDiscovery => kind == 'discover';
+  bool get isConfirmed => confirmedAt != null;
+
+  /// Sonucu ekranın beklediği biçime çevirir. İki geçiş iki farklı gövde döndürdüğü için
+  /// ayrıştırıcı işin türüne bakılarak seçiliyor.
+  DocumentExtraction? get extraction {
+    final body = result;
+    if (body == null) return null;
+    return isDiscovery
+        ? DocumentExtraction.fromDiscovery(body)
+        : DocumentExtraction.fromExtract(body);
+  }
+
+  /// Kullanıcıya gösterilecek durum metni.
+  String get statusLabel => switch (status) {
+        'queued' => 'Sırada',
+        'running' => 'Okunuyor',
+        'succeeded' => isConfirmed ? 'Kaydedildi' : 'Hazır',
+        'failed' => 'Başarısız',
+        _ => status,
+      };
+}
+
 class DocumentExtraction {
   final List<String> columns;
   final List<List<String>> rows;
