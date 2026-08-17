@@ -28,6 +28,16 @@ public class OllamaOptions
     // Sadece son kullanıcıya sunulan listeden düşerler.
     public string[] HiddenModels { get; set; } = Array.Empty<string>();
 
+    // Plan ÜRETEMEYEN modeller — görsel model gibi, başka bir iş için kurulmuş olanlar.
+    //
+    // HiddenModels'ten farkı ve ayrı durmasının sebebi: orası "gizli ama geçerli"
+    // demektir, burası "geçersiz". Görsel model Ollama'da kurulu olduğu için model
+    // listesine düşüyordu ve seçildiğinde plan üretmeye zorlanabiliyordu; belge okumak
+    // için eğitilmiş bir modelden sorgu planı istemek anlamsız bir çıktı üretir. Liste
+    // artık "kurulu modeller" değil "bu işi yapabilen modeller" anlamına geliyor ve
+    // denetim sunucuda: arayüzden düşürmek tek başına yetmez, uç da reddetmeli.
+    public string[] NonPlannerModels { get; set; } = Array.Empty<string>();
+
     // 7B model bu donanımda ~10 sn'de yanıt veriyor; ilk çağrıda model belleğe yüklendiği
     // için çok daha uzun sürebilir. Sınır ona göre geniş tutuldu.
     public int TimeoutSeconds { get; set; } = 120;
@@ -110,6 +120,9 @@ public class QueryPlannerService : IQueryPlannerService
 
         return (tags?.Models ?? new List<OllamaTag>())
             .Where(m => !string.IsNullOrWhiteSpace(m.Name))
+            // Plan üretemeyen modeller HER DURUMDA düşer, includeHidden onları geri
+            // getirmez: gizlemek bir sunum tercihiydi, bu ise yetenek kısıtı.
+            .Where(m => !IsNonPlanner(m.Name!))
             .Where(m => includeHidden || !IsHidden(m.Name!))
             .Select(m => new OllamaModel(
                 m.Name!,
@@ -127,6 +140,12 @@ public class QueryPlannerService : IQueryPlannerService
     private bool IsHidden(string model) =>
         !string.Equals(model, _options.Model, StringComparison.OrdinalIgnoreCase)
         && _options.HiddenModels.Contains(model, StringComparer.OrdinalIgnoreCase);
+
+    // Varsayılan planlayıcı burada da korunuyor: yanlış bir ayar yüzünden sistemin kendi
+    // varsayılanını reddetmesi, kurtarılması zor bir durum olurdu.
+    private bool IsNonPlanner(string model) =>
+        !string.Equals(model, _options.Model, StringComparison.OrdinalIgnoreCase)
+        && _options.NonPlannerModels.Contains(model, StringComparer.OrdinalIgnoreCase);
 
     public async Task<PlanResult> PlanAsync(string question, TenantCatalog catalog,
         string? model = null, CancellationToken ct = default)
@@ -148,6 +167,14 @@ public class QueryPlannerService : IQueryPlannerService
         var selected = _options.Model;
         if (!string.IsNullOrWhiteSpace(model) && model.Trim() != _options.Model)
         {
+            // Plan üretemeyen bir model istendiyse burada duruyoruz. Arayüz onu zaten
+            // listelemiyor, ama denetim sunucuda olmak zorunda: ekran doğruluğun bekçisi
+            // olamaz ve uç doğrudan çağrılabilir.
+            if (IsNonPlanner(model.Trim()))
+                throw new InvalidQueryException(
+                    $"'{model.Trim()}' modeli sorgu planı üretmek için kullanılamaz; " +
+                    "başka bir iş için kurulmuş bir modeldir.");
+
             // Gizlenenler dahil: arayüzde görünmeyen bir model API'den seçilebilir olmalı
             // (karşılaştırma ölçümleri temel modeli böyle çağırıyor).
             var installed = await ListModelsAsync(includeHidden: true, ct);
