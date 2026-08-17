@@ -540,6 +540,77 @@ public class DocumentJobTests : IClassFixture<ApiFactory>, IAsyncLifetime
         Assert.Contains("\"total\":1", await rows.Content.ReadAsStringAsync());
     }
 
+    // ---- atma ----
+
+    [Fact(DisplayName = "Belge atılabilir: iş kaydı ve görüntüsü silinir")]
+    public async Task BelgeAtilabilir()
+    {
+        var factory = FactoryWith<FakeVisionService>();
+        using var client = factory.CreateClient();
+
+        var admin = await RegisterAsync(client, "is-at", "a@isat.com");
+        var dataset = await CreateDatasetAsync(client, admin.Token, "Faturalar",
+            "fatura_no,urun,tutar\nF-1,Kalem,100\n");
+        var queued = await QueueExtractAsync(client, admin.Token, dataset.Id);
+
+        // Yanlış belge yüklendiğinde kullanıcının elinde onu ortadan kaldıracak bir yol
+        // olmalı; yoksa iş kalıcı olarak "kontrol bekliyor" durumunda kalır.
+        var delete = await client.SendAsync(
+            WithToken(HttpMethod.Delete, $"/api/jobs/{queued.Id}", admin.Token));
+        Assert.Equal(HttpStatusCode.NoContent, delete.StatusCode);
+
+        var read = await client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/jobs/{queued.Id}", admin.Token));
+        Assert.Equal(HttpStatusCode.NotFound, read.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.Empty(await db.DocumentJobs.IgnoreQueryFilters().ToListAsync());
+    }
+
+    [Fact(DisplayName = "Okuma sürerken de atılabilir — çalıştırıcı kaydı bulamayınca sessizce çıkar")]
+    public async Task CalisirkenAtilabilir()
+    {
+        var factory = FactoryWith<FakeVisionService>();
+        using var client = factory.CreateClient();
+
+        var admin = await RegisterAsync(client, "is-at2", "a@isat2.com");
+        var dataset = await CreateDatasetAsync(client, admin.Token, "Faturalar",
+            "fatura_no,urun,tutar\nF-1,Kalem,100\n");
+        var queued = await QueueExtractAsync(client, admin.Token, dataset.Id);
+
+        (await client.SendAsync(
+            WithToken(HttpMethod.Delete, $"/api/jobs/{queued.Id}", admin.Token)))
+            .EnsureSuccessStatusCode();
+
+        // Kuyruktaki iş silinen kaydı çalıştırmaya kalkarsa düşmemeli.
+        await RunAsync(factory, queued.Id);
+    }
+
+    [Fact(DisplayName = "Başkasının işi atılamaz (404)")]
+    public async Task BaskasininIsiAtilamaz()
+    {
+        var factory = FactoryWith<FakeVisionService>();
+        using var client = factory.CreateClient();
+
+        var sahip = await RegisterAsync(client, "is-at-sahip", "a@isatsahip.com");
+        var dataset = await CreateDatasetAsync(client, sahip.Token, "Faturalar",
+            "fatura_no,urun,tutar\nF-1,Kalem,100\n");
+        var queued = await QueueExtractAsync(client, sahip.Token, dataset.Id);
+
+        var yabanci = await RegisterAsync(client, "is-at-yabanci", "b@isatyabanci.com");
+
+        var delete = await client.SendAsync(
+            WithToken(HttpMethod.Delete, $"/api/jobs/{queued.Id}", yabanci.Token));
+
+        Assert.Equal(HttpStatusCode.NotFound, delete.StatusCode);
+
+        // Kayıt duruyor: silme denemesi sahibini etkilemedi.
+        var read = await client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/jobs/{queued.Id}", sahip.Token));
+        read.EnsureSuccessStatusCode();
+    }
+
     // ---- bakım ----
 
     [Fact(DisplayName = "Bakım: saatlerdir 'çalışıyor' görünen iş kapatılır")]

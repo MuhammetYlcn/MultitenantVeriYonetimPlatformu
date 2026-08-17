@@ -91,6 +91,36 @@ public class DocumentJobsController : ControllerBase
         return File(job.Image, job.ImageContentType ?? "image/jpeg");
     }
 
+    /// <summary>
+    /// İşi ATAR: kayıt ve saklanan görüntü silinir.
+    ///
+    /// Neden gerekli: yanlış bir belge yüklendiğinde kullanıcının elinde onu ortadan
+    /// kaldıracak hiçbir araç yoktu; iş "kontrol bekliyor" durumunda kalıcı olarak
+    /// duruyordu. Ekranı kapatmak işi bitirmez — ikisi farklı şeyler.
+    ///
+    /// Kaydedilmiş bir iş de silinebilir: veri setine yazılmış satırlar bundan
+    /// etkilenmez, silinen yalnız okuma kaydıdır.
+    /// </summary>
+    [HttpDelete("{jobId:guid}")]
+    public async Task<IActionResult> Delete(Guid jobId, CancellationToken ct)
+    {
+        if (CurrentUserId() is not { } userId) return Unauthorized();
+
+        var job = await _db.DocumentJobs
+            .FirstOrDefaultAsync(j => j.Id == jobId && j.UserId == userId, ct);
+
+        if (job is null)
+            return Problem(statusCode: StatusCodes.Status404NotFound, title: "İş bulunamadı.");
+
+        // Çalışmakta olan bir iş de silinebilir: arka plan çalıştırıcısı kaydı bulamayınca
+        // sessizce çıkıyor (bkz. DocumentJobRunner). Kullanıcıyı, yanlış yüklediği belgenin
+        // okunmasının bitmesini beklemeye zorlamanın bir anlamı yok.
+        _db.DocumentJobs.Remove(job);
+        await _db.SaveChangesAsync(ct);
+
+        return NoContent();
+    }
+
     private Guid? CurrentUserId() =>
         Guid.TryParse(User.FindFirstValue("sub"), out var id) ? id : null;
 }
