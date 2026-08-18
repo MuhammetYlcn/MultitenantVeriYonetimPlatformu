@@ -38,6 +38,10 @@ public class DocumentsController : ControllerBase
     // değil; bu sınır kötü niyetli ya da bozuk bir isteğin veritabanını şişirmesini engeller.
     private const int MaxConfirmRows = 500;
 
+    // Tek belgeyle sete eklenebilecek en fazla yeni kolon. Belge şemayı GENİŞLETEBİLİR ama
+    // yeniden tanımlayamaz: on beş kolonluk bir ek, eşlemenin yanlış gittiğinin işaretidir.
+    private const int MaxNewColumns = 15;
+
     // Saklanan görüntünün uzun kenarı. Modele giden boydan bağımsız: bu değer insan gözüne
     // göre seçildi (fatura kalem satırları okunabilsin), o ise bağlam bütçesine göre.
     private const int StoredImageLongEdge = 2000;
@@ -126,6 +130,18 @@ public class DocumentsController : ControllerBase
             return Problem(statusCode: StatusCodes.Status400BadRequest,
                 title: "Satırlardaki hücre sayısı kolon sayısıyla uyuşmuyor.");
 
+        // Aynı ad iki kolonda: ikisinden biri diğerinin üstüne yazılır ve hangisinin
+        // kaydedildiği rastlantıya kalır. Onay ekranında iki belge kolonunu aynı set
+        // kolonuna eşlemek buraya böyle düşüyor.
+        var duplicate = columns
+            .GroupBy(c => c, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(g => g.Count() > 1);
+
+        if (duplicate is not null)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: $"\"{duplicate.Key}\" kolonu birden fazla kez gönderildi; her kolon "
+                       + "yalnız bir kez eşlenebilir.");
+
         var schema = await _db.DatasetColumns
             .Where(c => c.DatasetId == datasetId)
             .OrderBy(c => c.Ordinal)
@@ -135,6 +151,33 @@ public class DocumentsController : ControllerBase
         if (schema.Count == 0)
             return Problem(statusCode: StatusCodes.Status400BadRequest,
                 title: "Bu veri seti için önce şema tanımlayın (POST /api/datasets/{id}/schema).");
+
+        var table = new ParsedTable(columns, rows);
+
+        // Kullanıcının EKLENMESİNİ istediği kolonlar şemaya burada katılıyor; tipleri
+        // değerlerden algılanıyor (dosyadan içe aktarmayla aynı katman, adlar modelden
+        // tipler veriden ilkesinin devamı).
+        if (BuildNewColumns(request.NewColumns, table, schema, out var added, out var columnError))
+            schema.AddRange(added);
+        else
+            return columnError!;
+
+        // Şemada karşılığı olmayan kolon SESSİZCE ATILMAZ.
+        //
+        // Bu denetim bu adımın asıl sebebi. ValidateRows şemadan yürüyor: tabloda olup
+        // şemada olmayan kolonu hiç görmüyor, yani belge okundu, ekranda göründü, "kaydedildi"
+        // dendi ama o kolon hiç yazılmadı. Ölçülen bir örnekte ürün adları böyle kayboldu ve
+        // kullanıcı tek bir uyarı bile almadı. Artık istek reddediliyor: kolon ya bir set
+        // kolonuna eşlenecek, ya yeni kolon olarak eklenecek, ya da kullanıcı onu bilerek
+        // atacak (o zaman istemci kolonu hiç göndermiyor).
+        var schemaNames = schema.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
+        var unknown = columns.Where(c => !schemaNames.Contains(c)).ToList();
+
+        if (unknown.Count > 0)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Bu kolonların veri setinde karşılığı yok; eşleyin ya da yeni kolon "
+                       + "olarak ekleyin.",
+                detail: string.Join(", ", unknown));
 
         // Aynı belge iki kez kaydedilemez.
         //
@@ -154,7 +197,7 @@ public class DocumentsController : ControllerBase
 
         // Doğrulama içe aktarmayla BİREBİR aynı katmandan geçiyor: belgeden gelen satır ile
         // CSV'den gelen satır aynı kurallara tabi, yoksa iki kapı iki farklı veri üretirdi.
-        var validation = _importService.ValidateRows(new ParsedTable(columns, rows), schema);
+        var validation = _importService.ValidateRows(table, schema);
 
         if (validation.Errors.Count > 0)
             return ValidationProblem(new ValidationProblemDetails
@@ -163,6 +206,25 @@ public class DocumentsController : ControllerBase
                 Title = "Bazı hücreler şemaya uymuyor; düzeltip tekrar deneyin.",
                 Extensions = { ["cells"] = validation.Errors }
             });
+
+        // Yeni kolonlar satırlarla AYNI işlemde yazılıyor: biri yazılıp diğeri yazılmasaydı
+        // sette hiçbir satırda karşılığı olmayan bir kolon ya da tersi kalırdı.
+        if (added.Count > 0)
+        {
+            var ordinal = (await _db.DatasetColumns
+                .Where(c => c.DatasetId == datasetId)
+                .MaxAsync(c => (int?)c.Ordinal, ct) ?? -1) + 1;
+
+            foreach (var column in added)
+                _db.DatasetColumns.Add(new DatasetColumn
+                {
+                    Id = Guid.NewGuid(),
+                    DatasetId = datasetId,
+                    Name = column.Name,
+                    Type = column.Type,
+                    Ordinal = ordinal++
+                });
+        }
 
         foreach (var values in validation.ValidRows)
             _db.DatasetRows.Add(new DatasetRow
@@ -188,6 +250,50 @@ public class DocumentsController : ControllerBase
 
         return Ok(new DocumentConfirmResponse(datasetId, validation.ValidRows.Count,
             dataset.RowCount));
+    }
+
+    /// <summary>
+    /// Belgeden çıkan tabloyu BAŞKA bir veri setinin şemasına hizalar — belge yeniden
+    /// okunmadan.
+    ///
+    /// Onay ekranında kullanıcı hedefi değiştirdiğinde çağrılır. İkinci bir model çağrısı
+    /// yapılmıyor: elde zaten bir tablo var, sorulan tek şey o tablonun yeni şemaya nasıl
+    /// oturacağı — bu da saniyeler değil milisaniyeler süren bir ad karşılaştırması.
+    ///
+    /// Eşleme kuralı sunucuda kalıyor (Türkçe ad çözümlemesi, iyelik eki, tip uyumu);
+    /// istemciye taşınsaydı aynı kural iki dilde iki kez yazılır ve zamanla ayrışırdı.
+    /// </summary>
+    [HttpPost("datasets/{datasetId:guid}/document/align")]
+    public async Task<IActionResult> Align(Guid datasetId, DocumentAlignRequest request,
+        CancellationToken ct)
+    {
+        var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == datasetId, ct);
+        if (dataset is null)
+            return Problem(statusCode: StatusCodes.Status404NotFound, title: "Veri seti bulunamadı.");
+
+        var columns = request.Columns ?? Array.Empty<string>();
+        var rows = request.Rows ?? Array.Empty<string[]>();
+
+        if (columns.Count == 0)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Hizalanacak kolon yok.");
+
+        var schema = await _db.DatasetColumns
+            .Where(c => c.DatasetId == datasetId)
+            .OrderBy(c => c.Ordinal)
+            .Select(c => new ColumnSchema(c.Name, c.Type))
+            .ToListAsync(ct);
+
+        if (schema.Count == 0)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Bu veri setinin şeması tanımlı değil.");
+
+        // Tipler değerlerden algılanıyor: tip uyuşmazlığını (belgede metin, sette tarih)
+        // ancak böyle işaretleyebiliriz. Satır gelmezse her kolon metin sayılır.
+        var discovered = _importService.DetectSchema(new ParsedTable(columns, rows));
+
+        return Ok(DocumentAlignment.From(
+            new DatasetSchema(datasetId, dataset.Name, schema), discovered));
     }
 
     /// <summary>
@@ -266,6 +372,70 @@ public class DocumentsController : ControllerBase
 
         // 202: "aldım, henüz bitmedi". 200 dönmek, sonucun hazır olduğu izlenimini verirdi.
         return Accepted(DocumentJobMapper.ToResponse(job));
+    }
+
+    /// <summary>
+    /// Kullanıcının eklenmesini istediği kolonları doğrular ve tiplerini değerlerden algılar.
+    /// Sorun varsa <paramref name="error"/> dolar ve false döner.
+    /// </summary>
+    /// Bu yol, "eşleşmeyen kolon ne olacak" sorusunun üçüncü cevabı: eşle, at, ya da SETE
+    /// EKLE. JSONB veri modeli sayesinde eklemenin bedeli yok — var olan satırlarda o alan
+    /// hiç bulunmuyor, yani veri göçü gerekmiyor, yalnız şema kaydı yazılıyor.
+    private bool BuildNewColumns(IReadOnlyList<string>? requested, ParsedTable table,
+        IReadOnlyList<ColumnSchema> schema, out List<ColumnSchema> added, out IActionResult? error)
+    {
+        added = new List<ColumnSchema>();
+        error = null;
+
+        if (requested is null || requested.Count == 0) return true;
+
+        if (requested.Count > MaxNewColumns)
+        {
+            error = Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: $"Tek belgeyle en fazla {MaxNewColumns} yeni kolon eklenebilir.");
+            return false;
+        }
+
+        // Tipler bir kez, TABLONUN TAMAMI üzerinden algılanıyor: kolon başına ayrı çağrı
+        // yapmak aynı işi tekrarlardı ve içe aktarmadaki kuralla ayrışma riski doğardı.
+        var detected = _importService.DetectSchema(table)
+            .ToDictionary(c => c.Name, c => c.Type, StringComparer.Ordinal);
+
+        var existing = schema.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var raw in requested)
+        {
+            var name = raw?.Trim() ?? string.Empty;
+
+            if (name.Length == 0)
+            {
+                error = Problem(statusCode: StatusCodes.Status400BadRequest,
+                    title: "Yeni kolon adı boş olamaz.");
+                return false;
+            }
+
+            // Adı sette zaten varsa ekleme değil EŞLEME yapılmalıydı; eklemek aynı ada
+            // sahip iki kolon bırakır ve hangisinin okunacağı belirsizleşir.
+            if (!existing.Add(name))
+            {
+                error = Problem(statusCode: StatusCodes.Status400BadRequest,
+                    title: $"\"{name}\" adında bir kolon zaten var; yeni kolon olarak eklenemez.");
+                return false;
+            }
+
+            // Gönderilen tabloda karşılığı olmayan bir kolon eklemek, her satırı boş olan
+            // bir alan açmak olurdu.
+            if (!detected.TryGetValue(name, out var type))
+            {
+                error = Problem(statusCode: StatusCodes.Status400BadRequest,
+                    title: $"\"{name}\" kolonu gönderilen tabloda bulunmuyor.");
+                return false;
+            }
+
+            added.Add(new ColumnSchema(name, type));
+        }
+
+        return true;
     }
 
     private IActionResult? ValidateUpload(IFormFile? file)

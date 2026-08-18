@@ -64,34 +64,57 @@ public static class SchemaMatcher
     public static DatasetMatch Score(
         IReadOnlyList<ColumnSchema> discovered, DatasetSchema candidate)
     {
-        var mappings = new List<ColumnMapping>();
         var matchedTargets = new HashSet<string>(StringComparer.Ordinal);
-        var extras = new List<string>();
+        var matchedSources = new HashSet<int>();
+        var chosen = new (int Source, ColumnSchema Target, bool Conflict)[discovered.Count];
         var total = 0.0;
 
-        // Açgözlü eşleme: her belge kolonu için hedefte kalan en iyi karşılık aranır.
-        // Kolon sayıları küçük olduğu için (onlarca, binlerce değil) en iyi çiftlemeyi
-        // aramaya gerek yok; açgözlü seçim aynı sonucu veriyor ve okunabiliyor.
-        foreach (var column in discovered)
-        {
-            var best = candidate.Columns
-                .Where(t => !matchedTargets.Contains(t.Name))
-                .Select(t => (Target: t, Weight: NameScore(column.Name, t.Name)))
-                .OrderByDescending(x => x.Weight)
-                .FirstOrDefault();
-
-            if (best.Target is null || best.Weight <= 0)
+        // EN İYİDEN başlayan eşleme: bütün (belge kolonu, set kolonu) çiftleri puanlanır ve
+        // en güçlü çift önce bağlanır. Kolon sayıları küçük olduğu için (onlarca, binlerce
+        // değil) bu tam çiftleme kadar iyi çalışıyor ve okunabiliyor.
+        //
+        // Sıra neden önemli: belge kolonlarını soldan sağa gezip her birine "kalanların en
+        // iyisini" vermek, zayıf bir eşlemenin güçlü olanın önünü kesmesine yol açıyordu.
+        // Gerçek örnek — belgede "birim" ile "birim fiyat", sette "birim_fiyat": soldan sağa
+        // gidildiğinde "birim" (0,7) kolonu kapıyor, tam tutan "birim fiyat" (1,0) açıkta
+        // kalıyordu. Yani miktar birimi tutar kolonuna yazılacaktı.
+        var pairs = new List<(int Source, int TargetIndex, double Weight)>();
+        for (var s = 0; s < discovered.Count; s++)
+            for (var t = 0; t < candidate.Columns.Count; t++)
             {
-                extras.Add(column.Name);
-                continue;
+                var weight = NameScore(discovered[s].Name, candidate.Columns[t].Name);
+                if (weight > 0) pairs.Add((s, t, weight));
             }
+
+        // Eşit puanlı çiftlerde sıra belgedeki kolon sırasına düşer: sonuç kararlı olsun.
+        foreach (var pair in pairs
+                     .OrderByDescending(p => p.Weight)
+                     .ThenBy(p => p.Source)
+                     .ThenBy(p => p.TargetIndex))
+        {
+            var target = candidate.Columns[pair.TargetIndex];
+            if (matchedSources.Contains(pair.Source) || matchedTargets.Contains(target.Name))
+                continue;
 
             // Tip uyuşmazlığı eşlemeyi bozmaz ama puanı yarıya indirir: aynı adı taşıyan
             // ama biri tarih biri metin olan iki kolon "aynı kolon" sayılamaz.
-            var conflict = !TypesCompatible(column.Type, best.Target.Type);
-            matchedTargets.Add(best.Target.Name);
-            mappings.Add(new ColumnMapping(column.Name, best.Target.Name, conflict));
-            total += conflict ? best.Weight * 0.5 : best.Weight;
+            var conflict = !TypesCompatible(discovered[pair.Source].Type, target.Type);
+            matchedSources.Add(pair.Source);
+            matchedTargets.Add(target.Name);
+            chosen[pair.Source] = (pair.Source, target, conflict);
+            total += conflict ? pair.Weight * 0.5 : pair.Weight;
+        }
+
+        // Eşlemeler ve fazlalar BELGEDEKİ sırayla üretiliyor: onay ekranı kolonları soldan
+        // sağa aynı sırayla gösteriyor, liste puan sırasına göre gelirse okunmaz olur.
+        var mappings = new List<ColumnMapping>();
+        var extras = new List<string>();
+        for (var s = 0; s < discovered.Count; s++)
+        {
+            if (chosen[s].Target is { } target)
+                mappings.Add(new ColumnMapping(discovered[s].Name, target.Name, chosen[s].Conflict));
+            else
+                extras.Add(discovered[s].Name);
         }
 
         var missing = candidate.Columns

@@ -154,6 +154,21 @@ public class DocumentJobRunner : IDocumentJobRunner
         // işaretleyip kullanıcıya düzelttirecek. Buradaki tek amaç neyin uymadığını söylemek.
         var validation = _importService.ValidateRows(result.Table, schema);
 
+        // Kolon eşlemesi ŞEMALI geçişte de kuruluyor.
+        //
+        // Neden gerekli: hedef şemayı vermek modelin ona uyacağını garanti etmiyor. Ölçülen
+        // bir örnekte model "urun_adi" yerine "ürün / hizmet" yazdı; ValidateRows ad üzerinden
+        // çalıştığı için o kolon sessizce düştü, ürün adları kaybolarak dört satır kaydedildi
+        // ve kullanıcı hiçbir hata görmedi. Eşleme artık kullanıcıya gösteriliyor.
+        var datasetName = await _db.Datasets
+            .Where(d => d.Id == datasetId)
+            .Select(d => d.Name)
+            .FirstOrDefaultAsync() ?? string.Empty;
+
+        var alignment = DocumentAlignment.From(
+            new DatasetSchema(datasetId, datasetName, schema),
+            _importService.DetectSchema(result.Table));
+
         return Serialize(new DocumentExtractionResponse(
             datasetId,
             result.Table.Headers,
@@ -166,7 +181,8 @@ public class DocumentJobRunner : IDocumentJobRunner
             result.NumCtx,
             result.LongEdge,
             result.Attempts,
-            result.DurationMs));
+            result.DurationMs,
+            alignment));
     }
 
     /// Keşif geçişi: şema yok, kolonları model çıkarıyor, sonra var olan setlerle eşleşiyor.

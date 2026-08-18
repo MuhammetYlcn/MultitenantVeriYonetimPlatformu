@@ -172,6 +172,35 @@ public class SchemaMatcherTests
         Assert.Single(match.ExtraColumns);
     }
 
+    [Fact(DisplayName = "Eşleme: zayıf eşleme güçlü olanın önünü kesmez (birim / birim fiyat)")]
+    public void GucluEslemeOnce()
+    {
+        // Gerçek bir faturadan: belgede hem "birim" (adet, kutu) hem "birim fiyat" var,
+        // sette yalnız "birim_fiyat". Soldan sağa gidilseydi "birim" (0,7) kolonu kapar ve
+        // TAM tutan "birim fiyat" açıkta kalırdı — yani ölçü birimi tutar kolonuna yazılırdı.
+        var hedef = Set("Faturalar", ("birim_fiyat", "number"), ("miktar", "number"));
+        var belge = Belge(("birim", "text"), ("birim fiyat", "number"), ("miktar", "number"));
+
+        var match = SchemaMatcher.Score(belge, hedef);
+
+        Assert.Contains(match.Mappings,
+            m => m.Discovered == "birim fiyat" && m.Target == "birim_fiyat");
+        Assert.Equal(new[] { "birim" }, match.ExtraColumns);
+    }
+
+    [Fact(DisplayName = "Eşleme: sonuç listesi BELGEDEKİ kolon sırasını korur (ekran soldan sağa okur)")]
+    public void SiraBelgeSirasi()
+    {
+        var hedef = Set("Faturalar",
+            ("tutar", "number"), ("fatura_no", "text"), ("urun_adi", "text"));
+        var belge = Belge(("fatura_no", "text"), ("urun_adi", "text"), ("tutar", "number"));
+
+        var match = SchemaMatcher.Score(belge, hedef);
+
+        Assert.Equal(new[] { "fatura_no", "urun_adi", "tutar" },
+            match.Mappings.Select(m => m.Discovered));
+    }
+
     [Theory(DisplayName = "Eşleme: ad çözümlemesi ayraç, büyük harf ve iyelik ekini eler")]
     [InlineData("fatura_no", "Fatura No", 1.0)]
     [InlineData("urun_adi", "ÜRÜN ADI", 1.0)]

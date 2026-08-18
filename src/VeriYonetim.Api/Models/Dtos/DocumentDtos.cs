@@ -17,6 +17,9 @@ namespace VeriYonetim.Api.Models.Dtos;
 /// <param name="Errors">Şemaya uymayan hücreler — onay ekranı bunları işaretler.</param>
 /// <param name="Warnings">Bağlam taşması, düşürülen kalem satırı, düzleştirilen yapı…</param>
 /// <param name="Suspect">true ise çıkarım güvenilir sayılmıyor (bağlam taşması).</param>
+/// <param name="Alignment">Belgeden çıkan kolonların hedef setin şemasındaki karşılıkları.
+/// Onay ekranı kolon eşlemesini bununla açıyor; olmadığı zaman eşleşmeyen kolonlar
+/// kullanıcıya hiç sorulmadan atılıyordu.</param>
 public record DocumentExtractionResponse(
     Guid DatasetId,
     IReadOnlyList<string> Columns,
@@ -29,7 +32,53 @@ public record DocumentExtractionResponse(
     int NumCtx,
     int LongEdge,
     int Attempts,
-    int DurationMs);
+    int DurationMs,
+    DocumentAlignment? Alignment = null);
+
+/// <summary>
+/// Belgedeki kolonların BELİRLİ bir veri setinin şemasına hizalanması.
+///
+/// <see cref="DatasetMatchDto"/> ile aynı bilgiyi taşır ama farklı bir soruya cevap verir:
+/// o "bu belge hangi sete ait olabilir" diye sorar (aday listesi), bu ise hedef zaten
+/// belliyken "hangi kolon nereye yazılacak" der. Ayrı durmasının sebebi hedefin
+/// KOLONLARININ da gönderilmesi — onay ekranı eşlemeyi ancak seçenekleri bilirse
+/// kullanıcıya düzelttirebilir.
+/// </summary>
+/// <param name="TargetColumns">Hedef setin kayıtlı şeması (eşleme seçenekleri).</param>
+/// <param name="Mappings">belge kolonu → set kolonu; tip uyuşmazlığı işaretli.</param>
+/// <param name="MissingColumns">Sette var, belgede karşılığı bulunamadı — boş kalır.</param>
+/// <param name="ExtraColumns">Belgede var, sette karşılığı yok — kullanıcı karar verecek.</param>
+public record DocumentAlignment(
+    Guid DatasetId,
+    string Name,
+    IReadOnlyList<ColumnSchema> TargetColumns,
+    IReadOnlyList<ColumnMapping> Mappings,
+    IReadOnlyList<string> MissingColumns,
+    IReadOnlyList<string> ExtraColumns)
+{
+    /// Hizalamayı KEŞİFTEKİ eşleştiricinin aynısıyla kurar. İki akış tek koddan geçiyor:
+    /// ayrı yazılsalardı aynı belge, keşifte ve şemalı geçişte farklı eşleşirdi.
+    public static DocumentAlignment From(
+        DatasetSchema target, IReadOnlyList<ColumnSchema> discovered)
+    {
+        var match = SchemaMatcher.Score(discovered, target);
+
+        return new DocumentAlignment(target.DatasetId, target.Name, target.Columns,
+            match.Mappings, match.MissingColumns, match.ExtraColumns);
+    }
+}
+
+/// <summary>
+/// Onay ekranı hedef veri setini DEĞİŞTİRDİĞİNDE eşlemenin yeniden kurulması için.
+///
+/// Belge ikinci kez okunmuyor: elde zaten bir tablo var, sorulan tek şey o tablonun
+/// başka bir şemaya nasıl oturacağı. Eşleme kuralı (Türkçe ad çözümlemesi, iyelik eki,
+/// tip uyumu) sunucuda duruyor — istemciye taşınsaydı aynı kural iki dilde iki kez
+/// yazılmış ve zamanla ayrışmış olurdu.
+/// </summary>
+public record DocumentAlignRequest(
+    IReadOnlyList<string>? Columns,
+    IReadOnlyList<string[]>? Rows);
 
 /// <summary>
 /// KEŞİF geçişinin sonucu: belge şemasız okundu, çıkan taslak var olan setlerle eşleştirildi.
@@ -66,10 +115,15 @@ public record DocumentDiscoveryResponse(
 /// </summary>
 /// <param name="JobId">Bu tablonun geldiği iş. Verilirse belge görüntüsü onaydan sonra
 /// silinir: görüntü işin ömrüne bağlı bir ara üründür, kalıcı olan kaydedilen satırlardır.</param>
+/// <param name="NewColumns">Sette bulunmayıp kullanıcının EKLENMESİNİ istediği kolon adları.
+/// Tipleri sunucu değerlerden algılar (dosyadan içe aktarmayla aynı katman); kolonlar
+/// satırlarla AYNI işlemde yazılır, yoksa kaydetme yarıda kalınca sette sahipsiz bir kolon
+/// kalırdı.</param>
 public record DocumentConfirmRequest(
     IReadOnlyList<string>? Columns,
     IReadOnlyList<string[]>? Rows,
-    Guid? JobId = null);
+    Guid? JobId = null,
+    IReadOnlyList<string>? NewColumns = null);
 
 /// <summary>Kaydetme sonucu. Satırlar EKLENİR (içe aktarma gibi eskileri silmez).</summary>
 public record DocumentConfirmResponse(Guid DatasetId, int SavedRows, int TotalRows);
