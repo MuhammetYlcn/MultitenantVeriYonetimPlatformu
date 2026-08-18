@@ -870,17 +870,43 @@ class ApiService {
   ///
   /// [jobId] verilirse sunucu belge görüntüsünü siler: görüntü işin ömrüne bağlı bir ara
   /// üründü, kalıcı olan az önce yazılan satırlardır.
+  ///
+  /// [newColumns] kullanıcının sete EKLENMESİNİ istediği kolonlar. Gönderilen başlıklardan
+  /// biri sette yoksa ve burada da geçmiyorsa sunucu isteği reddediyor — eşleşmeyen kolonun
+  /// sessizce düştüğü eski davranış böyle kapatıldı.
   static Future<int> confirmDocument(
       String datasetId, List<String> columns, List<List<String>> rows,
-      {String? jobId}) async {
+      {String? jobId, List<String> newColumns = const []}) async {
     await _ensureFreshToken();
     final res = await http.post(
       Uri.parse('$baseUrl/api/datasets/$datasetId/document/confirm'),
       headers: {..._authHeader, 'Content-Type': 'application/json'},
-      body: jsonEncode({'columns': columns, 'rows': rows, 'jobId': jobId}),
+      body: jsonEncode({
+        'columns': columns,
+        'rows': rows,
+        'jobId': jobId,
+        'newColumns': newColumns,
+      }),
     );
     if (res.statusCode != 200) throw ApiException(_message(res));
     return (jsonDecode(res.body) as Map<String, dynamic>)['savedRows'] as int;
+  }
+
+  /// POST /api/datasets/{id}/document/align — tabloyu bir setin şemasına hizalar.
+  ///
+  /// Kullanıcı onay ekranında hedefi değiştirince çağrılır; belge YENİDEN OKUNMAZ, yalnız
+  /// kolon adları karşılaştırılır (milisaniyeler). Eşleme kuralı sunucuda duruyor, burada
+  /// tekrarlanmıyor.
+  static Future<DocumentAlignment> alignDocument(
+      String datasetId, List<String> columns, List<List<String>> rows) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/datasets/$datasetId/document/align'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode({'columns': columns, 'rows': rows}),
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return DocumentAlignment.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
   }
 
   /// Canlı bildirim kanalının kimliği. Hub bağlantısı token'ı adres satırında taşır
@@ -1442,6 +1468,10 @@ class DocumentExtraction {
   /// Kolon tipleri — keşifte değerlerden algılandı, şemalı geçişte boş kalır.
   final List<SchemaColumn> detectedColumns;
 
+  /// Şemalı geçişte hedef setin kolonlarıyla kurulan eşleme. Onay ekranı kolon
+  /// başlıklarını bununla açıyor; keşif geçişinde hedef henüz yok, null kalır.
+  final DocumentAlignment? alignment;
+
   DocumentExtraction({
     required this.columns,
     required this.rows,
@@ -1454,6 +1484,7 @@ class DocumentExtraction {
     this.matches = const [],
     this.suggestedName = '',
     this.detectedColumns = const [],
+    this.alignment,
   });
 
   /// `POST /document/extract` yanıtı: şema biliniyor, kolonlar düz metin listesi.
@@ -1467,6 +1498,9 @@ class DocumentExtraction {
         suspect: j['suspect'] as bool? ?? false,
         model: j['model'] as String? ?? '',
         durationMs: j['durationMs'] as int? ?? 0,
+        alignment: j['alignment'] == null
+            ? null
+            : DocumentAlignment.fromJson(j['alignment'] as Map<String, dynamic>),
       );
 
   /// `POST /documents/discover` yanıtı: kolonlar tipleriyle gelir, üstüne set önerileri.
@@ -1535,6 +1569,55 @@ class DatasetSuggestion {
 
   /// Yüzde olarak benzerlik — kullanıcıya 0-1 arası ondalık göstermek anlamsız.
   int get percent => (score * 100).round();
+}
+
+/// Belgeden çıkan kolonların BELİRLİ bir setin şemasına hizalanması.
+///
+/// [DatasetSuggestion] ile aynı bilgiyi taşır ama farklı bir soruya cevap verir: o "hangi
+/// set" der, bu "hangi kolon nereye" der. Hedefin kolonlarını da taşıması şart — onay
+/// ekranı eşlemeyi ancak seçenekleri bilirse kullanıcıya düzelttirebilir.
+class DocumentAlignment {
+  final String datasetId;
+  final String name;
+  final List<SchemaColumn> targetColumns;
+  final List<ColumnMapping> mappings;
+  final List<String> missingColumns;
+  final List<String> extraColumns;
+
+  DocumentAlignment({
+    required this.datasetId,
+    required this.name,
+    required this.targetColumns,
+    required this.mappings,
+    required this.missingColumns,
+    required this.extraColumns,
+  });
+
+  factory DocumentAlignment.fromJson(Map<String, dynamic> j) {
+    var ordinal = 0;
+
+    return DocumentAlignment(
+      datasetId: j['datasetId'] as String,
+      name: j['name'] as String? ?? '',
+      // Sıra sunucudan geldiği gibi korunuyor (ordinal'e göre okunmuştu); istemcide
+      // yeniden numaralandırmak yalnız SchemaColumn'un alanını doldurmak için.
+      targetColumns: (j['targetColumns'] as List? ?? [])
+          .map((e) => SchemaColumn.fromJson(
+              {...e as Map<String, dynamic>, 'ordinal': ordinal++}))
+          .toList(),
+      mappings: (j['mappings'] as List? ?? [])
+          .map((e) => ColumnMapping.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      missingColumns:
+          (j['missingColumns'] as List? ?? []).map((e) => e as String).toList(),
+      extraColumns: (j['extraColumns'] as List? ?? []).map((e) => e as String).toList(),
+    );
+  }
+
+  /// belge kolonu → set kolonu. Onay ekranı eşlemeyi bununla kuruyor.
+  Map<String, ColumnMapping> get byDiscovered => {
+        for (final m in mappings) m.discovered: m,
+      };
 }
 
 /// Belgedeki bir kolonun hedef setteki karşılığı.
