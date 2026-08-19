@@ -43,5 +43,18 @@ public class AskMessage
     // AskResponse'un serileştirilmiş hâli.
     public string ResponseJson { get; set; } = null!;
 
+    /// <summary>
+    /// Bu yanıtı üreten sorgu planı (modelin ham çıktısı).
+    ///
+    /// Neden saklanıyor: kullanıcı bir cevabı görüp "bunu izle" diyebiliyor ve izleyici
+    /// tekrar koşarken modele SORMUYOR, kaydedilmiş planı çalıştırıyor. Plan burada
+    /// durmasaydı istemcinin onu geri göndermesi gerekirdi — yani izlenen sorgu, ekranda
+    /// cevabı gösterilenle aynı olduğunu ispat edemezdi.
+    ///
+    /// Eski kayıtlarda null: bu alandan önce üretilmiş yanıtlar izlenemez, izleyici kurma
+    /// ucu bunu açık bir hatayla söyler.
+    /// </summary>
+    public string? PlanJson { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

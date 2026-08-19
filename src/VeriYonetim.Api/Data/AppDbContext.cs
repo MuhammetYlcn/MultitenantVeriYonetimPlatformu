@@ -28,6 +28,8 @@ public class AppDbContext : DbContext
     public DbSet<AskMessage> AskMessages => Set<AskMessage>();
     public DbSet<AccountToken> AccountTokens => Set<AccountToken>();
     public DbSet<DocumentJob> DocumentJobs => Set<DocumentJob>();
+    public DbSet<DatasetWatch> DatasetWatches => Set<DatasetWatch>();
+    public DbSet<DatasetWatchRun> DatasetWatchRuns => Set<DatasetWatchRun>();
 
     // Platform katmanı: tenant'ların üstünde durur, bu yüzden global query filter YOK.
     public DbSet<PlatformAdmin> PlatformAdmins => Set<PlatformAdmin>();
@@ -251,6 +253,52 @@ public class AppDbContext : DbContext
             // bu alanı bilinçli olarak filtresiz okuyup bağlamı ondan kurar — yumurta-tavuk
             // sorununun tek kırıldığı yer orasıdır (bkz. DocumentJobRunner).
             job.HasQueryFilter(j => j.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<DatasetWatch>(watch =>
+        {
+            watch.Property(w => w.Title).HasMaxLength(200);
+            watch.Property(w => w.Question).HasMaxLength(500);
+            watch.Property(w => w.Model).HasMaxLength(100);
+            watch.Property(w => w.Summary).HasMaxLength(1000);
+            watch.Property(w => w.ConditionKind).HasMaxLength(20);
+            watch.Property(w => w.ConditionOp).HasMaxLength(10);
+            watch.Property(w => w.Status).HasMaxLength(20);
+
+            // Plan JSON olarak duruyor; jsonb seçilmesinin sebebi DocumentJob.ResultJson
+            // ile aynı: tipin ne olduğu tabloda da görünsün.
+            watch.Property(w => w.PlanJson).HasColumnType("jsonb");
+
+            // Kuran kullanıcı silinirse izleyici DÜŞMEZ, yalnız "kuran" alanı boşalır:
+            // izleyici firmaya ait ve işten ayrılan birinin kurduğu alarmın onunla birlikte
+            // sessizce yok olması, tam da bu adımın kapatmak istediği hâldir. Cascade
+            // izleyiciyi silerdi, Restrict ise kullanıcının silinmesini engellerdi —
+            // ikisi de yanlış cevap.
+            watch.HasOne(w => w.CreatedByUser)
+                .WithMany()
+                .HasForeignKey(w => w.CreatedByUserId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // Zamanlayıcı "süresi gelenler" diye tarıyor; tarama tenant ayrımı YAPMADAN
+            // çalıştığı için indeks yalnız bu iki alan üzerinde anlamlı.
+            watch.HasIndex(w => new { w.IsEnabled, w.NextRunAt });
+
+            // İzolasyon: izleyici doğrudan tenant taşıyor (DocumentJob deseni). Arka plan
+            // koşusu bu alanı filtresiz okuyup bağlamı ondan kurar.
+            watch.HasQueryFilter(w => w.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<DatasetWatchRun>(run =>
+        {
+            run.HasOne(r => r.Watch)
+                .WithMany(w => w.Runs)
+                .HasForeignKey(r => r.WatchId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Değer geçmişi "şu izleyicinin son N koşusu" biçiminde okunuyor.
+            run.HasIndex(r => new { r.WatchId, r.RanAt });
+
+            run.HasQueryFilter(r => r.Watch.TenantId == _tenantContext.TenantId);
         });
     }
 }

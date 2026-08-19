@@ -27,6 +27,14 @@ builder.Services.AddScoped<ITenantProvisioner, TenantProvisioner>();
 builder.Services.AddScoped<IDatasetImportService, DatasetImportService>();
 builder.Services.AddScoped<IDatasetQueryExecutor, DatasetQueryExecutor>();
 builder.Services.AddScoped<IRelationDetector, RelationDetector>();
+builder.Services.AddScoped<ITenantCatalogLoader, TenantCatalogLoader>();
+
+// İzleyiciler: kaydedilmiş bir planın ölçülmesi (evaluator), koşunun yürütülüp durumun
+// güncellenmesi (runner) ve eşik uyarısının firmaya bildirilmesi (notifier).
+builder.Services.AddScoped<IWatchEvaluator, WatchEvaluator>();
+builder.Services.AddScoped<IWatchRunner, WatchRunner>();
+builder.Services.AddScoped<IWatchNotifier, SignalRWatchNotifier>();
+builder.Services.AddScoped<IWatchScheduler, WatchScheduler>();
 builder.Services.AddHttpContextAccessor();
 
 // Tek örnek, iki arayüz: okuma sözleşmesi her yere enjekte ediliyor, yazma yeteneği
@@ -228,8 +236,21 @@ using (var scope = app.Services.CreateScope())
 // Yalnız Hangfire sunucusunun açık olduğu yerde kaydediliyor: testlerde işçi çalışmadığı
 // için bu kaydın bir karşılığı olmazdı.
 if (app.Configuration.GetValue("Hangfire:RunServer", true))
-    app.Services.GetRequiredService<IRecurringJobManager>()
-        .AddOrUpdate<IDocumentJobCleaner>("document-job-cleanup", c => c.CleanAsync(), Cron.Hourly);
+{
+    var recurring = app.Services.GetRequiredService<IRecurringJobManager>();
+
+    recurring.AddOrUpdate<IDocumentJobCleaner>(
+        "document-job-cleanup", c => c.CleanAsync(), Cron.Hourly);
+
+    // İzleyici taraması. Beş dakikada bir yeterli: en sık koşu sıklığı 15 dakika
+    // (bkz. WatchIntervals), yani bir izleyici en fazla beş dakika geç çalışır. Daha sık
+    // taramak aynı işi daha çok boş sorguyla yapmak olurdu.
+    //
+    // Tarama, HANGFIRE SUNUCUSUYLA BİRLİKTE kapanıyor: testlerde işçi çalışmadığı için
+    // izleyiciler kendiliğinden koşmaz, testler zamanlayıcıyı elle tetikler.
+    recurring.AddOrUpdate<IWatchScheduler>(
+        "watch-sweep", s => s.SweepAsync(), "*/5 * * * *");
+}
 
 // Geliştirmede: uygulama ayağa kalkınca varsayılan tarayıcıyı Swagger'a aç.
 // (dotnet run, launchSettings'teki launchBrowser'ı dinlemez; bu o boşluğu doldurur.)

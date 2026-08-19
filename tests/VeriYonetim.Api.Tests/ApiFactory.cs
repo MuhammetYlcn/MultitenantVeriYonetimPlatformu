@@ -59,7 +59,8 @@ public class ApiFactory : WebApplicationFactory<Program>
         await db.Database.ExecuteSqlRawAsync(
             """
             TRUNCATE TABLE "Datasets", "RefreshTokens", "AccountTokens", "Users", "Tenants",
-                           "PlatformAdmins", "PlatformAuditLogs", "DocumentJobs" CASCADE
+                           "PlatformAdmins", "PlatformAuditLogs", "DocumentJobs",
+                           "DatasetWatches" CASCADE
             """);
 
         var platformAuth = scope.ServiceProvider.GetRequiredService<IPlatformAuthService>();

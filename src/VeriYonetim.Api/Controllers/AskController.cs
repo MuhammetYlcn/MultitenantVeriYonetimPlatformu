@@ -26,17 +26,20 @@ public class AskController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly ITenantContext _tenantContext;
+    private readonly ITenantCatalogLoader _catalogLoader;
     private readonly IQueryPlannerService _planner;
     private readonly IDatasetQueryExecutor _executor;
     private readonly IAskSuggestionService _suggestions;
     private readonly ILogger<AskController> _logger;
 
     public AskController(AppDbContext db, ITenantContext tenantContext,
+        ITenantCatalogLoader catalogLoader,
         IQueryPlannerService planner, IDatasetQueryExecutor executor,
         IAskSuggestionService suggestions, ILogger<AskController> logger)
     {
         _db = db;
         _tenantContext = tenantContext;
+        _catalogLoader = catalogLoader;
         _planner = planner;
         _executor = executor;
         _suggestions = suggestions;
@@ -166,7 +169,7 @@ public class AskController : ControllerBase
 
             // Yanıt sohbete kaydedilir; kimliği istemciye dönüyor ki sonraki soru
             // aynı sohbete eklensin.
-            var conversationId = await SaveTurnAsync(request.ConversationId, response, ct);
+            var conversationId = await SaveTurnAsync(request.ConversationId, response, planResult, ct);
 
             return Ok(response with { ConversationId = conversationId });
         }
@@ -299,7 +302,7 @@ public class AskController : ControllerBase
 
     // Yanıtı sohbete ekler; sohbet yoksa açar. Sohbet kimliği döner.
     private async Task<Guid?> SaveTurnAsync(
-        Guid? conversationId, AskResponse response, CancellationToken ct)
+        Guid? conversationId, AskResponse response, PlanResult planResult, CancellationToken ct)
     {
         var userId = CurrentUserId;
         if (userId is null) return null;
@@ -332,7 +335,9 @@ public class AskController : ControllerBase
             Question = response.Question,
             // Yanıtın tamamı saklanır: geçmiş kayıt yeniden hesaplanmadan, verildiği
             // hâliyle gösterilecek.
-            ResponseJson = JsonSerializer.Serialize(response, WebJson)
+            ResponseJson = JsonSerializer.Serialize(response, WebJson),
+            // Planın kendisi de saklanır — "bunu izle" dendiğinde çalıştırılacak olan bu.
+            PlanJson = planResult.RawJson
         });
 
         await _db.SaveChangesAsync(ct);
@@ -350,37 +355,7 @@ public class AskController : ControllerBase
     // ayırt edilemez olmalı ki geçmiş sohbet aynı arayüzle çizilebilsin.
     private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
 
-    // Firmanın kataloğu. Global query filter sayesinde yalnız bu tenant'ın setleri gelir —
-    // izolasyonun dayanağı bu: kataloğa girmeyen bir veri seti sorguya da giremez.
-    private async Task<TenantCatalog> LoadCatalogAsync()
-    {
-        var datasets = await _db.Datasets
-            .OrderBy(d => d.Name)
-            .Select(d => new { d.Id, d.Name, d.Description, d.RowCount })
-            .ToListAsync();
-
-        var columns = await _db.DatasetColumns
-            .OrderBy(c => c.Ordinal)
-            .Select(c => new { c.DatasetId, c.Name, c.Type })
-            .ToListAsync();
-
-        var byDataset = columns
-            .GroupBy(c => c.DatasetId)
-            .ToDictionary(g => g.Key, g => (IReadOnlyDictionary<string, string>)
-                g.ToDictionary(c => c.Name, c => c.Type));
-
-        var infos = datasets
-            .Select(d => new DatasetInfo(d.Id, d.Name, d.Description,
-                byDataset.GetValueOrDefault(d.Id, new Dictionary<string, string>()), d.RowCount))
-            // Şemasız setler modele hiç gösterilmez: seçilirlerse sorgu kurulamaz ve
-            // kullanıcı sebebini anlamayacağı bir hata alırdı.
-            .Where(d => d.Columns.Count > 0)
-            .ToList();
-
-        var relations = await _db.DatasetRelations
-            .Select(r => new RelationInfo(r.FromDatasetId, r.FromColumn, r.ToDatasetId, r.ToColumn))
-            .ToListAsync();
-
-        return new TenantCatalog(infos, relations);
-    }
+    // Firmanın kataloğu. Yükleme ortak servise taşındı (bkz. TenantCatalogLoader): aynı
+    // kataloğu izleyicinin arka plandaki koşusu da okuyor ve ikisinin ayrışmaması şart.
+    private Task<TenantCatalog> LoadCatalogAsync() => _catalogLoader.LoadAsync();
 }
