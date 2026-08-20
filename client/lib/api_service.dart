@@ -909,6 +909,133 @@ class ApiService {
     return DocumentAlignment.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
   }
 
+  // --- izleyiciler ---
+  //
+  // Kurmak/değiştirmek/silmek/elle çalıştırmak Editor+Admin ister (sunucu da öyle
+  // denetliyor); görmek ve okundu işaretlemek herkese açık.
+
+  // GET /api/watches — firmanın izleyicileri. Kırık olanlar sunucuda en üste alınıyor.
+  static Future<List<Watch>> watches() async {
+    await _ensureFreshToken();
+    final res = await http.get(Uri.parse('$baseUrl/api/watches'), headers: _authHeader);
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return (jsonDecode(res.body) as List)
+        .map((e) => Watch.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  // GET /api/watches/{id} — özet + koşu geçmişi (değer geçmişi grafiğinin kaynağı).
+  static Future<WatchDetail> watch(String id) async {
+    await _ensureFreshToken();
+    final res = await http.get(Uri.parse('$baseUrl/api/watches/$id'), headers: _authHeader);
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return WatchDetail.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  /// POST /api/watches — bir cevabı izlemeye al.
+  ///
+  /// PLAN GÖNDERİLMİYOR, yalnız [messageId]: sunucu planı kendi kaydından okuyor.
+  /// İstemci plan gönderebilseydi, izlenen sorgunun ekranda cevabı gösterilen sorguyla
+  /// aynı olduğunu hiçbir şey garanti etmezdi.
+  static Future<Watch> createWatch({
+    required String messageId,
+    required int intervalMinutes,
+    required String conditionKind,
+    required String op,
+    required double threshold,
+    String? title,
+  }) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/watches'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'messageId': messageId,
+        'intervalMinutes': intervalMinutes,
+        'conditionKind': conditionKind,
+        'op': op,
+        'threshold': threshold,
+        if (title != null && title.isNotEmpty) 'title': title,
+      }),
+    );
+    if (res.statusCode != 201) throw ApiException(_message(res));
+    return Watch.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  /// PATCH /api/watches/{id} — eşik, sıklık, ad, açık/kapalı.
+  ///
+  /// Soru ve planı DEĞİŞTİRİLEMEZ: izlenen ölçüm değişirse değer geçmişi anlamını yitirir.
+  static Future<Watch> updateWatch(
+    String id, {
+    String? title,
+    int? intervalMinutes,
+    String? conditionKind,
+    String? op,
+    double? threshold,
+    bool? isEnabled,
+  }) async {
+    await _ensureFreshToken();
+    final res = await http.patch(
+      Uri.parse('$baseUrl/api/watches/$id'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode({
+        // Verilmeyen alan istekte HİÇ yer almaz (null olarak değil): sunucu tarafında
+        // "verilmedi" ile "null'a çekildi" ayrımı buna dayanıyor.
+        'title': ?title,
+        'intervalMinutes': ?intervalMinutes,
+        'conditionKind': ?conditionKind,
+        'op': ?op,
+        'threshold': ?threshold,
+        'isEnabled': ?isEnabled,
+      }),
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return Watch.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  // POST /api/watches/{id}/run — "şimdi kontrol et". Zamanlanmış koşuyu beklemeden
+  // sınamak için: kırılan bir izleyici düzeltildikten sonra da bununla denenir.
+  static Future<Watch> runWatch(String id) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/watches/$id/run'),
+      headers: _authHeader,
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return Watch.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+  }
+
+  // DELETE /api/watches/{id} — koşu geçmişiyle birlikte gider.
+  static Future<void> deleteWatch(String id) async {
+    await _ensureFreshToken();
+    final res =
+        await http.delete(Uri.parse('$baseUrl/api/watches/$id'), headers: _authHeader);
+    if (res.statusCode != 204) throw ApiException(_message(res));
+  }
+
+  // GET /api/watches/alerts — okunmamış uyarılar (rozet + bildirim kutusu).
+  static Future<List<WatchAlert>> watchAlerts() async {
+    await _ensureFreshToken();
+    final res =
+        await http.get(Uri.parse('$baseUrl/api/watches/alerts'), headers: _authHeader);
+    if (res.statusCode != 200) throw ApiException(_message(res));
+    return (jsonDecode(res.body) as List)
+        .map((e) => WatchAlert.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// POST /api/watches/alerts/read — uyarıları okundu işaretle.
+  /// [runIds] boş bırakılırsa okunmamışların TAMAMI kapatılır ("tümünü temizle").
+  static Future<void> markWatchAlertsRead({List<String>? runIds}) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/watches/alerts/read'),
+      headers: {..._authHeader, 'Content-Type': 'application/json'},
+      body: jsonEncode({'runIds': ?runIds}),
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+  }
+
   /// Canlı bildirim kanalının kimliği. Hub bağlantısı token'ı adres satırında taşır
   /// (tarayıcı WebSocket el sıkışmasında özel başlığa izin vermez).
   static Future<String?> hubToken() async {
@@ -1190,6 +1317,14 @@ class AskResult {
   /// Yanıtın kaydedildiği sohbet. Sonraki soru bununla gönderilir ki aynı sohbete eklensin.
   final String? conversationId;
 
+  /// Yanıtın sohbetteki kaydı. "Bunu izle" sunucuya PLAN göndermiyor, yalnız bu kimliği
+  /// söylüyor — planı sunucu kendi kaydından okuyor.
+  final String? messageId;
+
+  /// Bu cevap neden izlenemez; null ise izlenebilir. Düğme gizlenmiyor, bu metinle
+  /// kapatılıyor: kullanıcı gruplanmış bir sonucu neden izleyemediğini orada okumalı.
+  final String? watchBlockReason;
+
   final int planMs;
   final int queryMs;
   final AskRows? rows;
@@ -1204,6 +1339,8 @@ class AskResult {
     required this.model,
     this.reason,
     this.conversationId,
+    this.messageId,
+    this.watchBlockReason,
     required this.planMs,
     required this.queryMs,
     this.rows,
@@ -1213,6 +1350,28 @@ class AskResult {
 
   bool get isUnsupported => kind == 'unsupported';
 
+  /// İzlemeye alınabilir mi: hem kimliği bilinmeli hem planı izlenebilir olmalı.
+  bool get canWatch => messageId != null && watchBlockReason == null;
+
+  /// Geçmiş sohbetten gelen tur için: donmuş yanıta, okuma anında hesaplanan
+  /// izlenebilirlik bilgisi ekleniyor (bkz. ConversationTurn).
+  AskResult withWatchInfo({String? messageId, String? watchBlockReason}) => AskResult(
+        question: question,
+        kind: kind,
+        summary: summary,
+        datasets: datasets,
+        model: model,
+        reason: reason,
+        conversationId: conversationId,
+        messageId: messageId ?? this.messageId,
+        watchBlockReason: watchBlockReason ?? this.watchBlockReason,
+        planMs: planMs,
+        queryMs: queryMs,
+        rows: rows,
+        aggregate: aggregate,
+        comparison: comparison,
+      );
+
   factory AskResult.fromJson(Map<String, dynamic> j) => AskResult(
         question: j['question'] as String? ?? '',
         kind: j['kind'] as String? ?? '',
@@ -1221,6 +1380,8 @@ class AskResult {
         model: j['model'] as String? ?? '',
         reason: j['reason'] as String?,
         conversationId: j['conversationId'] as String?,
+        messageId: j['messageId'] as String?,
+        watchBlockReason: j['watchBlockReason'] as String?,
         planMs: (j['planMs'] as num?)?.toInt() ?? 0,
         queryMs: (j['queryMs'] as num?)?.toInt() ?? 0,
         rows: j['rows'] == null
@@ -1282,9 +1443,14 @@ class ChatTurn {
 
   ChatTurn({required this.question, required this.result});
 
+  // İzlenebilirlik yanıtın İÇİNDEN değil turun yanından okunuyor: kaydedilmiş yanıt o
+  // günkü hâliyle donmuştur, izleyiciler ise sonradan geldi.
   factory ChatTurn.fromJson(Map<String, dynamic> j) => ChatTurn(
         question: j['question'] as String,
-        result: AskResult.fromJson(j['response'] as Map<String, dynamic>),
+        result: AskResult.fromJson(j['response'] as Map<String, dynamic>).withWatchInfo(
+          messageId: j['messageId'] as String?,
+          watchBlockReason: j['watchBlockReason'] as String?,
+        ),
       );
 }
 
@@ -1638,3 +1804,189 @@ class ColumnMapping {
         typeConflict: j['typeConflict'] as bool? ?? false,
       );
 }
+
+// --- izleyiciler -------------------------------------------------------------------------
+
+/// Kaydedilmiş bir soru ve ona bağlı eşik.
+///
+/// Sohbetin aksine FİRMAYA ait: bir uyarı iş meselesidir, kuran kişi izinliyken de
+/// görülmelidir. Bu yüzden listede "kuran" alanı var — sahiplik değil, iz.
+class Watch {
+  final String id;
+  final String title;
+  final String question;
+
+  /// "ok" | "breaching" | "broken". Kırık, izleyicinin ÇALIŞMADIĞI durumdur; sıfır
+  /// ölçmekle aynı şey değil.
+  final String status;
+
+  final bool isEnabled;
+  final int intervalMinutes;
+
+  /// "value" (ölçülen sayı) | "change" (önceki koşuya göre yüzde değişim).
+  final String conditionKind;
+
+  /// "gt" | "gte" | "lt" | "lte".
+  final String op;
+  final double threshold;
+
+  final double? lastValue;
+  final double? previousValue;
+  final DateTime? lastRunAt;
+  final DateTime? lastTriggeredAt;
+  final DateTime nextRunAt;
+
+  /// Kırıksa sebebi.
+  final String? error;
+  final String createdBy;
+  final int unreadCount;
+
+  Watch({
+    required this.id,
+    required this.title,
+    required this.question,
+    required this.status,
+    required this.isEnabled,
+    required this.intervalMinutes,
+    required this.conditionKind,
+    required this.op,
+    required this.threshold,
+    this.lastValue,
+    this.previousValue,
+    this.lastRunAt,
+    this.lastTriggeredAt,
+    required this.nextRunAt,
+    this.error,
+    required this.createdBy,
+    required this.unreadCount,
+  });
+
+  bool get isBroken => status == 'broken';
+  bool get isBreaching => status == 'breaching';
+
+  factory Watch.fromJson(Map<String, dynamic> j) => Watch(
+        id: j['id'] as String,
+        title: j['title'] as String,
+        question: j['question'] as String,
+        status: j['status'] as String? ?? 'ok',
+        isEnabled: j['isEnabled'] as bool? ?? true,
+        intervalMinutes: (j['intervalMinutes'] as num?)?.toInt() ?? 60,
+        conditionKind: j['conditionKind'] as String? ?? 'value',
+        op: j['op'] as String? ?? 'gt',
+        threshold: (j['threshold'] as num?)?.toDouble() ?? 0,
+        lastValue: (j['lastValue'] as num?)?.toDouble(),
+        previousValue: (j['previousValue'] as num?)?.toDouble(),
+        lastRunAt: _parseDate(j['lastRunAt']),
+        lastTriggeredAt: _parseDate(j['lastTriggeredAt']),
+        nextRunAt: _parseDate(j['nextRunAt']) ?? DateTime.now(),
+        error: j['error'] as String?,
+        createdBy: j['createdBy'] as String? ?? '',
+        unreadCount: (j['unreadCount'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// Tek bir koşu — değer geçmişi grafiğinin noktası.
+///
+/// [value] null ise ölçüm YAPILAMADI; sıfır değil. Grafik bunu boşluk olarak çiziyor,
+/// çünkü "ölçemedik" ile "sıfır ölçtük" farklı şeyler.
+class WatchRun {
+  final String id;
+  final DateTime ranAt;
+  final double? value;
+  final bool breached;
+  final String? error;
+  final bool notified;
+  final DateTime? readAt;
+
+  WatchRun({
+    required this.id,
+    required this.ranAt,
+    this.value,
+    required this.breached,
+    this.error,
+    required this.notified,
+    this.readAt,
+  });
+
+  factory WatchRun.fromJson(Map<String, dynamic> j) => WatchRun(
+        id: j['id'] as String,
+        ranAt: _parseDate(j['ranAt']) ?? DateTime.now(),
+        value: (j['value'] as num?)?.toDouble(),
+        breached: j['breached'] as bool? ?? false,
+        error: j['error'] as String?,
+        notified: j['notified'] as bool? ?? false,
+        readAt: _parseDate(j['readAt']),
+      );
+}
+
+/// İzleyicinin ayrıntısı: özet + planın Türkçe okunuşu + koşu geçmişi.
+class WatchDetail {
+  final Watch watch;
+
+  /// Planın düz Türkçe okunuşu ("şöyle anladım"), kurulduğu andaki hâliyle.
+  final String summary;
+  final List<WatchRun> runs;
+
+  WatchDetail({required this.watch, required this.summary, required this.runs});
+
+  factory WatchDetail.fromJson(Map<String, dynamic> j) => WatchDetail(
+        watch: Watch.fromJson(j['watch'] as Map<String, dynamic>),
+        summary: j['summary'] as String? ?? '',
+        runs: (j['runs'] as List? ?? [])
+            .map((e) => WatchRun.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
+/// Okunmamış bir uyarı — bildirim kutusunun satırı.
+class WatchAlert {
+  final String runId;
+  final String watchId;
+  final String title;
+  final DateTime ranAt;
+  final double? value;
+  final String? error;
+  final bool broken;
+
+  WatchAlert({
+    required this.runId,
+    required this.watchId,
+    required this.title,
+    required this.ranAt,
+    this.value,
+    this.error,
+    required this.broken,
+  });
+
+  factory WatchAlert.fromJson(Map<String, dynamic> j) => WatchAlert(
+        runId: j['runId'] as String,
+        watchId: j['watchId'] as String,
+        title: j['title'] as String? ?? '',
+        ranAt: _parseDate(j['ranAt']) ?? DateTime.now(),
+        value: (j['value'] as num?)?.toDouble(),
+        error: j['error'] as String?,
+        broken: j['broken'] as bool? ?? false,
+      );
+}
+
+DateTime? _parseDate(dynamic value) {
+  if (value is! String || value.isEmpty) return null;
+  // Sunucu UTC yazıyor; yerel saate çevrilmezse "5 dakika önce" hesabı saatlerce şaşar.
+  return DateTime.tryParse(value)?.toLocal();
+}
+
+/// İzin verilen koşu sıklıkları (sunucudaki WatchIntervals ile aynı liste).
+const watchIntervals = <int, String>{
+  15: '15 dakikada bir',
+  60: 'Saatte bir',
+  360: '6 saatte bir',
+  1440: 'Günde bir',
+};
+
+/// Karşılaştırmaların okunur karşılığı.
+const watchOps = <String, String>{
+  'gt': 'şundan büyükse',
+  'gte': 'şundan büyük ya da eşitse',
+  'lt': 'şundan küçükse',
+  'lte': 'şundan küçük ya da eşitse',
+};

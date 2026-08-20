@@ -622,6 +622,217 @@ class AppLineChart extends StatelessWidget {
   }
 }
 
+/// Bir izleyicinin değer geçmişi: zaman içinde ölçülen sayı + eşik çizgisi.
+///
+/// Pano çizgisinden (bkz. [AppLineChart]) iki farkı var ve ikisi de izleyiciye özgü:
+///
+///  1. **Değer NULL olabilir ve boşluk olarak çizilir.** Null "ölçemedik" demektir
+///     (izleyici kırıktı), sıfır değil. Sıfır olarak çizilseydi grafikte gerçek bir
+///     düşüş gibi görünür, kullanıcı olmayan bir olguya bakardı — sunucunun koşuya sıfır
+///     yerine null yazmasının sebebi de bu.
+///  2. **Eşik yatay bir çizgi olarak duruyor.** Bir izleyicinin değer geçmişine bakmanın
+///     asıl sorusu "eşiğe ne kadar yaklaştık" olduğundan, eşiği okuyucunun kafasında
+///     tutmasını beklemek grafiği yarı yararlı bırakırdı.
+///
+/// Eşiği aşan noktalar kırmızı çiziliyor: hangi koşunun uyarı doğurduğu tek bakışta
+/// görülsün.
+class AppHistoryChart extends StatelessWidget {
+  final List<String> labels;
+  final List<double?> values;
+
+  /// Yatay olarak çizilecek eşik. Yüzde değişim izleyen bir izleyicide anlamı yok
+  /// (eşik değerle aynı birimde değil), o yüzden null geçilebiliyor.
+  final double? threshold;
+  final List<bool> breached;
+  final double height;
+
+  const AppHistoryChart({
+    super.key,
+    required this.labels,
+    required this.values,
+    this.threshold,
+    this.breached = const [],
+    this.height = 240,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final measured = values.whereType<double>().toList();
+    final maxV = measured.fold<double>(0, (a, v) => v > a ? v : a);
+    final minV = measured.fold<double>(double.infinity, (a, v) => v < a ? v : a);
+
+    // Eşik de ölçeğe giriyor: eşik tavanın üstünde kalırsa çizgi görünmez ve grafik
+    // "eşiğe ne kadar yaklaştık" sorusunu cevaplayamaz.
+    final top = threshold == null ? maxV : math.max(maxV, threshold!);
+    final bottom = measured.isEmpty
+        ? 0.0
+        : (threshold == null ? minV : math.min(minV, threshold!));
+
+    final negative = measured.isNotEmpty && bottom < 0;
+    final axis = AxisScale.forMax(negative ? top - bottom : top);
+    final low = negative ? bottom * 1.1 : 0.0;
+
+    final step = (labels.length / 6).ceil().clamp(1, 999);
+
+    return _ChartFrame(
+      height: height,
+      isEmpty: measured.isEmpty,
+      child: LineChart(
+        LineChartData(
+          minY: low,
+          maxY: negative ? low + axis.max : axis.max,
+          gridData: _grid(axis.interval),
+          borderData: FlBorderData(show: false),
+          // Eşik çizgisi: kesik, uyarı renginde, sağında "eşik" etiketiyle.
+          extraLinesData: threshold == null
+              ? const ExtraLinesData()
+              : ExtraLinesData(horizontalLines: [
+                  HorizontalLine(
+                    y: threshold!,
+                    color: AppColors.warning.withValues(alpha: 0.75),
+                    strokeWidth: 1.5,
+                    dashArray: const [6, 4],
+                    label: HorizontalLineLabel(
+                      show: true,
+                      alignment: Alignment.topRight,
+                      style: const TextStyle(
+                          color: AppColors.warning,
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w600),
+                      labelResolver: (_) => 'eşik ${formatNumber(threshold)}',
+                    ),
+                  ),
+                ]),
+          lineTouchData: LineTouchData(
+            touchTooltipData: LineTouchTooltipData(
+              getTooltipColor: (_) => AppColors.surfaceAlt,
+              tooltipPadding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              fitInsideHorizontally: true,
+              fitInsideVertically: true,
+              getTooltipItems: (spots) => [
+                for (final s in spots)
+                  LineTooltipItem(
+                    '${labels[s.x.toInt()]}\n',
+                    const TextStyle(
+                        color: AppColors.muted,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600),
+                    children: [
+                      TextSpan(
+                        text: formatNumber(s.y),
+                        style: TextStyle(
+                            color: _isBreached(s.x.toInt())
+                                ? AppColors.danger
+                                : AppColors.text,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+          titlesData: FlTitlesData(
+            topTitles: const AxisTitles(),
+            rightTitles: const AxisTitles(),
+            leftTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                reservedSize: 52,
+                interval: axis.interval,
+                getTitlesWidget: (value, meta) => Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: Text(axis.format(value),
+                      style: _axisStyle, textAlign: TextAlign.right),
+                ),
+              ),
+            ),
+            bottomTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                reservedSize: 34,
+                interval: 1,
+                getTitlesWidget: (value, meta) {
+                  final i = value.toInt();
+                  if (i < 0 || i >= labels.length) return const SizedBox.shrink();
+                  if (i % step != 0 && i != labels.length - 1) {
+                    return const SizedBox.shrink();
+                  }
+                  return SideTitleWidget(
+                    meta: meta,
+                    space: 8,
+                    child: Text(labels[i], style: _axisStyle),
+                  );
+                },
+              ),
+            ),
+          ),
+          // Ölçülemeyen koşular çizgiyi BÖLÜYOR: her kesintisiz parça kendi çizgisi
+          // olarak çiziliyor, aradaki boşluk boş kalıyor. Tek bir seride null'ları
+          // atlamak, olmayan bir ölçümün üzerinden çizgi geçirmek olurdu.
+          lineBarsData: [
+            for (final segment in _segments())
+              LineChartBarData(
+                spots: segment,
+                isCurved: true,
+                curveSmoothness: 0.28,
+                preventCurveOverShooting: true,
+                barWidth: 3,
+                color: AppColors.accent,
+                dotData: FlDotData(
+                  show: true,
+                  getDotPainter: (spot, percent, bar, index) =>
+                      FlDotCirclePainter(
+                    radius: 3.5,
+                    color: _isBreached(spot.x.toInt())
+                        ? AppColors.danger
+                        : AppColors.accent,
+                    strokeWidth: 2,
+                    strokeColor: AppColors.surface,
+                  ),
+                ),
+                belowBarData: BarAreaData(
+                  show: true,
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      AppColors.accent.withValues(alpha: 0.22),
+                      AppColors.accent.withValues(alpha: 0.0),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  bool _isBreached(int index) =>
+      index >= 0 && index < breached.length && breached[index];
+
+  /// Ölçülen değerleri kesintisiz parçalara ayırır; null'lar ayraç.
+  List<List<FlSpot>> _segments() {
+    final segments = <List<FlSpot>>[];
+    var current = <FlSpot>[];
+
+    for (var i = 0; i < values.length; i++) {
+      final v = values[i];
+      if (v == null) {
+        if (current.isNotEmpty) segments.add(current);
+        current = [];
+        continue;
+      }
+      current.add(FlSpot(i.toDouble(), v));
+    }
+    if (current.isNotEmpty) segments.add(current);
+
+    return segments;
+  }
+}
+
 /// Halka (donut) grafik: payların bütün içindeki oranını gösterir.
 /// Ortada toplam yazar, sağında/altında tıklanabilir gösterge listesi durur.
 class AppDonutChart extends StatefulWidget {

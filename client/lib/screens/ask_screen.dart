@@ -10,6 +10,7 @@ import '../theme/app_theme.dart';
 import '../widgets/charts.dart';
 import '../widgets/ui.dart';
 import 'document_screen.dart';
+import 'watches_screen.dart';
 
 // Doğal dilde sorgu ekranı — sohbet biçiminde.
 //
@@ -1392,9 +1393,55 @@ class _AnswerFooter extends StatelessWidget {
           const SizedBox(width: 6),
           Text('${result.planMs} ms + ${result.queryMs} ms',
               style: const TextStyle(fontSize: 11.5, color: AppColors.muted)),
+          const Spacer(),
+          _WatchButton(result: result),
         ],
       ),
     );
+  }
+}
+
+/// Cevabı izlemeye alma düğmesi — çekmeden bildirime geçilen tek yer.
+///
+/// İzlenemeyen cevapta düğme GİZLENMİYOR, sebebiyle birlikte kapatılıyor: gruplanmış
+/// bir sonucu neden izleyemediğini kullanıcı düğmeyi arayarak değil, oracıkta okuyarak
+/// öğrenmeli. Viewer'da ise hiç görünmüyor — izleyici kurmak firmanın tamamına uyarı
+/// göndermeye başlayan bir işlem.
+class _WatchButton extends StatelessWidget {
+  final AskResult result;
+  const _WatchButton({required this.result});
+
+  @override
+  Widget build(BuildContext context) {
+    if (!ApiService.canWrite || result.messageId == null) {
+      return const SizedBox.shrink();
+    }
+
+    final blocked = result.watchBlockReason;
+
+    return Tooltip(
+      message: blocked ?? 'Bu soruyu belirli aralıklarla kendiliğinden çalıştır',
+      child: TextButton.icon(
+        onPressed: blocked != null ? null : () => _create(context),
+        icon: const Icon(Icons.notifications_active_outlined, size: 15),
+        label: const Text('İzle'),
+        style: TextButton.styleFrom(
+          visualDensity: VisualDensity.compact,
+          textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _create(BuildContext context) async {
+    final created = await showCreateWatchDialog(context, result);
+    if (created == null || !context.mounted) return;
+
+    // Kurulduğu anda ölçülen değer söyleniyor: izleyici doğrulanarak doğuyor
+    // (sunucu planı bir kez çalıştırıyor) ve kullanıcı eşiğini o sayıya göre
+    // doğru koyup koymadığını hemen görebilmeli.
+    showSnack(context,
+        '"${created.title}" izlemeye alındı. Şu anki değer: ${formatNumber(created.lastValue)}');
   }
 }
 

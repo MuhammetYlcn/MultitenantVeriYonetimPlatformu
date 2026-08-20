@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../api_service.dart';
 import '../job_hub.dart';
+import '../theme/app_theme.dart';
 import '../widgets/app_shell.dart';
+import '../widgets/charts.dart';
 import '../widgets/change_password_dialog.dart';
 import '../widgets/ui.dart';
 import 'ask_screen.dart';
@@ -11,6 +15,7 @@ import 'datasets_screen.dart';
 import 'login_screen.dart';
 import 'relations_screen.dart';
 import 'users_screen.dart';
+import 'watches_screen.dart';
 
 // Giriş sonrası TEK ekran. Hangi bölümün ve hangi veri setinin açık olduğunu burası
 // bilir; alt sayfalar (veri setleri, tablo, panel, kullanıcılar) yalnız içerik üretir.
@@ -29,6 +34,18 @@ class _HomeShellState extends State<HomeShell> {
   // panel bölümü de aynı seçimi kullanır (iki bölüm arasında geçerken seçim korunur).
   Dataset? _selected;
 
+  // Okunmamış izleyici uyarısı sayısı — sol menüdeki rozet.
+  //
+  // Sayı SUNUCUDAN okunuyor, canlı kanaldan sayılmıyor: kanal bir kolaylık, doğruluk
+  // kaynağı değil. Kullanıcı uygulamayı kapalıyken gelen uyarılar da rozete girmeli,
+  // ve iki sekme açıksa ikisi de aynı sayıyı göstermeli.
+  int _unreadAlerts = 0;
+
+  // Uyarıdan açılan izleyici. Bildirimdeki "Aç" düğmesi buraya yazıyor.
+  String? _openWatchId;
+
+  StreamSubscription<WatchAlertNotification>? _alertSub;
+
   // Kullanıcı yönetimi yalnız Admin'e görünür → bölüm listesi role göre kurulur.
   //
   // Belge bölümü buradan KALKTI: belge yükleme artık sohbet ekranındaki ataç düğmesinden
@@ -40,6 +57,7 @@ class _HomeShellState extends State<HomeShell> {
         'datasets',
         'relations',
         'dashboard',
+        'watches',
         if (ApiService.isAdmin) 'users',
       ];
 
@@ -65,6 +83,13 @@ class _HomeShellState extends State<HomeShell> {
           activeIcon: Icons.insights,
           label: 'Panel',
         ),
+        // İzleyiciler herkese açık: Viewer da uyarıyı görmeli, yalnız kuramaz.
+        ShellDestination(
+          icon: Icons.notifications_none,
+          activeIcon: Icons.notifications_active,
+          label: 'İzleyiciler',
+          badge: _unreadAlerts,
+        ),
         if (ApiService.isAdmin)
           const ShellDestination(
             icon: Icons.group_outlined,
@@ -72,6 +97,74 @@ class _HomeShellState extends State<HomeShell> {
             label: 'Kullanıcılar',
           ),
       ];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAlertCount();
+
+    // Uyarı FİRMAYA gidiyor, kullanıcıya değil: Viewer da dinliyor. Kanal kurulamazsa
+    // rozet yine dolar, yalnız bir sonraki yenilemede.
+    JobHub.connect();
+    _alertSub = JobHub.watchAlerts.listen(_onWatchAlert);
+  }
+
+  @override
+  void dispose() {
+    _alertSub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadAlertCount() async {
+    try {
+      final alerts = await ApiService.watchAlerts();
+      if (!mounted) return;
+      setState(() => _unreadAlerts = alerts.length);
+    } catch (_) {
+      // Rozet süs değil ama uygulamanın çalışmasının şartı da değil; sessizce geçilir.
+    }
+  }
+
+  // Sistemin kendiliğinden konuştuğu an. Bildirim ekranın üstünde beliriyor ve
+  // doğrudan ilgili izleyiciye götürüyor — kullanıcıyı "hangi izleyiciydi" diye
+  // listede aramaya bırakmak, uyarıyı yarım bırakmak olurdu.
+  void _onWatchAlert(WatchAlertNotification alert) {
+    if (!mounted) return;
+    _loadAlertCount();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 8),
+        content: Row(
+          children: [
+            Icon(
+              alert.isBroken
+                  ? Icons.error_outline
+                  : Icons.notifications_active_outlined,
+              size: 18,
+              color: alert.isBroken ? AppColors.danger : AppColors.warning,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                alert.isBroken
+                    ? '"${alert.title}" izleyicisi çalışmıyor.'
+                    : '"${alert.title}" eşiği aştı: ${formatNumber(alert.value)}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+        action: SnackBarAction(label: 'Aç', onPressed: () => _openWatch(alert.watchId)),
+      ),
+    );
+  }
+
+  void _openWatch(String watchId) => setState(() {
+        _openWatchId = watchId;
+        _index = _keys.indexOf('watches');
+      });
 
   Future<void> _logout() async {
     // Canlı kanal kullanıcının kimliğine bağlı: oturum kapanırken kapatılmazsa bağlantı
@@ -125,6 +218,7 @@ class _HomeShellState extends State<HomeShell> {
       'datasets' => ['Veri setleri', ?name],
       'relations' => ['İlişkiler'],
       'dashboard' => ['Panel', ?name],
+      'watches' => ['İzleyiciler'],
       _ => ['Kullanıcılar'],
     };
   }
@@ -147,6 +241,15 @@ class _HomeShellState extends State<HomeShell> {
 
       case 'relations':
         return const RelationsPage();
+
+      case 'watches':
+        return WatchesPage(
+          // Anahtar, uyarıdan açılan izleyiciyi taşıyor: aynı sayfa yeni bir kimlikle
+          // çizilsin diye kimliğin kendisi anahtara giriyor.
+          key: ValueKey(_openWatchId),
+          initialWatchId: _openWatchId,
+          onAlertsChanged: _loadAlertCount,
+        );
 
       case 'dashboard':
         final selected = _selected;
@@ -176,7 +279,12 @@ class _HomeShellState extends State<HomeShell> {
     return AppShell(
       destinations: _destinations,
       index: _index,
-      onSelect: (i) => setState(() => _index = i),
+      onSelect: (i) => setState(() {
+        _index = i;
+        // Bölüm değişince uyarıdan açılmış izleyici ayrıntısı bırakılıyor: kullanıcı
+        // İzleyicilere döndüğünde listeyi görmeli, bir hafta önceki bildirimi değil.
+        _openWatchId = null;
+      }),
       onLogout: _logout,
       onChangePassword: _changePassword,
       breadcrumb: _breadcrumb,

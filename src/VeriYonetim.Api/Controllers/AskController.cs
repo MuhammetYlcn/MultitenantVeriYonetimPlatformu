@@ -106,9 +106,13 @@ public class AskController : ControllerBase
 
         // Yanıtlar kaydedildiği hâliyle döner; yeniden hesaplanmaz. Veri o günden beri
         // değişmiş olabilir ve geçmiş bir cevabın sonradan değişmesi kafa karıştırırdı.
+        // İzlenebilirlik burada, OKUMA ANINDA hesaplanıyor — kaydedilmiş yanıtın içinden
+        // okunmuyor. Yanıt donmuş bir kayıttır; "bu cevabı şimdi izlemeye alabilir miyim"
+        // ise bugünün sorusu, ve kuralları bugünkü koda göre işlemeli.
         var turns = conversation.Messages
             .Select(m => new ConversationTurn(
-                m.Question, JsonDocument.Parse(m.ResponseJson).RootElement, m.CreatedAt))
+                m.Question, JsonDocument.Parse(m.ResponseJson).RootElement, m.CreatedAt,
+                m.Id, DescribeUnwatchable(m.PlanJson)))
             .ToList();
 
         return Ok(new ConversationDetail(conversation.Id, conversation.Title, turns));
@@ -168,10 +172,16 @@ public class AskController : ControllerBase
             var response = await ExecuteAsync(request.Question, planResult, catalog, ct);
 
             // Yanıt sohbete kaydedilir; kimliği istemciye dönüyor ki sonraki soru
-            // aynı sohbete eklensin.
-            var conversationId = await SaveTurnAsync(request.ConversationId, response, planResult, ct);
+            // aynı sohbete eklensin. Mesajın kimliği de dönüyor: "bunu izle" ona bakıyor.
+            var (conversationId, messageId) =
+                await SaveTurnAsync(request.ConversationId, response, planResult, ct);
 
-            return Ok(response with { ConversationId = conversationId });
+            return Ok(response with
+            {
+                ConversationId = conversationId,
+                MessageId = messageId,
+                WatchBlockReason = WatchEvaluator.DescribeUnwatchable(planResult.Plan)
+            });
         }
         catch (InvalidQueryException ex)
         {
@@ -300,12 +310,12 @@ public class AskController : ControllerBase
     private Guid? CurrentUserId =>
         Guid.TryParse(User.FindFirstValue("sub"), out var id) ? id : null;
 
-    // Yanıtı sohbete ekler; sohbet yoksa açar. Sohbet kimliği döner.
-    private async Task<Guid?> SaveTurnAsync(
+    // Yanıtı sohbete ekler; sohbet yoksa açar. Sohbetin ve mesajın kimliği döner.
+    private async Task<(Guid? ConversationId, Guid? MessageId)> SaveTurnAsync(
         Guid? conversationId, AskResponse response, PlanResult planResult, CancellationToken ct)
     {
         var userId = CurrentUserId;
-        if (userId is null) return null;
+        if (userId is null) return (null, null);
 
         AskConversation? conversation = null;
 
@@ -328,9 +338,11 @@ public class AskController : ControllerBase
 
         conversation.UpdatedAt = DateTime.UtcNow;
 
+        var messageId = Guid.NewGuid();
+
         _db.AskMessages.Add(new AskMessage
         {
-            Id = Guid.NewGuid(),
+            Id = messageId,
             ConversationId = conversation.Id,
             Question = response.Question,
             // Yanıtın tamamı saklanır: geçmiş kayıt yeniden hesaplanmadan, verildiği
@@ -341,7 +353,25 @@ public class AskController : ControllerBase
         });
 
         await _db.SaveChangesAsync(ct);
-        return conversation.Id;
+        return (conversation.Id, messageId);
+    }
+
+    /// <summary>
+    /// Kaydedilmiş bir mesajın izlenememe sebebi; null ise izlenebilir.
+    ///
+    /// Planı olmayan mesaj izlenemez ve bu gerçek bir durum: izleyicilerden ÖNCE verilmiş
+    /// cevapların planı saklanmamıştı. Sessizce izlenebilir göstermek, düğmeye basınca
+    /// hata alan bir kullanıcı üretirdi; sebebi burada söyleniyor.
+    /// </summary>
+    private static string? DescribeUnwatchable(string? planJson)
+    {
+        if (string.IsNullOrWhiteSpace(planJson))
+            return "Bu cevap izlenemez; soruyu yeniden sorup öyle izlemeye alın.";
+
+        var plan = QueryPlanJson.Parse(planJson);
+        return plan is null
+            ? "Bu cevabın sorgu planı okunamadı."
+            : WatchEvaluator.DescribeUnwatchable(plan);
     }
 
     // Sohbet adı ilk sorudan türetilir; liste okunur kalsın diye kısaltılır.

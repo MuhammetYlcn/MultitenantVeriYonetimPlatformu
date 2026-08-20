@@ -387,3 +387,27 @@ void showSnack(BuildContext context, String message, {bool isError = false}) {
     ),
   );
 }
+
+/// "3 saat önce" gibi göreli zaman: listelerde tam tarih gereksiz gürültü yaratır.
+/// Bir aydan eskisi için tarihe döner — "47 gün önce" kimsenin kafasında bir güne
+/// karşılık gelmiyor.
+String timeAgo(DateTime time) {
+  final local = time.toLocal();
+  final diff = DateTime.now().difference(local);
+  if (diff.isNegative) return 'az sonra';
+  if (diff.inMinutes < 1) return 'az önce';
+  if (diff.inMinutes < 60) return '${diff.inMinutes} dakika önce';
+  if (diff.inHours < 24) return '${diff.inHours} saat önce';
+  if (diff.inDays < 30) return '${diff.inDays} gün önce';
+  return '${local.day}.${local.month}.${local.year}';
+}
+
+/// "12 dakika sonra" — izleyicinin sıradaki koşusu gibi GELECEK bir an için.
+String timeUntil(DateTime time) {
+  final diff = time.toLocal().difference(DateTime.now());
+  if (diff.isNegative) return 'birazdan';
+  if (diff.inMinutes < 1) return 'birazdan';
+  if (diff.inMinutes < 60) return '${diff.inMinutes} dakika sonra';
+  if (diff.inHours < 24) return '${diff.inHours} saat sonra';
+  return '${diff.inDays} gün sonra';
+}

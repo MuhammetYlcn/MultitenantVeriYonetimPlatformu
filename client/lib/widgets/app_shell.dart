@@ -16,10 +16,16 @@ class ShellDestination {
   final IconData activeIcon;
   final String label;
 
+  /// Bölümün yanındaki sayı rozeti (0 ise gösterilmez). Şu an yalnız izleyicilerin
+  /// okunmamış uyarıları kullanıyor: bir uyarının kullanıcıyı bulabilmesi için hangi
+  /// ekranda olursa olsun görünmesi gerekiyor.
+  final int badge;
+
   const ShellDestination({
     required this.icon,
     required this.activeIcon,
     required this.label,
+    this.badge = 0,
   });
 }
 
@@ -95,7 +101,13 @@ class AppShell extends StatelessWidget {
                   onDestinationSelected: onSelect,
                   destinations: destinations
                       .map((d) => NavigationDestination(
-                            icon: Icon(d.icon),
+                            icon: d.badge > 0
+                                ? Badge(
+                                    label: Text('${d.badge}'),
+                                    backgroundColor: AppColors.brand,
+                                    child: Icon(d.icon),
+                                  )
+                                : Icon(d.icon),
                             selectedIcon: Icon(d.activeIcon, color: AppColors.brand),
                             label: d.label,
                           ))
@@ -230,6 +242,7 @@ class _NavItem extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (destination.badge > 0) _NavBadge(count: destination.badge),
               ],
             ),
           ),
@@ -237,6 +250,27 @@ class _NavItem extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Menü satırındaki okunmamış sayısı. 9'dan sonrası "9+": kesin sayı burada işe
+/// yaramıyor, "bakılmamış bir şey var" bilgisi yetiyor.
+class _NavBadge extends StatelessWidget {
+  final int count;
+  const _NavBadge({required this.count});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+        decoration: BoxDecoration(
+          color: AppColors.brand,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          count > 9 ? '9+' : '$count',
+          style: const TextStyle(
+              fontSize: 10.5, color: Colors.white, fontWeight: FontWeight.w700),
+        ),
+      );
 }
 
 class _UserCard extends StatelessWidget {

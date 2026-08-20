@@ -23,7 +23,13 @@ public record ConversationSummary(Guid Id, string Title, DateTime UpdatedAt, int
 // Response ham JSON olarak taşınıyor: yanıtın şekli soruya göre değişiyor (tek değer,
 // tablo, grafik, karşılaştırma) ve geçmiş kayıt VERİLDİĞİ HÂLİYLE gösterilmeli —
 // yeniden hesaplanarak değil, çünkü veri o günden beri değişmiş olabilir.
-public record ConversationTurn(string Question, JsonElement Response, DateTime CreatedAt);
+// MessageId ve WatchBlockReason yanıtın İÇİNDE değil, turun yanında taşınıyor. Sebebi
+// geçmiş kayıtlar: Response, verildiği gündeki hâliyle donmuş bir JSON'dur ve o gün
+// izleyiciler henüz yoktu. İzlenebilirlik ise bugünün sorusudur ("bu cevabı şimdi izlemeye
+// alabilir miyim"), o yüzden okuma anında hesaplanıp ayrı alanda veriliyor.
+public record ConversationTurn(
+    string Question, JsonElement Response, DateTime CreatedAt,
+    Guid MessageId = default, string? WatchBlockReason = null);
 
 public record ConversationDetail(
     Guid Id, string Title, IReadOnlyList<ConversationTurn> Turns);
@@ -61,4 +67,12 @@ public record AskResponse(
     int QueryMs = 0,
     AskRowsResult? Rows = null,
     AskAggregateResult? Aggregate = null,
-    AskComparisonResult? Comparison = null);
+    AskComparisonResult? Comparison = null,
+    // Yanıtın sohbetteki kaydı. "Bunu izle" istemciden plan göndermez, yalnız bu kimliği
+    // söyler (bkz. CreateWatchRequest) — izlenen sorgunun ekranda cevabı gösterilenle
+    // aynı olduğu ancak böyle ispatlanabilir.
+    Guid? MessageId = null,
+    // Bu cevap neden izlenemez; null ise izlenebilir. Düğme gizlenmeyip AÇIKLAMAYLA
+    // kapatılabilsin diye taşınıyor: kullanıcı gruplanmış bir sonucu neden izleyemediğini
+    // düğmeyi arayarak değil, oracıkta okuyarak öğrenmeli.
+    string? WatchBlockReason = null);

@@ -300,6 +300,64 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
         Assert.Equal(HttpStatusCode.Created, watch.StatusCode);
     }
 
+    [Fact(DisplayName = "/api/ask yanıtı izleme kimliğini taşır: istemci veritabanına bakmaz")]
+    public async Task AskYanitiIzlemeKimligiTasir()
+    {
+        // Arayüzdeki "İzle" düğmesinin dayanağı bu: yanıtın kendisi hangi cevabın
+        // izleneceğini söylemiyorsa, istemcinin izleyici kurmasının yolu yok.
+        using var factory = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services =>
+                services.AddScoped<IQueryPlannerService, FakePlanner>()));
+
+        using var client = factory.CreateClient();
+        var admin = await RegisterAsync(client, "izle-kimlik", "a@izlekimlik.com");
+        await CreateDatasetAsync(client, admin.Token);
+
+        var ask = await client.SendAsync(WithToken(HttpMethod.Post, "/api/ask", admin.Token,
+            new { question = "toplam tutar nedir" }));
+        ask.EnsureSuccessStatusCode();
+
+        var body = await ask.Content.ReadFromJsonAsync<JsonElement>();
+        var messageId = body.GetProperty("messageId").GetGuid();
+
+        // İzlenebilir bir plan: sebep alanı BOŞ olmalı, yoksa arayüz düğmeyi kapatır.
+        Assert.Equal(JsonValueKind.Null, body.GetProperty("watchBlockReason").ValueKind);
+
+        var watch = await CreateWatchAsync(client, admin.Token, messageId);
+        Assert.Equal(HttpStatusCode.Created, watch.StatusCode);
+    }
+
+    [Fact(DisplayName = "Geçmiş sohbette izlenemeyen cevap SEBEBİYLE gelir")]
+    public async Task GecmisSohbetIzlenemeSebebiniTasir()
+    {
+        // Sebep okuma anında hesaplanıyor, kaydedilmiş yanıtın içinden okunmuyor: yanıt
+        // verildiği gün donmuş bir kayıt, izlenebilirlik ise bugünün sorusu.
+        using var client = _factory.CreateClient();
+        var admin = await RegisterAsync(client, "izle-gecmis", "a@izlegecmis.com");
+        await CreateDatasetAsync(client, admin.Token);
+
+        var messageId = await SeedMessageAsync(admin.UserId, "şehirlere göre tutar", SehreGorePlan);
+
+        var list = await client.SendAsync(
+            WithToken(HttpMethod.Get, "/api/ask/conversations", admin.Token));
+        list.EnsureSuccessStatusCode();
+
+        var conversationId = (await list.Content.ReadFromJsonAsync<JsonElement>())[0]
+            .GetProperty("id").GetGuid();
+
+        var detail = await client.SendAsync(WithToken(HttpMethod.Get,
+            $"/api/ask/conversations/{conversationId}", admin.Token));
+        detail.EnsureSuccessStatusCode();
+
+        var turn = (await detail.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("turns")[0];
+
+        Assert.Equal(messageId, turn.GetProperty("messageId").GetGuid());
+        // Gruplanmış plan izlenemez ve arayüz bunu düğmeyi gizleyerek değil, sebebi
+        // göstererek anlatıyor — sebebin yanıtla birlikte gelmesinin tek sebebi bu.
+        Assert.False(string.IsNullOrWhiteSpace(turn.GetProperty("watchBlockReason").GetString()));
+    }
+
     // ---- izlenemeyen planlar ----
 
     [Fact(DisplayName = "Gruplanmış sonuç izlenemez: eşik tek sayıyla karşılaştırılır")]

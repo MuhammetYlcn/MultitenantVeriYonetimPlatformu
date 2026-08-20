@@ -4,7 +4,11 @@ import 'package:signalr_netcore/signalr_client.dart';
 
 import 'api_service.dart';
 
-/// Belge işlerinin canlı bildirim kanalı.
+/// Sunucudan gelen canlı bildirimlerin tek kanalı: belge işleri ve izleyici uyarıları.
+///
+/// İkisi tek bağlantıda taşınıyor çünkü ayırmanın karşılığı ikinci bir soket ve ikinci
+/// bir kimlik doğrulaması olurdu; ayrıştırma sunucu tarafında zaten grup adıyla yapılıyor
+/// (iş bildirimi kullanıcıya, izleyici uyarısı firmaya).
 ///
 /// Neden yoklama değil: belge okuma 30-150 saniye sürüyor ve süre baştan bilinmiyor.
 /// Yoklamada istemci ya sık sorup boşa istek yığar ya seyrek sorup kullanıcıyı bekletir.
@@ -20,6 +24,12 @@ class JobHub {
   /// Gelen iş bildirimleri. Ekranlar buna abone oluyor.
   static final _controller = StreamController<JobNotification>.broadcast();
   static Stream<JobNotification> get updates => _controller.stream;
+
+  /// İzleyici uyarıları. İş bildiriminden AYRI bir akış: alıcısı farklı (iş bildirimi
+  /// onu başlatan kişiye, izleyici uyarısı firmanın tamamına gider) ve dinleyeni farklı
+  /// (uyarıyı kabuk dinliyor, sohbet ekranı değil).
+  static final _alerts = StreamController<WatchAlertNotification>.broadcast();
+  static Stream<WatchAlertNotification> get watchAlerts => _alerts.stream;
 
   static bool get isConnected =>
       _connection?.state == HubConnectionState.Connected;
@@ -55,6 +65,20 @@ class JobHub {
 
       try {
         _controller.add(JobNotification.fromJson(Map<String, dynamic>.from(payload)));
+      } catch (_) {
+        // Bozuk bir bildirim yüzünden kanal kapanmamalı.
+      }
+    });
+
+    connection.on('watchAlert', (arguments) {
+      if (arguments == null || arguments.isEmpty) return;
+
+      final payload = arguments.first;
+      if (payload is! Map) return;
+
+      try {
+        _alerts.add(
+            WatchAlertNotification.fromJson(Map<String, dynamic>.from(payload)));
       } catch (_) {
         // Bozuk bir bildirim yüzünden kanal kapanmamalı.
       }
@@ -108,4 +132,44 @@ class JobNotification {
       );
 
   bool get isFinished => status == 'succeeded' || status == 'failed';
+}
+
+/// Kanaldan gelen izleyici uyarısı.
+///
+/// Ölçülen değer bildirimde TAŞINIYOR (iş bildiriminin aksine): tek bir sayı, ve
+/// kullanıcı bildirime bakarken zaten onu merak ediyor. Belge işinde taşınmayan şey
+/// yüzlerce hücreydi.
+///
+/// Bu bildirim de doğruluk kaynağı DEĞİL: kanal kapalıysa uyarı kaybolmaz, rozet
+/// `ApiService.watchAlerts` ile veritabanından okunmaya devam eder.
+class WatchAlertNotification {
+  final String watchId;
+  final String runId;
+  final String title;
+
+  /// "ok" | "breaching" | "broken".
+  final String status;
+  final double? value;
+  final String? error;
+
+  WatchAlertNotification({
+    required this.watchId,
+    required this.runId,
+    required this.title,
+    required this.status,
+    this.value,
+    this.error,
+  });
+
+  bool get isBroken => status == 'broken';
+
+  factory WatchAlertNotification.fromJson(Map<String, dynamic> j) =>
+      WatchAlertNotification(
+        watchId: j['watchId'] as String,
+        runId: j['runId'] as String,
+        title: j['title'] as String? ?? '',
+        status: j['status'] as String? ?? 'ok',
+        value: (j['value'] as num?)?.toDouble(),
+        error: j['error'] as String?,
+      );
 }
