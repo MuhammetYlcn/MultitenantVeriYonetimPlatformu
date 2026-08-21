@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>VeriYonetim.Olcum</RootNamespace>
+    <!-- Konsol aracı; API projesine referans verdiği için Web SDK uyarısı çıkmasın. -->
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Ölçülen SQL, uygulamanın KENDİ builder'larıyla üretilmeli. Buraya elle yazılmış
+         bir sorgu konsaydı ölçüm, uygulamanın gerçekten çalıştırdığı sorguyu değil, o
+         gün benim yazdığım sorguyu ölçerdi — ve builder değişince sessizce eskirdi. -->
+    <ProjectReference Include="..\..\src\VeriYonetim.Api\VeriYonetim.Api.csproj" />
+  </ItemGroup>
+
+</Project>

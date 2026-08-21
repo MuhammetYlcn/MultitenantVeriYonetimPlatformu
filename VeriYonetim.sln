@@ -15,6 +15,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{B3F7CBD7
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VeriYonetim.TrainingData", "tools\VeriYonetim.TrainingData\VeriYonetim.TrainingData.csproj", "{19C477C5-8467-47F6-93D2-66BAA4AE9010}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VeriYonetim.Olcum", "tools\VeriYonetim.Olcum\VeriYonetim.Olcum.csproj", "{298551F1-C447-4B1E-ABBE-69A2085B5CE9}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -36,10 +38,15 @@ Global
 		{19C477C5-8467-47F6-93D2-66BAA4AE9010}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{19C477C5-8467-47F6-93D2-66BAA4AE9010}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{19C477C5-8467-47F6-93D2-66BAA4AE9010}.Release|Any CPU.Build.0 = Release|Any CPU
+		{298551F1-C447-4B1E-ABBE-69A2085B5CE9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{298551F1-C447-4B1E-ABBE-69A2085B5CE9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{298551F1-C447-4B1E-ABBE-69A2085B5CE9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{298551F1-C447-4B1E-ABBE-69A2085B5CE9}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{F8DC6410-DE46-43BF-B41F-846789A21699} = {5FB696F9-1F42-4E2C-96CF-807724403637}
 		{F1E36C84-30AF-4314-BE4C-49884FFD1DE6} = {2F06839A-30C7-4AE0-BCDF-2698EDE1039F}
 		{19C477C5-8467-47F6-93D2-66BAA4AE9010} = {B3F7CBD7-5D92-44B4-9066-6B2E3C5F34FB}
+		{298551F1-C447-4B1E-ABBE-69A2085B5CE9} = {B3F7CBD7-5D92-44B4-9066-6B2E3C5F34FB}
 	EndGlobalSection
 EndGlobal
