@@ -124,6 +124,12 @@ class _DataTablePageState extends State<DataTablePage> {
   Future<void> _manageIndexes() async {
     final busy = <String>{};
 
+    // Reddedilen kolonun sebebi KENDİ SATIRINDA gösteriliyor. Önce anlık bir uyarı
+    // şeridi kullanılmıştı; tarayıcıda denenince görülmedi, çünkü şerit sayfanın
+    // altında, açık duran bu pencerenin arkasında çiziliyor. Kullanıcı düğmeye
+    // basıyor, anahtar geri kapanıyor ve hiçbir sebep göremiyordu.
+    final hatalar = <String, String>{};
+
     await showDialog<void>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -150,12 +156,16 @@ class _DataTablePageState extends State<DataTablePage> {
                       leading: Icon(_typeIcon(c.type), size: 18),
                       title: Text(c.name),
                       subtitle: Text(
-                        c.canIndex
-                            ? (c.indexed ? 'Hızlandırıldı' : 'Hızlandırılmadı')
-                            // Sebebi yazılıyor: düğmenin neden olmadığını görmeyen
-                            // kullanıcı bunu bir arıza sanardı.
-                            : 'Tarih kolonları hızlandırılamıyor',
-                        style: const TextStyle(fontSize: 12),
+                        hatalar[c.name] ??
+                            (c.canIndex
+                                ? (c.indexed ? 'Hızlandırıldı' : 'Hızlandırılmadı')
+                                // Sebebi yazılıyor: düğmenin neden olmadığını görmeyen
+                                // kullanıcı bunu bir arıza sanardı.
+                                : 'Tarih kolonları hızlandırılamıyor'),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: hatalar.containsKey(c.name) ? AppColors.danger : null,
+                        ),
                       ),
                       trailing: busy.contains(c.name)
                           ? const SizedBox(
@@ -167,7 +177,10 @@ class _DataTablePageState extends State<DataTablePage> {
                               onChanged: !c.canIndex || !ApiService.canWrite
                                   ? null
                                   : (want) async {
-                                      setLocal(() => busy.add(c.name));
+                                      setLocal(() {
+                                        busy.add(c.name);
+                                        hatalar.remove(c.name);
+                                      });
                                       try {
                                         if (want) {
                                           await ApiService.indexColumn(
@@ -184,9 +197,10 @@ class _DataTablePageState extends State<DataTablePage> {
                                         _schema = fresh;
                                         setLocal(() => busy.remove(c.name));
                                       } catch (e) {
-                                        setLocal(() => busy.remove(c.name));
-                                        if (!ctx.mounted) return;
-                                        showSnack(ctx, 'Olmadı: $e', isError: true);
+                                        setLocal(() {
+                                          busy.remove(c.name);
+                                          hatalar[c.name] = '$e';
+                                        });
                                       }
                                     },
                             ),
