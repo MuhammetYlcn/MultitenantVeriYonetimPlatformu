@@ -24,6 +24,8 @@ public class AppDbContext : DbContext
     public DbSet<DatasetColumn> DatasetColumns => Set<DatasetColumn>();
     public DbSet<DatasetRow> DatasetRows => Set<DatasetRow>();
     public DbSet<DatasetRelation> DatasetRelations => Set<DatasetRelation>();
+    public DbSet<DatasetProfile> DatasetProfiles => Set<DatasetProfile>();
+    public DbSet<DatasetIndex> DatasetIndexes => Set<DatasetIndex>();
     public DbSet<AskConversation> AskConversations => Set<AskConversation>();
     public DbSet<AskMessage> AskMessages => Set<AskMessage>();
     public DbSet<AccountToken> AccountTokens => Set<AccountToken>();
@@ -162,6 +164,45 @@ public class AppDbContext : DbContext
 
             // İzolasyon Dataset üzerinden (DatasetColumn ile aynı desen).
             row.HasQueryFilter(r => r.Dataset.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<DatasetProfile>(profile =>
+        {
+            // Set başına tek profil: birincil anahtar setin kendisi.
+            profile.HasKey(p => p.DatasetId);
+
+            profile.Property(p => p.Json).HasColumnType("jsonb");
+
+            // Set silinince profili de gitsin — önbellek verinin kendisi değil.
+            profile.HasOne(p => p.Dataset)
+                .WithMany()
+                .HasForeignKey(p => p.DatasetId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // İzolasyon Dataset üzerinden (DatasetColumn/DatasetRow ile aynı desen).
+            profile.HasQueryFilter(p => p.Dataset.TenantId == _tenantContext.TenantId);
+        });
+
+        modelBuilder.Entity<DatasetIndex>(index =>
+        {
+            index.Property(i => i.ColumnName).HasMaxLength(200);
+            index.Property(i => i.ColumnType).HasMaxLength(20);
+            index.Property(i => i.IndexName).HasMaxLength(63); // PostgreSQL tanımlayıcı sınırı
+
+            // Aynı kolon iki kez indekslenemesin.
+            index.HasIndex(i => new { i.DatasetId, i.ColumnName }).IsUnique();
+
+            // Set silinince kaydı da gitsin. Fiziksel indeks bundan etkilenmez: onu
+            // referans sayımı yönetir (bkz. DatasetIndexService.DropIfUnusedAsync).
+            // Cascade ile silinen kayıt o sayımın dışında kalır, yani kullanılmayan bir
+            // indeks tabloda kalabilir — sessiz veri kaybından çok daha ucuz bir kusur.
+            index.HasOne(i => i.Dataset)
+                .WithMany()
+                .HasForeignKey(i => i.DatasetId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // İzolasyon Dataset üzerinden (DatasetColumn/DatasetRow ile aynı desen).
+            index.HasQueryFilter(i => i.Dataset.TenantId == _tenantContext.TenantId);
         });
 
         modelBuilder.Entity<DatasetRelation>(relation =>

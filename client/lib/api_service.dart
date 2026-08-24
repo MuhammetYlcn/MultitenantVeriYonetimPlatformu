@@ -32,12 +32,28 @@ class SchemaColumn {
   final String type; // "text" | "number" | "date"
   final int ordinal;
 
-  SchemaColumn({required this.name, required this.type, required this.ordinal});
+  // Bu kolon aramada hızlandırıldı mı (sunucuda ifade indeksi var mı).
+  final bool indexed;
+
+  // Hızlandırılabilir mi. Tarih kolonlarında false: metinden tarihe dönüşüm
+  // veritabanı ayarına bağlı olduğu için indekse konamıyor (sunucu tarafında
+  // ölçülüp doğrulandı). Ekran o kolonda düğmeyi hiç göstermiyor.
+  final bool canIndex;
+
+  SchemaColumn({
+    required this.name,
+    required this.type,
+    required this.ordinal,
+    this.indexed = false,
+    this.canIndex = false,
+  });
 
   factory SchemaColumn.fromJson(Map<String, dynamic> j) => SchemaColumn(
         name: j['name'] as String,
         type: j['type'] as String,
         ordinal: j['ordinal'] as int,
+        indexed: j['indexed'] as bool? ?? false,
+        canIndex: j['canIndex'] as bool? ?? false,
       );
 }
 
@@ -559,6 +575,29 @@ class ApiService {
       return cols.map((c) => SchemaColumn.fromJson(c as Map<String, dynamic>)).toList();
     }
     throw ApiException(_message(res));
+  }
+
+  // POST /api/datasets/{id}/columns/{name}/index — kolonu aramada hızlandırır.
+  //
+  // Sunucuda ifade indeksi kurulur. Uzun sürebilir (indeks tablonun tamamı üzerinde
+  // kurulur), bu yüzden çağıran taraf beklemeyi göstermeli.
+  static Future<void> indexColumn(String datasetId, String column) async {
+    await _ensureFreshToken();
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/datasets/$datasetId/columns/${Uri.encodeComponent(column)}/index'),
+      headers: _authHeader,
+    );
+    if (res.statusCode != 200) throw ApiException(_message(res));
+  }
+
+  // DELETE /api/datasets/{id}/columns/{name}/index — hızlandırmayı geri alır.
+  static Future<void> dropColumnIndex(String datasetId, String column) async {
+    await _ensureFreshToken();
+    final res = await http.delete(
+      Uri.parse('$baseUrl/api/datasets/$datasetId/columns/${Uri.encodeComponent(column)}/index'),
+      headers: _authHeader,
+    );
+    if (res.statusCode != 204) throw ApiException(_message(res));
   }
 
   // GET /api/datasets/{id}/rows — sayfalanmış ham satırlar (şemaya göre dinamik tablo için).

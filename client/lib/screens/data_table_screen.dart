@@ -113,6 +113,100 @@ class _DataTablePageState extends State<DataTablePage> {
     }
   }
 
+  // Kolonların aramada hızlandırılması.
+  //
+  // Neden ayrı bir ekran değil de buradan bir pencere: hızlandırma, kolonun kendi
+  // özelliği. Kullanıcı hangi kolonda arama yaptığını tabloya bakarken bilir.
+  //
+  // Neden kendiliğinden değil de elle: indeks aramayı hızlandırırken veri yüklemeyi
+  // yavaşlatıyor (sunucuda ölçüldü). Hiç aranmayan bir kolona indeks kurmak, o bedeli
+  // karşılıksız ödemek olurdu.
+  Future<void> _manageIndexes() async {
+    final busy = <String>{};
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Aramayı hızlandır'),
+          content: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      'Hızlandırılan kolonda filtreleme çok daha hızlı olur; '
+                      'buna karşılık bu veri setine dosya yüklemek biraz yavaşlar.',
+                      style: TextStyle(color: AppColors.muted, fontSize: 13),
+                    ),
+                  ),
+                  for (final c in _schema)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(_typeIcon(c.type), size: 18),
+                      title: Text(c.name),
+                      subtitle: Text(
+                        c.canIndex
+                            ? (c.indexed ? 'Hızlandırıldı' : 'Hızlandırılmadı')
+                            // Sebebi yazılıyor: düğmenin neden olmadığını görmeyen
+                            // kullanıcı bunu bir arıza sanardı.
+                            : 'Tarih kolonları hızlandırılamıyor',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                      trailing: busy.contains(c.name)
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2))
+                          : Switch(
+                              value: c.indexed,
+                              onChanged: !c.canIndex || !ApiService.canWrite
+                                  ? null
+                                  : (want) async {
+                                      setLocal(() => busy.add(c.name));
+                                      try {
+                                        if (want) {
+                                          await ApiService.indexColumn(
+                                              widget.dataset.id, c.name);
+                                        } else {
+                                          await ApiService.dropColumnIndex(
+                                              widget.dataset.id, c.name);
+                                        }
+                                        // Şema sunucudan yeniden okunuyor: durumu
+                                        // yerelde tahmin etmek, sunucu başka türlü
+                                        // karar verdiğinde ekranı yalancı yapardı.
+                                        final fresh = await ApiService.getSchema(
+                                            widget.dataset.id);
+                                        _schema = fresh;
+                                        setLocal(() => busy.remove(c.name));
+                                      } catch (e) {
+                                        setLocal(() => busy.remove(c.name));
+                                        if (!ctx.mounted) return;
+                                        showSnack(ctx, 'Olmadı: $e', isError: true);
+                                      }
+                                    },
+                            ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('Kapat')),
+          ],
+        ),
+      ),
+    );
+
+    // Pencere kapanınca tablo başlıklarındaki işaretler tazelensin.
+    _reload();
+  }
+
   // Alanın altında gösterilecek tip ipucu (kullanıcı doğru biçimde girsin).
   static String _typeHint(String type) => switch (type) {
         'number' => 'sayı (örn. 1500.50)',
@@ -157,6 +251,12 @@ class _DataTablePageState extends State<DataTablePage> {
                   icon: const Icon(Icons.insights_outlined, size: 18),
                   label: const Text('Panele bak'),
                 ),
+                if (ApiService.canWrite && data != null && data.schema.isNotEmpty)
+                  IconButton(
+                    onPressed: _manageIndexes,
+                    icon: const Icon(Icons.bolt_outlined),
+                    tooltip: 'Aramayı hızlandır',
+                  ),
                 // Viewer yalnız okur → satır ekleme butonu hiç gösterilmez. Bu sadece
                 // arayüz sadeliği; asıl koruma backend'de ([Authorize] → 403).
                 if (ApiService.canWrite)
@@ -225,6 +325,16 @@ class _DataTablePageState extends State<DataTablePage> {
                                   size: 13, color: AppColors.muted),
                               const SizedBox(width: 6),
                               Text(c.name.toUpperCase()),
+                              // Hızlandırılmış kolon tabloda da görünsün: kullanıcı
+                              // hangi kolonda hızlı arama yapabileceğini pencereyi
+                              // açmadan bilmeli.
+                              if (c.indexed) ...[
+                                const SizedBox(width: 4),
+                                const Tooltip(
+                                  message: 'Aramada hızlandırıldı',
+                                  child: Icon(Icons.bolt, size: 13),
+                                ),
+                              ],
                             ],
                           ),
                         ))

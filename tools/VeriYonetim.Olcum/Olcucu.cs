@@ -11,6 +11,11 @@ internal record Sonuc(
     string Ad, string Aciklama, string Nokta, string Olcek,
     double MedyanMs, double EnKotuMs, int Satir, string Tarama);
 
+// Senaryoların bir kez baştan sona koşturulması. İndeks karşılaştırmasında iki faz olur:
+// "indekssiz" ve "indeksli". Aynı koşuda arka arkaya ölçülürler ki aradaki fark
+// indeksin etkisi olsun, makinenin o günkü hâli değil.
+internal record Faz(string Etiket, List<Sonuc> Sonuclar, List<YazmaSonuc> Yazma);
+
 // Süre ölçümü. Üç kural:
 //
 // 1. ISINMA koşusu sayılmaz. İlk çağrı bağlantı kurulumunu, sorgu planlamasını ve soğuk

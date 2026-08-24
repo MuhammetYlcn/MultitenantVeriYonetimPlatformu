@@ -24,16 +24,21 @@ public class DatasetsController : ControllerBase
     private readonly IDatasetImportService _importService;
 
     private readonly IRelationDetector _relationDetector;
+    private readonly IDatasetRowWriter _rowWriter;
+    private readonly IDatasetIndexService _indexService;
     private readonly ILogger<DatasetsController> _logger;
 
     public DatasetsController(AppDbContext db, ITenantContext tenantContext,
         IDatasetImportService importService, IRelationDetector relationDetector,
+        IDatasetRowWriter rowWriter, IDatasetIndexService indexService,
         ILogger<DatasetsController> logger)
     {
         _db = db;
         _tenantContext = tenantContext;
         _importService = importService;
         _relationDetector = relationDetector;
+        _rowWriter = rowWriter;
+        _indexService = indexService;
         _logger = logger;
     }
 
@@ -151,7 +156,60 @@ public class DatasetsController : ControllerBase
             .Select(c => new { c.Name, c.Type, c.Ordinal })
             .ToListAsync();
 
-        return Ok(new { datasetId = id, columns });
+        // Hangi kolonlar hızlandırıldı: ekranın bunu göstermesi şart, yoksa kullanıcı
+        // aynı kolonu tekrar tekrar indekslemeye çalışır.
+        var indexed = await _indexService.IndexedColumnsAsync(id);
+
+        return Ok(new
+        {
+            datasetId = id,
+            columns = columns.Select(c => new
+            {
+                c.Name,
+                c.Type,
+                c.Ordinal,
+                Indexed = indexed.Contains(c.Name),
+                // Tarih kolonları indekslenemiyor (bkz. DatasetIndexService); ekran
+                // düğmeyi boşuna göstermesin.
+                CanIndex = c.Type is "text" or "number"
+            })
+        });
+    }
+
+    // POST /api/datasets/{id}/columns/{name}/index — kolonu aramada hızlandır.
+    //
+    // Neden kendiliğinden değil de istek üzerine: 24.08 ölçümü indeksin kazancını da
+    // bedelini de gösterdi. Sayısal filtre 1 milyon satırda 210 ms'den 0,7 ms'ye indi,
+    // ama dört indeks içe aktarmayı 2,3 kat yavaşlattı. Her kolona indeks kurmak, hiç
+    // aranmayan kolonlar için bu bedeli boşuna ödemek olurdu.
+    [HttpPost("{id:guid}/columns/{name}/index")]
+    [Authorize(Roles = "Editor,Admin")]
+    public async Task<IActionResult> CreateColumnIndex(Guid id, string name)
+    {
+        var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
+        if (dataset is null) return DatasetNotFound();
+
+        var result = await _indexService.CreateAsync(id, name);
+
+        if (!result.Created)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Kolon indekslenemedi.", detail: result.Reason);
+
+        return Ok(new { column = name, indexed = true, seconds = Math.Round(result.Seconds, 1) });
+    }
+
+    // DELETE /api/datasets/{id}/columns/{name}/index — hızlandırmayı geri al.
+    [HttpDelete("{id:guid}/columns/{name}/index")]
+    [Authorize(Roles = "Editor,Admin")]
+    public async Task<IActionResult> DropColumnIndex(Guid id, string name)
+    {
+        var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
+        if (dataset is null) return DatasetNotFound();
+
+        return await _indexService.DropAsync(id, name)
+            ? NoContent()
+            : Problem(statusCode: StatusCodes.Status404NotFound,
+                title: "Bu kolonun indeksi yok.");
     }
 
     // POST /api/datasets/{id}/rows — dosyadaki satırları kayıtlı şemaya göre doğrula ve
@@ -196,22 +254,21 @@ public class DatasetsController : ControllerBase
 
         var result = _importService.ValidateRows(table, schema);
 
-        // Değiştir semantiği (SetSchema deseni): eski satırları sil, geçerlileri ekle.
-        // Not: çok büyük import'larda ExecuteDeleteAsync + bulk insert daha verimli olurdu.
-        var existing = await _db.DatasetRows.Where(r => r.DatasetId == id).ToListAsync();
-        _db.DatasetRows.RemoveRange(existing);
+        // Değiştir semantiği (SetSchema deseni): eski satırlar gider, geçerliler yerine geçer.
+        // Yazma `COPY` akışıyla (bkz. DatasetRowWriter); eskiden satırlar tek tek EF varlığı
+        // olarak ekleniyordu ve 21.08 ölçümünde bunun 4-5 kat yavaş olduğu görüldü.
+        //
+        // Üçü de tek işlemde: silme başarılıp yazma düşerse set BOŞ kalırdı — kullanıcı
+        // açısından bu, "içe aktarma başarısız" değil "verim silindi" demek olurdu.
+        await using var transaction = await _db.Database.BeginTransactionAsync();
 
-        foreach (var rowData in result.ValidRows)
-            _db.DatasetRows.Add(new DatasetRow
-            {
-                Id = Guid.NewGuid(),
-                DatasetId = id,
-                Data = rowData
-            });
+        await _rowWriter.ReplaceRowsAsync(id, result.ValidRows);
 
         dataset.RowCount = result.ValidRows.Count;
         dataset.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync();
+
+        await transaction.CommitAsync();
 
         // Satırlar yerine oturdu: şimdi bu setin diğerleriyle bağı var mı diye bak.
         // Kullanıcıya "şu kolon şu sete işaret ediyor" diye sordurmuyoruz — dosyayı

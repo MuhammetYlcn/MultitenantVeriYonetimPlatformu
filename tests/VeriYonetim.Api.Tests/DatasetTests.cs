@@ -405,6 +405,51 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
         Assert.Equal(1, ds.RowCount);   // eski 2 satır silindi, yerine 1 satır geldi
     }
 
+    // İçe aktarma satırları `COPY` akışıyla yazıyor, tek satır ekleme ise EF üzerinden
+    // (bkz. DatasetRowWriter). İki yol aynı sözlüğü aynı JSON metnine çevirmezse — ör.
+    // tarih biçimi ya da ondalık ayracı farklı olursa — veri sessizce iki biçimde
+    // saklanır ve sorgular birini bulup diğerini bulmaz. Bu test iki yolu yan yana koyar.
+    [Fact]
+    public async Task Import_AndAddRow_StoreValuesInTheSameShape()
+    {
+        var t = await RegisterTenantAsync("imp-shape", "a@impshape.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        await UploadSchemaAsync(t.Token, id, "ad,tutar,tarih\nAli,10.5,2026-01-15");
+
+        await ImportRowsAsync(t.Token, id, "ad,tutar,tarih\nAli,10.5,2026-01-15");
+        await AddRowAsync(t.Token, id, new { ad = "Ayse", tutar = "20.5", tarih = "2026-02-20" });
+
+        // Sayısal sıralama: iki satır da sayı olarak saklanmışsa sıra doğru gelir.
+        var rows = await GetRowsAsync(t.Token, id, "sort=tutar&dir=desc");
+        Assert.Equal(2, rows.Total);
+        Assert.Equal("Ayse", rows.Rows[0].Data["ad"].GetString());
+
+        // Toplam: JSON'a metin olarak yazılmış bir sayı burada toplanamazdı.
+        var sum = await AggregateAsync(t.Token, id, "op=sum&metric=tutar");
+        Assert.Equal(31m, Assert.Single(sum.Buckets).Value);
+
+        // Tarih filtresi: iki yol da aynı tarih biçimini yazmışsa ikisi de aralığa girer.
+        var byDate = await GetRowsAsync(t.Token, id, "filter=tarih:gte:2026-01-01");
+        Assert.Equal(2, byDate.Total);
+    }
+
+    [Fact]
+    public async Task Import_EmptyFile_ClearsRows()
+    {
+        var t = await RegisterTenantAsync("imp-empty", "a@impempty.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+        await UploadSchemaAsync(t.Token, id, "ad,yas\nAli,30");
+
+        await ImportRowsAsync(t.Token, id, "ad,yas\nAli,30\nAyse,25");
+
+        // Yalnız başlık satırı: değiştir semantiği gereği set boşalmalı.
+        var response = await ImportRowsAsync(t.Token, id, "ad,yas");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var rows = await GetRowsAsync(t.Token, id, "page=1");
+        Assert.Equal(0, rows.Total);
+    }
+
     [Fact]
     public async Task CrossTenant_Import_Returns404()
     {

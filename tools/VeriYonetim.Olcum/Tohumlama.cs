@@ -8,10 +8,13 @@ namespace VeriYonetim.Olcum;
 
 // Ölçüm verisini üretir ve veritabanına basar.
 //
-// Satırlar TEK TEK değil, PostgreSQL'in ikili COPY akışıyla yazılır. Uygulamanın bugünkü
-// içe aktarma yolu satırları tek tek ekliyor (DatasetsController'da not düşülü); 1 milyon
-// satırda bu yol saatler sürer ve ölçümü imkânsız kılardı. Buradaki yazıcı önce ölçümün
-// aracı, sonra üretim yolunun iyileştirmesi olacak.
+// Satırlar TEK TEK değil, PostgreSQL'in ikili COPY akışıyla yazılır: 1 milyon satırı
+// varlık nesneleri üzerinden basmak ölçümü imkânsız kılardı.
+//
+// 21.08'de bu yazıcı yalnız ölçümün aracıydı; ölçtüğü fark (EF ~18.000 satır/sn'ye karşı
+// COPY ~60-100.000) 24.08'de üretim içe aktarma yolunu da COPY'ye taşıdı
+// (bkz. DatasetRowWriter). Buradaki kopya yine de duruyor, çünkü ikisi aynı işi yapmıyor:
+// üretim yolu CSV ayrıştırıp şemaya göre doğruluyor, bu ise hazır değer basıyor.
 internal static class Tohumlama
 {
     public static async Task KurAsync()

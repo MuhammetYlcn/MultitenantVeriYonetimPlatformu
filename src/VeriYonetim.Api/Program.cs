@@ -27,6 +27,8 @@ builder.Services.AddScoped<ITenantProvisioner, TenantProvisioner>();
 builder.Services.AddScoped<IDatasetImportService, DatasetImportService>();
 builder.Services.AddScoped<IDatasetQueryExecutor, DatasetQueryExecutor>();
 builder.Services.AddScoped<IRelationDetector, RelationDetector>();
+builder.Services.AddScoped<IDatasetRowWriter, DatasetRowWriter>();
+builder.Services.AddScoped<IDatasetIndexService, DatasetIndexService>();
 builder.Services.AddScoped<ITenantCatalogLoader, TenantCatalogLoader>();
 
 // İzleyiciler: kaydedilmiş bir planın ölçülmesi (evaluator), koşunun yürütülüp durumun

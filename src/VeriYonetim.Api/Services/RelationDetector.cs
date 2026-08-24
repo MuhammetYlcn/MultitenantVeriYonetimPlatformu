@@ -1,4 +1,5 @@
 using System.Data;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using VeriYonetim.Api.Data;
@@ -40,6 +41,9 @@ public class RelationDetector : IRelationDetector
     private const int MaxOtherDatasets = 10;
     private const int MaxDistinctValues = 5000;
 
+    // Önbelleğe yazarken ve okurken aynı seçenekler kullanılmalı.
+    private static readonly JsonSerializerOptions JsonOptions = new();
+
     private readonly AppDbContext _db;
     private readonly ILogger<RelationDetector> _logger;
 
@@ -50,11 +54,19 @@ public class RelationDetector : IRelationDetector
     }
 
     // Bir kolonun profili: benzersiz mi, hangi değerleri taşıyor.
+    // Önbelleğe olduğu gibi serileştiriliyor (bkz. DatasetProfile).
     private record ColumnProfile(
         string Name,
         string Type,
         bool IsUnique,
-        IReadOnlyCollection<string> Values);
+        HashSet<string> Values);
+
+    // Kurulmaya aday bir bağ: hangi setin hangi kolonu, hangi setin hangi kolonuna.
+    // "From" yabancı anahtarı taşıyan, "To" anahtarın bulunduğu taraftır.
+    private record Bag(
+        Guid FromDatasetId, string FromColumn,
+        Guid ToDatasetId, string ToColumn,
+        double Coverage);
 
     public async Task<int> DetectAsync(Guid datasetId, CancellationToken ct = default)
     {
@@ -79,7 +91,14 @@ public class RelationDetector : IRelationDetector
             .SelectMany(p => new[] { (p.FromDatasetId, p.ToDatasetId), (p.ToDatasetId, p.FromDatasetId) })
             .ToHashSet();
 
-        var sourceProfiles = await ProfileAsync(datasetId, ct);
+        // Önbellek kayıtları tek sorguda: setler zaten elimizde, her biri için ayrı
+        // gidip gelmenin anlamı yok.
+        var ids = others.Select(o => o.Id).Append(datasetId).ToList();
+        var cached = await _db.DatasetProfiles
+            .Where(p => ids.Contains(p.DatasetId))
+            .ToDictionaryAsync(p => p.DatasetId, ct);
+
+        var sourceProfiles = await ProfileAsync(dataset, cached, ct);
         if (sourceProfiles.Count == 0) return 0;
 
         var found = 0;
@@ -88,34 +107,56 @@ public class RelationDetector : IRelationDetector
         {
             if (linked.Contains((datasetId, other.Id))) continue;
 
-            var targetProfiles = await ProfileAsync(other.Id, ct);
-            var match = BestMatch(sourceProfiles, targetProfiles);
+            var otherProfiles = await ProfileAsync(other, cached, ct);
+
+            // İKİ YÖN de denenir. Anahtar yeni sette de olabilir: "Satışlar"ı önce,
+            // "Müşteriler"i sonra yükleyen kullanıcı da bağı görmeli. Tek yön denenseydi
+            // ilişkinin bulunup bulunmaması, dosyaların yüklenme SIRASINA bağlı olurdu.
+            var match = BestMatch(sourceProfiles, otherProfiles) is { } forward
+                ? new Bag(datasetId, forward.Source, other.Id, forward.Target, forward.Coverage)
+                : null;
+
+            if (BestMatch(otherProfiles, sourceProfiles) is { } backward &&
+                (match is null || backward.Coverage > match.Coverage))
+            {
+                match = new Bag(other.Id, backward.Source, datasetId, backward.Target,
+                    backward.Coverage);
+            }
+
             if (match is null) continue;
 
+            // "From" yabancı anahtarı taşıyan taraf, "To" anahtarın kendisi. Yönü
+            // belirleyen şey hangi setin önce yüklendiği değil, hangi kolonun benzersiz
+            // olduğu — yani verinin kendisi.
             _db.DatasetRelations.Add(new DatasetRelation
             {
                 Id = Guid.NewGuid(),
-                FromDatasetId = datasetId,
-                FromColumn = match.Value.Source,
-                ToDatasetId = other.Id,
-                ToColumn = match.Value.Target,
+                FromDatasetId = match.FromDatasetId,
+                FromColumn = match.FromColumn,
+                ToDatasetId = match.ToDatasetId,
+                ToColumn = match.ToColumn,
                 IsAutoDetected = true
             });
 
+            var kaynakAdi = match.FromDatasetId == datasetId ? dataset.Name : other.Name;
+            var hedefAdi = match.ToDatasetId == datasetId ? dataset.Name : other.Name;
+
             _logger.LogInformation(
                 "İlişki bulundu: {From}.{FromCol} = {To}.{ToCol} (kapsama %{Coverage:F0})",
-                dataset.Name, match.Value.Source, other.Name, match.Value.Target,
-                match.Value.Coverage * 100);
+                kaynakAdi, match.FromColumn, hedefAdi, match.ToColumn,
+                match.Coverage * 100);
 
             found++;
         }
 
-        if (found > 0) await _db.SaveChangesAsync(ct);
+        // Koşulsuz: ilişki bulunmamış olsa bile bu koşuda hesaplanan profiller
+        // önbelleğe yazılmalı, yoksa bir sonraki içe aktarma aynı işi tekrar yapar.
+        await _db.SaveChangesAsync(ct);
         return found;
     }
 
     // En iyi kolon eşleşmesi: hedefi benzersiz olan ve kapsaması en yüksek çift.
-    // Her iki yön de denenir — anahtar hangi sette olursa olsun bağ kurulabilmeli.
+    // Tek yönlüdür — çağıran iki yönü de dener (bkz. DetectAsync).
     private static (string Source, string Target, double Coverage)? BestMatch(
         IReadOnlyList<ColumnProfile> sources, IReadOnlyList<ColumnProfile> targets)
     {
@@ -141,19 +182,81 @@ public class RelationDetector : IRelationDetector
         return best;
     }
 
-    private static double Coverage(
-        IReadOnlyCollection<string> source, IReadOnlyCollection<string> target)
+    private static double Coverage(HashSet<string> source, HashSet<string> target)
     {
         if (source.Count == 0) return 0;
 
-        var targetSet = target as HashSet<string> ?? target.ToHashSet();
-        var matched = source.Count(targetSet.Contains);
+        var matched = source.Count(target.Contains);
 
         return (double)matched / source.Count;
     }
 
-    // Veri setinin kolonlarını profiller: kolon başına tek sorgu, değer sayısı sınırlı.
-    private async Task<List<ColumnProfile>> ProfileAsync(Guid datasetId, CancellationToken ct)
+    // Setin profili: önce önbellekten, yoksa ölçülerek.
+    //
+    // Buranın maliyeti kolon başına bir GROUP BY'dır ve setin BÜYÜKLÜĞÜYLE büyür —
+    // 1 milyon satırlık bir komşu, 1.000 satırlık bir dosyanın içe aktarılmasını
+    // saniyelerce bekletiyordu. Oysa o komşu değişmemişti.
+    private async Task<List<ColumnProfile>> ProfileAsync(
+        Dataset dataset, Dictionary<Guid, DatasetProfile> cached, CancellationToken ct)
+    {
+        var stamp = Stamp(dataset);
+
+        if (cached.TryGetValue(dataset.Id, out var record) && record.Stamp == stamp)
+        {
+            var stored = Deserialize(record.Json);
+            if (stored is not null) return stored;
+
+            // Okunamayan önbellek görmezden gelinir; aşağıda yeniden ölçülüp üzerine yazılır.
+            _logger.LogWarning("Profil önbelleği okunamadı: {Dataset}", dataset.Id);
+        }
+
+        var profiles = await MeasureAsync(dataset.Id, ct);
+
+        Store(dataset.Id, stamp, profiles, record);
+
+        return profiles;
+    }
+
+    // Setin damgası: satır yazan her uç UpdatedAt'i günceller (bkz. DatasetProfile.Stamp).
+    private static DateTime Stamp(Dataset dataset) => dataset.UpdatedAt ?? dataset.CreatedAt;
+
+    private void Store(
+        Guid datasetId, DateTime stamp, List<ColumnProfile> profiles, DatasetProfile? existing)
+    {
+        var json = JsonSerializer.Serialize(profiles, JsonOptions);
+
+        if (existing is null)
+        {
+            _db.DatasetProfiles.Add(new DatasetProfile
+            {
+                DatasetId = datasetId,
+                Stamp = stamp,
+                Json = json,
+                ComputedAt = DateTime.UtcNow
+            });
+        }
+        else
+        {
+            existing.Stamp = stamp;
+            existing.Json = json;
+            existing.ComputedAt = DateTime.UtcNow;
+        }
+    }
+
+    private static List<ColumnProfile>? Deserialize(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<List<ColumnProfile>>(json, JsonOptions);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    // Veri setinin kolonlarını ölçer: kolon başına tek sorgu, değer sayısı sınırlı.
+    private async Task<List<ColumnProfile>> MeasureAsync(Guid datasetId, CancellationToken ct)
     {
         // Tarih kolonları anahtar olmaz; metin ve sayı yeterli.
         var columns = await _db.DatasetColumns

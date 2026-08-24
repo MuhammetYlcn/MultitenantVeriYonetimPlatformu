@@ -12,8 +12,8 @@ internal static class Rapor
 {
     private static readonly CultureInfo Tr = new("tr-TR");
 
-    public static string Kur(IReadOnlyList<Sonuc> sonuclar, Dictionary<string, string> ortam,
-        IReadOnlyList<YazmaSonuc> yazma)
+    public static string Kur(Faz taban, Dictionary<string, string> ortam,
+        Faz? indeksli = null, IReadOnlyList<IndeksAdayi>? adaylar = null)
     {
         var yazi = new StringBuilder();
 
@@ -27,20 +27,172 @@ internal static class Rapor
         yazi.AppendLine("Süreler **medyan**, milisaniye. Isınma koşuları sayılmadı.");
         yazi.AppendLine();
 
-        Bolum(yazi, sonuclar, "SQL",
+        if (adaylar is not null) Adaylar(yazi, adaylar);
+
+        Bolum(yazi, taban.Sonuclar, "SQL",
             "## Veritabanı sorguları",
             "Sorguların SQL'i uygulamanın kendi builder'ları tarafından üretildi " +
             "(`DatasetRowQueryBuilder`, `DatasetAggregateQueryBuilder`) — elle yazılmadı.");
 
-        Bolum(yazi, sonuclar, "uç",
+        Bolum(yazi, taban.Sonuclar, "uç",
             "## HTTP uçları",
             "Tarayıcının çağırdığı adresler, gerçek oturum token'ıyla. Satır listesi ucu " +
             "her çağrıda ayrıca `COUNT(*)` de koşturur (sayfa sayısı için).");
 
-        Yazma(yazi, yazma);
-        Ayrinti(yazi, sonuclar);
+        Yazma(yazi, taban.Yazma);
+
+        if (indeksli is not null) Karsilastirma(yazi, taban, indeksli);
+
+        Ayrinti(yazi, taban.Sonuclar);
+
+        if (indeksli is not null)
+        {
+            yazi.AppendLine("## Ayrıntı — indeksli faz");
+            yazi.AppendLine();
+            AyrintiTablosu(yazi, indeksli.Sonuclar);
+        }
 
         return yazi.ToString();
+    }
+
+    // Denenen indeksler: kurulanı da kurulamayanı da. Kurulamayan aday, kurulanlar kadar
+    // bilgi taşır — sınırın nerede olduğunu söyler.
+    private static void Adaylar(StringBuilder yazi, IReadOnlyList<IndeksAdayi> adaylar)
+    {
+        yazi.AppendLine("## Denenen ifade indeksleri");
+        yazi.AppendLine();
+        yazi.AppendLine(
+            "İndekslenen ifade, sorgunun ürettiği ifadeyle birebir aynı olmalı; " +
+            "farklı olursa PostgreSQL indeksi hiç kullanmaz ve indeks sessizce boşa " +
+            "yatırım olur.");
+        yazi.AppendLine();
+        yazi.AppendLine("| indeks | hedef senaryo | durum | kurulum | boyut |");
+        yazi.AppendLine("|---|---|---|---:|---:|");
+
+        foreach (var a in adaylar)
+        {
+            var durum = a.Hata is null
+                ? "kuruldu"
+                : $"**KURULAMADI** — {a.Hata}";
+
+            var sure = a.Hata is null ? $"{a.SaniyeKurulum.ToString("N1", Tr)} sn" : "—";
+
+            yazi.AppendLine($"| `{a.Ad}` | `{a.Hedef}` | {durum} | {sure} | {a.Boyut} |");
+        }
+
+        yazi.AppendLine();
+
+        foreach (var a in adaylar)
+        {
+            yazi.AppendLine($"**`{a.Ad}`** — {a.Gerekce}");
+            yazi.AppendLine();
+            yazi.AppendLine("```sql");
+            yazi.AppendLine(a.Sql.Trim());
+            yazi.AppendLine("```");
+            yazi.AppendLine();
+        }
+    }
+
+    // Öncesi/sonrası. İki faz AYNI koşuda arka arkaya ölçüldü: aradaki fark indeksin
+    // etkisidir, iki ayrı günün makine farkı değil.
+    private static void Karsilastirma(StringBuilder yazi, Faz taban, Faz indeksli)
+    {
+        yazi.AppendLine("## İndeks öncesi / sonrası");
+        yazi.AppendLine();
+        yazi.AppendLine(
+            "Aynı senaryolar, aynı koşuda, önce indekssiz sonra ifade indeksleriyle. " +
+            "\"kat\" sütunu kaç kat hızlandığını söyler (1,0 = değişmedi).");
+        yazi.AppendLine();
+
+        var olcekler = taban.Sonuclar.Select(s => s.Olcek).Distinct().ToList();
+
+        foreach (var nokta in new[] { "SQL", "uç" })
+        {
+            var kume = taban.Sonuclar.Where(s => s.Nokta == nokta).ToList();
+            if (kume.Count == 0) continue;
+
+            yazi.AppendLine($"### {(nokta == "SQL" ? "Veritabanı sorguları" : "HTTP uçları")}");
+            yazi.AppendLine();
+
+            yazi.Append("| senaryo |");
+            foreach (var olcek in olcekler) yazi.Append($" {olcek} öncesi | {olcek} sonrası | kat |");
+            yazi.AppendLine();
+
+            yazi.Append("|---|");
+            foreach (var _ in olcekler) yazi.Append("---:|---:|---:|");
+            yazi.AppendLine();
+
+            foreach (var ad in kume.Select(s => s.Ad).Distinct())
+            {
+                yazi.Append($"| `{ad}` |");
+
+                foreach (var olcek in olcekler)
+                {
+                    var once = kume.FirstOrDefault(s => s.Ad == ad && s.Olcek == olcek);
+                    var sonra = indeksli.Sonuclar
+                        .FirstOrDefault(s => s.Ad == ad && s.Olcek == olcek && s.Nokta == nokta);
+
+                    if (once is null || sonra is null)
+                    {
+                        yazi.Append(" — | — | — |");
+                        continue;
+                    }
+
+                    var kat = sonra.MedyanMs > 0 ? once.MedyanMs / sonra.MedyanMs : 0;
+                    yazi.Append($" {Ms(once.MedyanMs)} | {Ms(sonra.MedyanMs)} | " +
+                                $"{kat.ToString("N1", Tr)}× |");
+                }
+
+                yazi.AppendLine();
+            }
+
+            yazi.AppendLine();
+        }
+
+        // Erişim biçimi: asıl soru "hızlandı mı" değil, "PostgreSQL indeksi KULLANDI mı".
+        // Süre düşmeden plan değişmişse iyileşme tesadüf, plan değişmeden süre düşmüşse
+        // ölçüm önbellek ısınmasını ölçmüş olabilir.
+        yazi.AppendLine("### Erişim biçimi — öncesi / sonrası");
+        yazi.AppendLine();
+
+        var sqlKume = taban.Sonuclar.Where(s => s.Nokta == "SQL").ToList();
+
+        yazi.Append("| senaryo |");
+        foreach (var olcek in olcekler) yazi.Append($" {olcek} |");
+        yazi.AppendLine();
+
+        yazi.Append("|---|");
+        foreach (var _ in olcekler) yazi.Append("---|");
+        yazi.AppendLine();
+
+        foreach (var ad in sqlKume.Select(s => s.Ad).Distinct())
+        {
+            yazi.Append($"| `{ad}` |");
+
+            foreach (var olcek in olcekler)
+            {
+                var once = sqlKume.FirstOrDefault(s => s.Ad == ad && s.Olcek == olcek);
+                var sonra = indeksli.Sonuclar
+                    .FirstOrDefault(s => s.Ad == ad && s.Olcek == olcek && s.Nokta == "SQL");
+
+                yazi.Append($" {once?.Tarama ?? "—"} → {sonra?.Tarama ?? "—"} |");
+            }
+
+            yazi.AppendLine();
+        }
+
+        yazi.AppendLine();
+
+        if (indeksli.Yazma.Count > 0)
+        {
+            yazi.AppendLine("### Yazma — indeksli faz");
+            yazi.AppendLine();
+            yazi.AppendLine(
+                "İndeksin bedeli okumada değil yazmada çıkar: her yeni satır bütün " +
+                "indekslere de işlenir. Yukarıdaki yazma tablosuyla karşılaştırılmalı.");
+            yazi.AppendLine();
+            YazmaTablosu(yazi, indeksli.Yazma);
+        }
     }
 
     // İçeri alma yolu. Okuma tablolarından ayrı duruyor çünkü ölçülen büyüklük süre değil,
@@ -56,6 +208,11 @@ internal static class Rapor
             "uç CSV'yi ayrıştırıp şemaya göre doğruluyor, `COPY` hazır değer basıyor. " +
             "Karşılaştırmanın amacı da bu — doğrulamanın mı, yazmanın mı pahalı olduğu.");
         yazi.AppendLine();
+        YazmaTablosu(yazi, yazma);
+    }
+
+    private static void YazmaTablosu(StringBuilder yazi, IReadOnlyList<YazmaSonuc> yazma)
+    {
         yazi.AppendLine("| yol | satır | süre (sn) | satır/sn | not |");
         yazi.AppendLine("|---|---:|---:|---:|---|");
 
@@ -145,6 +302,11 @@ internal static class Rapor
     {
         yazi.AppendLine("## Ayrıntı");
         yazi.AppendLine();
+        AyrintiTablosu(yazi, sonuclar);
+    }
+
+    private static void AyrintiTablosu(StringBuilder yazi, IReadOnlyList<Sonuc> sonuclar)
+    {
         yazi.AppendLine("| senaryo | nokta | ölçek | medyan | en kötü | dönen satır |");
         yazi.AppendLine("|---|---|---|---:|---:|---:|");
 

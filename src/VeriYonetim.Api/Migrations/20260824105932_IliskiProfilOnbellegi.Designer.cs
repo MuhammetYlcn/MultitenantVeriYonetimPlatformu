@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using VeriYonetim.Api.Data;
@@ -11,9 +12,11 @@ using VeriYonetim.Api.Data;
 namespace VeriYonetim.Api.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260824105932_IliskiProfilOnbellegi")]
+    partial class IliskiProfilOnbellegi
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -194,41 +197,6 @@ namespace VeriYonetim.Api.Migrations
                     b.HasIndex("DatasetId");
 
                     b.ToTable("DatasetColumns");
-                });
-
-            modelBuilder.Entity("VeriYonetim.Api.Models.Entities.DatasetIndex", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("ColumnName")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)");
-
-                    b.Property<string>("ColumnType")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("DatasetId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("IndexName")
-                        .IsRequired()
-                        .HasMaxLength(63)
-                        .HasColumnType("character varying(63)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("DatasetId", "ColumnName")
-                        .IsUnique();
-
-                    b.ToTable("DatasetIndexes");
                 });
 
             modelBuilder.Entity("VeriYonetim.Api.Models.Entities.DatasetProfile", b =>
@@ -727,17 +695,6 @@ namespace VeriYonetim.Api.Migrations
                 });
 
             modelBuilder.Entity("VeriYonetim.Api.Models.Entities.DatasetColumn", b =>
-                {
-                    b.HasOne("VeriYonetim.Api.Models.Entities.Dataset", "Dataset")
-                        .WithMany()
-                        .HasForeignKey("DatasetId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Dataset");
-                });
-
-            modelBuilder.Entity("VeriYonetim.Api.Models.Entities.DatasetIndex", b =>
                 {
                     b.HasOne("VeriYonetim.Api.Models.Entities.Dataset", "Dataset")
                         .WithMany()

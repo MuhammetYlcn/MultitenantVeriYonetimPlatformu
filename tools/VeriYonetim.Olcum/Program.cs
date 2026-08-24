@@ -10,9 +10,15 @@ using VeriYonetim.Olcum;
 //   measure   senaryoları koşturur ve raporu yazar
 //   clean     ölçüm veritabanını siler
 //
+// `measure --indeks` verilirse ölçüm İKİ FAZ koşar: önce indeksler düşürülüp ölçülür,
+// sonra aday ifade indeksleri kurulup aynı senaryolar tekrar ölçülür. İki koşu ayrı
+// zamanlarda yapılıp sonradan karşılaştırılsaydı aradaki fark, indeksin etkisi kadar
+// makinenin o anki hâlini de içerirdi.
+//
 // Örnek:
 //   dotnet run --project tools/VeriYonetim.Olcum -- seed
 //   dotnet run --project tools/VeriYonetim.Olcum -- measure --api http://localhost:5000
+//   dotnet run --project tools/VeriYonetim.Olcum -- measure --api http://localhost:5000 --indeks
 //   dotnet run --project tools/VeriYonetim.Olcum -- clean
 
 var komut = args.Length > 0 ? args[0].ToLowerInvariant() : "help";
@@ -24,7 +30,8 @@ switch (komut)
         break;
 
     case "measure":
-        await OlcAsync(Secenek(args, "--api"), Secenek(args, "--out"));
+        await OlcAsync(Secenek(args, "--api"), Secenek(args, "--out"),
+            args.Contains("--indeks"));
         break;
 
     case "clean":
@@ -32,7 +39,8 @@ switch (komut)
         break;
 
     default:
-        Console.WriteLine("Komutlar: seed | measure [--api <adres>] [--out <dosya>] | clean");
+        Console.WriteLine(
+            "Komutlar: seed | measure [--api <adres>] [--out <dosya>] [--indeks] | clean");
         break;
 }
 
@@ -44,23 +52,70 @@ static string? Secenek(string[] args, string ad)
     return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
 }
 
-static async Task OlcAsync(string? apiAdresi, string? cikti)
+static async Task OlcAsync(string? apiAdresi, string? cikti, bool indeksKarsilastir)
 {
     await using var baglanti = new NpgsqlConnection(Ortam.BaglantiDizesi());
     await baglanti.OpenAsync();
-
-    var musteriSetId = await SetIdAsync(baglanti, Ortam.MusteriSeti);
-    var sonuclar = new List<Sonuc>();
 
     // Uç ölçümü için API'nin ÖLÇÜM veritabanına bakıyor olması gerekir; adres verilmezse
     // o bölüm atlanır ve rapor bunu söyler (sessizce eksik kalmasın).
     var istemci = apiAdresi is null ? null : await Olcucu.IstemciAsync(apiAdresi, Ortam.KullaniciEposta);
 
+    IReadOnlyList<IndeksAdayi>? adaylar = null;
+    Faz? indeksli = null;
+
+    // Karşılaştırma isteniyorsa taban koşusu, indekslerin kesinlikle bulunmadığı bir
+    // tablo üzerinde yapılmalı — önceki bir koşudan kalmış indeks, "öncesi" sütununu
+    // sessizce iyileştirirdi.
+    if (indeksKarsilastir)
+    {
+        Console.WriteLine("indeksler düşürülüyor (taban koşusu için)");
+        await Indeksler.DusurAsync(baglanti);
+    }
+
+    var taban = await FazAsync(baglanti, istemci, apiAdresi, "indekssiz");
+
+    // Ortam bilgisi taban fazının sonunda alınıyor: okumaların gördüğü tablo bu.
+    var ortam = await OrtamBilgisiAsync(baglanti, apiAdresi);
+
+    if (indeksKarsilastir)
+    {
+        Console.WriteLine("\nifade indeksleri kuruluyor");
+        adaylar = await Indeksler.KurAsync(baglanti);
+
+        indeksli = await FazAsync(baglanti, istemci, apiAdresi, "indeksli");
+        ortam["İndeksli fazdaki indeksler"] = await IndeksListesiAsync(baglanti);
+    }
+
+    istemci?.Dispose();
+
+    var metin = Rapor.Kur(taban, ortam, indeksli, adaylar);
+
+    // Çıktı raporlar/ altına DEĞİL, depo kökündeki olcumler/ altına yazılıyor: raporlar/
+    // staj günlüklerinin yeri ve .gitignore'da; ölçüm sonucu ise kodun kanıtı, depoda
+    // durmalı (Pazartesi'nin "öncesi/sonrası" karşılaştırması buna dayanacak).
+    var yol = cikti ?? Path.Combine(Ortam.DepoKoku(), "olcumler",
+        $"olcum-{DateTime.Now:yyyyMMdd-HHmm}.md");
+
+    Directory.CreateDirectory(Path.GetDirectoryName(yol)!);
+    await File.WriteAllTextAsync(yol, metin);
+
+    Console.WriteLine($"\nRapor: {yol}");
+}
+
+// Bütün senaryoların bir kez baştan sona koşturulması. İndeks karşılaştırmasında bu iki
+// kez çağrılır: bir kez indekssiz tabloda, bir kez ifade indeksleri kurulduktan sonra.
+static async Task<Faz> FazAsync(
+    NpgsqlConnection baglanti, HttpClient? istemci, string? apiAdresi, string etiket)
+{
+    var musteriSetId = await SetIdAsync(baglanti, Ortam.MusteriSeti);
+    var sonuclar = new List<Sonuc>();
+
     foreach (var (setAdi, olcek, satirSayisi) in Ortam.Olcekler)
     {
         var setId = await SetIdAsync(baglanti, setAdi);
 
-        Console.WriteLine($"\n{olcek} ({satirSayisi:N0} satır) — {setId}");
+        Console.WriteLine($"\n[{etiket}] {olcek} ({satirSayisi:N0} satır) — {setId}");
 
         foreach (var senaryo in Senaryolar.Sql(setId, setAdi, satirSayisi, musteriSetId))
         {
@@ -79,14 +134,13 @@ static async Task OlcAsync(string? apiAdresi, string? cikti)
         }
     }
 
-    // Ortam bilgisi yazma ölçümünden ÖNCE alınıyor: okumaların gördüğü tablo bu.
-    var ortam = await OrtamBilgisiAsync(baglanti, apiAdresi);
-
     // Yazma yolu ancak uç üzerinden ölçülebilir: bugünkü içe aktarma bir HTTP ucudur.
+    // İndeksli fazda da ölçülüyor, çünkü indeksin bedeli okumada değil YAZMADA çıkar.
     var yazma = new List<YazmaSonuc>();
+
     if (istemci is not null)
     {
-        Console.WriteLine("\nyazma");
+        Console.WriteLine($"\n[{etiket}] yazma");
         yazma = await YazmaOlcumu.OlcAsync(baglanti, istemci, apiAdresi!);
 
         foreach (var y in yazma)
@@ -94,20 +148,21 @@ static async Task OlcAsync(string? apiAdresi, string? cikti)
                               $"{y.SatirSn,8:N0} satır/sn  {y.Not}");
     }
 
-    istemci?.Dispose();
+    return new Faz(etiket, sonuclar, yazma);
+}
 
-    var metin = Rapor.Kur(sonuclar, ortam, yazma);
+static async Task<string> IndeksListesiAsync(NpgsqlConnection baglanti)
+{
+    var indeksler = new List<string>();
 
-    // Çıktı raporlar/ altına DEĞİL, depo kökündeki olcumler/ altına yazılıyor: raporlar/
-    // staj günlüklerinin yeri ve .gitignore'da; ölçüm sonucu ise kodun kanıtı, depoda
-    // durmalı (Pazartesi'nin "öncesi/sonrası" karşılaştırması buna dayanacak).
-    var yol = cikti ?? Path.Combine(Ortam.DepoKoku(), "olcumler",
-        $"olcum-{DateTime.Now:yyyyMMdd-HHmm}.md");
+    await using var komut = baglanti.CreateCommand();
+    komut.CommandText =
+        "SELECT indexname FROM pg_indexes WHERE tablename = 'DatasetRows' ORDER BY indexname";
 
-    Directory.CreateDirectory(Path.GetDirectoryName(yol)!);
-    await File.WriteAllTextAsync(yol, metin);
+    await using var okuyucu = await komut.ExecuteReaderAsync();
+    while (await okuyucu.ReadAsync()) indeksler.Add(okuyucu.GetString(0));
 
-    Console.WriteLine($"\nRapor: {yol}");
+    return string.Join(", ", indeksler);
 }
 
 // Rapor makineden bağımsız okunamaz: aynı sorgu başka bir diskte başka süre verir.

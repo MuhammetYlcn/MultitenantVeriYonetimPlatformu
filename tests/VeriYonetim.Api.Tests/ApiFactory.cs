@@ -63,6 +63,22 @@ public class ApiFactory : WebApplicationFactory<Program>
                            "DatasetWatches" CASCADE
             """);
 
+        // Kolon indeksleri tabloya kurulur, satırlara değil: TRUNCATE onları düşürmez.
+        // Temizlenmezlerse bir testin kurduğu indeks bir sonrakinde duruyor olur ve
+        // "indeks var mı" diye soran testler sessizce yanlış cevap alır.
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            DO $$
+            DECLARE r record;
+            BEGIN
+                FOR r IN SELECT indexname FROM pg_indexes
+                         WHERE tablename = 'DatasetRows' AND indexname LIKE 'ix\_rows\_%'
+                LOOP
+                    EXECUTE format('DROP INDEX IF EXISTS %I', r.indexname);
+                END LOOP;
+            END $$;
+            """);
+
         var platformAuth = scope.ServiceProvider.GetRequiredService<IPlatformAuthService>();
         await platformAuth.EnsureSeedAdminAsync();
     }
