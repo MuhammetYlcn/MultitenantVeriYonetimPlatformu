@@ -29,6 +29,48 @@ public interface IWatchNotifier
     Task NotifyAsync(DatasetWatch watch, DatasetWatchRun run, CancellationToken ct = default);
 }
 
+/// <summary>
+/// Uyarının bütün kanalları — canlı bildirim ve e-posta — tek bir çağrının arkasında.
+///
+/// İki işi var ve ikincisi asıl sebebi:
+///   1. Koşuyu yürüten kod (WatchRunner) kaç kanal olduğunu bilmiyor. E-posta eklenirken
+///      koşu mantığına tek satır dokunulmadı; kanal eklemek bir KAYIT işi hâline geldi.
+///   2. BİR KANALIN DÜŞMESİ DİĞERLERİNİ DURDURMUYOR. E-posta gönderimi istisna fırlatıyor
+///      (bkz. SmtpEmailSender) ve o istisna burada yakalanıyor: uyarı zaten veritabanına
+///      yazılmış durumda, kanal yalnızca onun kopyasını taşıyor. Gönderilemeyen bir posta
+///      yüzünden koşunun düşmesi, izleyiciyi "kırık" işaretler ve kullanıcıya verideki bir
+///      sorunu haber verirdi — oysa sorun postadaydı.
+/// </summary>
+public class CompositeWatchNotifier : IWatchNotifier
+{
+    private readonly IReadOnlyList<IWatchNotifier> _channels;
+    private readonly ILogger<CompositeWatchNotifier> _logger;
+
+    public CompositeWatchNotifier(IReadOnlyList<IWatchNotifier> channels,
+        ILogger<CompositeWatchNotifier> logger)
+    {
+        _channels = channels;
+        _logger = logger;
+    }
+
+    public async Task NotifyAsync(DatasetWatch watch, DatasetWatchRun run,
+        CancellationToken ct = default)
+    {
+        foreach (var channel in _channels)
+        {
+            try
+            {
+                await channel.NotifyAsync(watch, run, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Uyarı kanalı düştü ({Channel}), uyarı kaydı duruyor: {WatchId}",
+                    channel.GetType().Name, watch.Id);
+            }
+        }
+    }
+}
+
 public class SignalRWatchNotifier : IWatchNotifier
 {
     private readonly IHubContext<JobsHub> _hub;

@@ -35,8 +35,30 @@ builder.Services.AddScoped<ITenantCatalogLoader, TenantCatalogLoader>();
 // güncellenmesi (runner) ve eşik uyarısının firmaya bildirilmesi (notifier).
 builder.Services.AddScoped<IWatchEvaluator, WatchEvaluator>();
 builder.Services.AddScoped<IWatchRunner, WatchRunner>();
-builder.Services.AddScoped<IWatchNotifier, SignalRWatchNotifier>();
 builder.Services.AddScoped<IWatchScheduler, WatchScheduler>();
+
+// Koşu geçmişinin bakımı: izleyici başına saklanan koşu sayısına tavan koyar.
+builder.Services.AddScoped<IWatchRunCleaner, WatchRunCleaner>();
+
+// Uyarının kanalları. İkisi de somut tipiyle kaydediliyor, IWatchNotifier ise ikisini
+// saran birleştirici: koşuyu yürüten kod tek bir bildirici görüyor, kanal listesi
+// burada duruyor. Üçüncü bir kanal (ör. SMS) eklenecekse değişen tek yer bu satır.
+builder.Services.AddScoped<SignalRWatchNotifier>();
+builder.Services.AddScoped<WatchEmailNotifier>();
+builder.Services.AddScoped<IWatchNotifier>(sp => new CompositeWatchNotifier(
+    new IWatchNotifier[]
+    {
+        sp.GetRequiredService<SignalRWatchNotifier>(),
+        sp.GetRequiredService<WatchEmailNotifier>()
+    },
+    sp.GetRequiredService<ILogger<CompositeWatchNotifier>>()));
+
+// E-posta. Ayar yoksa (Email:Host boş) gönderim KAPALI ve sistem çalışmaya devam eder —
+// uyarı zaten veritabanında ve rozette duruyor. Teslimde dış bir SMTP servisi yok:
+// docker-compose'daki Mailpit gönderilen postayı yakalayıp tarayıcıda gösteriyor, yani
+// teslim alan kişinin hiçbir yere hesap açması ya da gerçek bir parola girmesi gerekmiyor.
+builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("Email"));
+builder.Services.AddScoped<IEmailSender, SmtpEmailSender>();
 builder.Services.AddHttpContextAccessor();
 
 // Tek örnek, iki arayüz: okuma sözleşmesi her yere enjekte ediliyor, yazma yeteneği
@@ -252,6 +274,13 @@ if (app.Configuration.GetValue("Hangfire:RunServer", true))
     // izleyiciler kendiliğinden koşmaz, testler zamanlayıcıyı elle tetikler.
     recurring.AddOrUpdate<IWatchScheduler>(
         "watch-sweep", s => s.SweepAsync(), "*/5 * * * *");
+
+    // Koşu geçmişinin bakımı GÜNLÜK. Belge bakımından (saatlik) daha seyrek, çünkü
+    // temizlediği şey birikmesi haftalar süren bir fazlalık: on beş dakikada bir koşan
+    // bir izleyici bile tavana ancak beş günde ulaşıyor. Daha sık koşmak, hiçbir şey
+    // silmeyen bir sorguyu günde 24 kez tekrarlamak olurdu.
+    recurring.AddOrUpdate<IWatchRunCleaner>(
+        "watch-run-cleanup", c => c.CleanAsync(), Cron.Daily);
 }
 
 // Geliştirmede: uygulama ayağa kalkınca varsayılan tarayıcıyı Swagger'a aç.

@@ -11,5 +11,21 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  # Yerel posta yakalayıcı.
+  #
+  # İzleyici uyarısı uygulama dışına e-postayla çıkıyor, ama teslimde DIŞ BİR SMTP SERVİSİ
+  # KULLANILMIYOR: projeyi teslim alan kişinin bir sağlayıcıya hesap açması, ayar dosyasına
+  # gerçek bir parola yazması ve o parolanın depoya sızma riskini üstlenmesi gerekirdi.
+  # Mailpit hem SMTP sunucusu gibi davranıp postayı kabul ediyor hem de yakaladığı postayı
+  # kendi web arayüzünde gösteriyor — gönderim gerçekten yapılıyor, yalnız dışarı çıkmıyor.
+  #
+  # 1025 = SMTP (uygulamanın bağlandığı port), 8025 = tarayıcıda açılan posta kutusu.
+  mailpit:
+    image: axllent/mailpit:v1.21
+    container_name: veriyonetim-mailpit
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
 volumes:
   postgres_data:

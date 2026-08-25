@@ -41,7 +41,13 @@ public class ApiFactory : WebApplicationFactory<Program>
                 // işi kimin ne zaman çalıştıracağına test karar verir (çalıştırıcı elle
                 // tetiklenir). Açık bırakılsaydı testler zamanlamaya bağımlı hâle gelir,
                 // üstelik gerçek görsel modeli çağırmaya kalkarlardı.
-                ["Hangfire:RunServer"] = "false"
+                ["Hangfire:RunServer"] = "false",
+
+                // E-posta testlerde KAPALI. Geliştirme ayarında açık duruyor (yerel
+                // Mailpit'e gidiyor), ama testin sonucu makinede bir posta sunucusunun
+                // ayakta olup olmamasına bağlı olmamalı. Gönderimi sınayan testler
+                // IEmailSender'ın yerine sahtesini koyup mesajın kendisine bakıyor.
+                ["Email:Host"] = ""
             });
         });
     }

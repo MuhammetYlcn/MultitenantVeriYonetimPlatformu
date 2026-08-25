@@ -923,4 +923,286 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
         // Günlükten 15 dakikaya çekilen izleyici yine bir gün beklememeli.
         Assert.True(updated.NextRunAt < created.NextRunAt);
     }
+
+    // ---- e-posta ----
+    //
+    // Uyarının uygulama DIŞINA çıkması. Buradaki testlerin ortak iddiası tek: e-posta bir
+    // KOLAYLIK, doğruluk kaynağı değil. Gidememesi, yanlış kişiye gitmesi ya da hiç
+    // ayarlanmamış olması uyarının kendisini bozmamalı.
+
+    /// Gerçek SMTP yerine geçen sahte gönderici. Sınanan şey MailKit'in postayı taşıması
+    /// değil (o kütüphanenin işi), uygulamanın DOĞRU mesajı DOĞRU adreslere vermesi.
+    private sealed class FakeEmailSender : IEmailSender
+    {
+        private readonly List<EmailMessage> _sent = new();
+
+        public bool IsEnabled { get; init; } = true;
+
+        /// Gönderim sırasında patlasın mı — "kanal düşerse ne olur" testi için.
+        public bool Throws { get; init; }
+
+        public IReadOnlyList<EmailMessage> Sent
+        {
+            get { lock (_sent) return _sent.ToList(); }
+        }
+
+        public Task SendAsync(EmailMessage message, CancellationToken ct = default)
+        {
+            if (Throws) throw new InvalidOperationException("SMTP sunucusuna ulaşılamadı.");
+
+            lock (_sent) _sent.Add(message);
+            return Task.CompletedTask;
+        }
+    }
+
+    private WebApplicationFactory<Program> FactoryWithEmail(FakeEmailSender sender) =>
+        _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<IEmailSender>(sender)));
+
+    /// Eşiği aşan bir izleyici kurar ve onu koşturur: uyarı doğar.
+    private async Task<WatchDto> TriggerBreachAsync(HttpClient client, TokenResponse admin,
+        string tenantSlug)
+    {
+        var dataset = await CreateDatasetAsync(client, admin.Token);
+        var messageId = await SeedMessageAsync(admin.UserId, "toplam tutar nedir", ToplamTutarPlani);
+
+        var created = (await (await CreateWatchAsync(client, admin.Token, messageId,
+            "gt", 1000m)).Content.ReadFromJsonAsync<WatchDto>())!;
+
+        await client.SendAsync(WithToken(HttpMethod.Post, $"/api/datasets/{dataset.Id}/rows/add",
+            admin.Token, new { values = new Dictionary<string, string?>
+                { ["urun"] = $"Masa-{tenantSlug}", ["tutar"] = "5000", ["sehir"] = "Ankara" } }));
+
+        return await RunNowAsync(client, admin.Token, created.Id);
+    }
+
+    [Fact(DisplayName = "Eşik aşılınca uyarı firmanın TÜM kullanıcılarına e-postayla gider")]
+    public async Task UyariEpostayaDonusur()
+    {
+        var sender = new FakeEmailSender();
+        using var factory = FactoryWithEmail(sender);
+        using var client = factory.CreateClient();
+
+        var admin = await RegisterAsync(client, "izle-posta", "admin@izleposta.com");
+        // İkinci kullanıcı VIEWER: uyarı firmaya ait, rol ayrımı yapılmıyor. Yalnız
+        // izleyiciyi kurana gönderilseydi, o kişi izinliyken alarm kimseye ulaşmazdı.
+        await InviteViewerAsync(client, admin.Token, "izleyen@izleposta.com");
+
+        var after = await TriggerBreachAsync(client, admin, "posta");
+        Assert.Equal(WatchStatus.Breaching, after.Status);
+
+        var mail = Assert.Single(sender.Sent);
+        Assert.Contains("admin@izleposta.com", mail.To);
+        Assert.Contains("izleyen@izleposta.com", mail.To);
+        Assert.Contains(after.Title, mail.Subject);
+        // Ölçülen sayı gövdede taşınıyor: kullanıcı sırf değeri görmek için uygulamayı
+        // açmak zorunda kalmamalı.
+        Assert.Contains("5.350", mail.Body);
+        Assert.Contains("1.000", mail.Body);
+    }
+
+    [Fact(DisplayName = "E-posta yalnız kendi firmasının adreslerine gider")]
+    public async Task EpostaFirmaDisinaCikmaz()
+    {
+        var sender = new FakeEmailSender();
+        using var factory = FactoryWithEmail(sender);
+        using var client = factory.CreateClient();
+
+        // İki firma, aynı sunucu. Adresler firma bağlamından değil izleyicinin kendi
+        // TenantId'sinden okunuyor; yanlış kurulsaydı bir firmanın alarmı diğerinin
+        // posta kutusuna düşerdi — üstelik ölçülen sayıyı da yanında götürerek.
+        var a = await RegisterAsync(client, "izle-posta-a", "a@izlepostaizole.com");
+        await RegisterAsync(client, "izle-posta-b", "b@izlepostaizole.com");
+
+        await TriggerBreachAsync(client, a, "a");
+
+        var mail = Assert.Single(sender.Sent);
+        Assert.Equal(new[] { "a@izlepostaizole.com" }, mail.To);
+    }
+
+    [Fact(DisplayName = "Kırık izleyici de e-posta doğurur ve konusu ayrıdır")]
+    public async Task KirikIzleyiciEpostasi()
+    {
+        var sender = new FakeEmailSender();
+        using var factory = FactoryWithEmail(sender);
+        using var client = factory.CreateClient();
+
+        var admin = await RegisterAsync(client, "izle-posta-kirik", "a@izlepostakirik.com");
+        var dataset = await CreateDatasetAsync(client, admin.Token);
+        var messageId = await SeedMessageAsync(admin.UserId, "toplam tutar nedir", ToplamTutarPlani);
+        var created = (await (await CreateWatchAsync(client, admin.Token, messageId,
+            "gt", 1000m)).Content.ReadFromJsonAsync<WatchDto>())!;
+
+        (await client.SendAsync(WithToken(HttpMethod.Delete, $"/api/datasets/{dataset.Id}",
+            admin.Token))).EnsureSuccessStatusCode();
+
+        await RunNowAsync(client, admin.Token, created.Id);
+
+        var mail = Assert.Single(sender.Sent);
+        // Konu satırı ayrı: kullanıcı posta kutusunu açmadan, "eşik aşıldı" ile
+        // "alarm çalışmıyor" arasındaki farkı görebilmeli.
+        Assert.Contains("çalışmıyor", mail.Subject);
+        Assert.Contains("ÇALIŞMIYOR", mail.Body);
+    }
+
+    [Fact(DisplayName = "E-posta gönderilemezse uyarı KAYBOLMAZ, koşu da düşmez")]
+    public async Task EpostaDuserseUyariKalir()
+    {
+        var sender = new FakeEmailSender { Throws = true };
+        using var factory = FactoryWithEmail(sender);
+        using var client = factory.CreateClient();
+
+        var admin = await RegisterAsync(client, "izle-posta-hata", "a@izlepostahata.com");
+
+        // Koşu isteği 200 dönüyor: SMTP sunucusunun ulaşılamaz olması bir VERİ sorunu
+        // değil. Düşseydi izleyici "kırık" işaretlenir, kullanıcı verisinde olmayan bir
+        // arızayı aramaya başlardı.
+        var after = await TriggerBreachAsync(client, admin, "hata");
+
+        Assert.Equal(WatchStatus.Breaching, after.Status);
+        Assert.Equal(1, after.UnreadCount);
+
+        // Asıl iddia: uyarı uygulamada duruyor. E-posta onun kopyasıydı, kendisi değil.
+        var alert = Assert.Single(await AlertsAsync(client, admin.Token));
+        Assert.Equal(5350m, alert.Value);
+    }
+
+    [Fact(DisplayName = "E-posta ayarı yoksa özellik kapalıdır: uyarı yine üretilir")]
+    public async Task AyarYoksaOzellikKapali()
+    {
+        var sender = new FakeEmailSender { IsEnabled = false };
+        using var factory = FactoryWithEmail(sender);
+        using var client = factory.CreateClient();
+
+        var admin = await RegisterAsync(client, "izle-posta-kapali", "a@izlepostakapali.com");
+
+        var after = await TriggerBreachAsync(client, admin, "kapali");
+
+        Assert.Equal(WatchStatus.Breaching, after.Status);
+        Assert.Empty(sender.Sent);
+        // Ayarsız bir kurulumda sistem tam olarak eskisi gibi çalışmaya devam ediyor.
+        Assert.Single(await AlertsAsync(client, admin.Token));
+    }
+
+    // ---- koşu geçmişinin bakımı ----
+
+    /// İzleyiciye elle koşu kaydı yazar. Gerçekte bunlar aylar içinde birikiyor; testin
+    /// tavanı aşması için zamanı beklemek yerine geçmişe kayıt düşülüyor.
+    private async Task SeedRunsAsync(Guid watchId, int count, bool oldestIsUnreadAlert = false)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        var baseTime = DateTime.UtcNow.AddDays(-count);
+
+        var runs = Enumerable.Range(0, count).Select(i => new DatasetWatchRun
+        {
+            Id = Guid.NewGuid(),
+            WatchId = watchId,
+            RanAt = baseTime.AddMinutes(i),
+            Value = i,
+            // En eski kayıt, kullanıcının HİÇ GÖRMEDİĞİ bir uyarı olabiliyor.
+            Notified = oldestIsUnreadAlert && i == 0,
+            Breached = oldestIsUnreadAlert && i == 0
+        }).ToList();
+
+        db.DatasetWatchRuns.AddRange(runs);
+        await db.SaveChangesAsync();
+    }
+
+    private async Task CleanRunsAsync()
+    {
+        using var scope = _factory.Services.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<IWatchRunCleaner>().CleanAsync();
+    }
+
+    private async Task<List<DatasetWatchRun>> ReadRunsAsync(Guid watchId)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        return await db.DatasetWatchRuns.IgnoreQueryFilters()
+            .Where(r => r.WatchId == watchId)
+            .OrderBy(r => r.RanAt)
+            .ToListAsync();
+    }
+
+    [Fact(DisplayName = "Bakım: koşu geçmişi sınırsız birikmez, en yeniler kalır")]
+    public async Task KosuGecmisiBudanir()
+    {
+        using var client = _factory.CreateClient();
+        var admin = await RegisterAsync(client, "izle-bakim", "a@izlebakim.com");
+        await CreateDatasetAsync(client, admin.Token);
+
+        var messageId = await SeedMessageAsync(admin.UserId, "toplam tutar nedir", ToplamTutarPlani);
+        var created = (await (await CreateWatchAsync(client, admin.Token, messageId))
+            .Content.ReadFromJsonAsync<WatchDto>())!;
+
+        // Kuruluş koşusuyla birlikte 561 kayıt: saatlik koşan bir izleyicide bu 23 gün.
+        await SeedRunsAsync(created.Id, 560);
+        Assert.Equal(561, (await ReadRunsAsync(created.Id)).Count);
+
+        await CleanRunsAsync();
+
+        var kalan = await ReadRunsAsync(created.Id);
+
+        // Tavan 500 (bkz. WatchRunCleaner.KeepPerWatch).
+        Assert.Equal(500, kalan.Count);
+
+        // Silinenler EN ESKİLER: 561 kayıttan en eski 61'i gitti, grafiğin ucundaki
+        // güncel noktalar duruyor. Sondaki kayıt izleyicinin kuruluş ölçümü (350).
+        Assert.Equal(61m, kalan.First().Value);
+        Assert.Equal(350m, kalan.Last().Value);
+
+        // Bakım iki kez koşarsa ikincisi bir şey silmemeli: sınır bir kez uygulanır.
+        await CleanRunsAsync();
+        Assert.Equal(500, (await ReadRunsAsync(created.Id)).Count);
+    }
+
+    [Fact(DisplayName = "Bakım OKUNMAMIŞ uyarıyı silmez: görülmemiş alarm sessizce kaybolamaz")]
+    public async Task BakimOkunmamisUyariyiSilmez()
+    {
+        using var client = _factory.CreateClient();
+        var admin = await RegisterAsync(client, "izle-bakim2", "a@izlebakim2.com");
+        await CreateDatasetAsync(client, admin.Token);
+
+        var messageId = await SeedMessageAsync(admin.UserId, "toplam tutar nedir", ToplamTutarPlani);
+        var created = (await (await CreateWatchAsync(client, admin.Token, messageId))
+            .Content.ReadFromJsonAsync<WatchDto>())!;
+
+        // En eski kayıt, kullanıcının henüz görmediği bir uyarı — yani tam da bakımın
+        // silmeye aday gördüğü yerde duruyor.
+        await SeedRunsAsync(created.Id, 560, oldestIsUnreadAlert: true);
+
+        var uyari = Assert.Single(await AlertsAsync(client, admin.Token));
+
+        await CleanRunsAsync();
+
+        var kalan = await ReadRunsAsync(created.Id);
+
+        // 500 yeni + korunan uyarı. Rozet ve bildirim kutusu bu kaydı sayıyor; bakımın
+        // onu düşürmesi, hiç görülmemiş bir alarmı yok saymak olurdu.
+        Assert.Equal(501, kalan.Count);
+        Assert.Contains(kalan, r => r.Id == uyari.RunId);
+        Assert.Single(await AlertsAsync(client, admin.Token));
+    }
+
+    [Fact(DisplayName = "Bakım sınırın altındaki geçmişe dokunmaz")]
+    public async Task BakimAzKayitliIzleyiciyeDokunmaz()
+    {
+        using var client = _factory.CreateClient();
+        var admin = await RegisterAsync(client, "izle-bakim3", "a@izlebakim3.com");
+        await CreateDatasetAsync(client, admin.Token);
+
+        var messageId = await SeedMessageAsync(admin.UserId, "toplam tutar nedir", ToplamTutarPlani);
+        var created = (await (await CreateWatchAsync(client, admin.Token, messageId))
+            .Content.ReadFromJsonAsync<WatchDto>())!;
+
+        await SeedRunsAsync(created.Id, 20);
+
+        await CleanRunsAsync();
+
+        // Normal hâl bu: bakım hiçbir şey silmeden dönüyor.
+        Assert.Equal(21, (await ReadRunsAsync(created.Id)).Count);
+    }
 }
