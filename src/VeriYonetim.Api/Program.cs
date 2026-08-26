@@ -14,6 +14,56 @@ using VeriYonetim.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// ---------------------------------------------------------------------------
+// Sırların denetimi — AÇILIŞTA, uygulama istek kabul etmeye başlamadan önce.
+//
+// Bu sırların hiçbiri depoda durmuyor: appsettings.Development.json .gitignore'da,
+// yanında yalnızca yer tutucu değerler taşıyan .example dosyası duruyor; teslimde
+// aynı değerler ortam değişkeniyle (ConnectionStrings__DefaultConnection, Jwt__Key…)
+// veriliyor. Ama "depoda yok" tek başına yetmiyor: ayarı EKSİK bir kurulumun ne
+// yapacağı da tanımlı olmalı.
+//
+// Eskiden tanımlı değildi. Jwt:Key okunurken "!" ile null olmadığı varsayılıyordu;
+// anahtar verilmemiş bir kurulumda uygulama açılışta değil, İLK GİRİŞ DENEMESİNDE,
+// hiçbir şey söylemeyen bir hatayla düşerdi. Daha kötüsü uzunluk denetimiydi: HS256
+// anahtarı 32 bayttan kısaysa .NET zaten reddeder, ama kısa bir anahtar yazan kişi bunu
+// ancak çalışma anında öğrenirdi.
+//
+// Kural: eksik ya da zayıf sır = AÇILMAYAN uygulama. Sessizce çalışan ama korumayan bir
+// kurulumdan, hiç açılmayan ve sebebini söyleyen bir kurulum iyidir.
+// ---------------------------------------------------------------------------
+static string RequiredSetting(IConfiguration config, string key, string hint)
+{
+    var value = config[key];
+    if (!string.IsNullOrWhiteSpace(value)) return value;
+
+    throw new InvalidOperationException(
+        $"Zorunlu ayar eksik: '{key}'. {hint} " +
+        "Ayar dosyası için appsettings.Development.example.json'a bakın; teslimde " +
+        $"karşılığı '{key.Replace(":", "__")}' ortam değişkenidir.");
+}
+
+RequiredSetting(builder.Configuration, "ConnectionStrings:DefaultConnection",
+    "Veritabanı bağlantısı olmadan uygulama açılamaz.");
+
+var jwtKey = RequiredSetting(builder.Configuration, "Jwt:Key",
+    "Bu anahtar tüm oturum token'larını imzalar.");
+
+// HS256 için anahtar en az 256 bit olmalı. Kısa anahtar yalnız "zayıf" değil, .NET
+// tarafından da reddediliyor — burada yakalanmazsa hata ilk token üretiminde çıkardı.
+if (Encoding.UTF8.GetByteCount(jwtKey) < 32)
+    throw new InvalidOperationException(
+        "Jwt:Key en az 32 karakter (256 bit) olmalı — kısa bir imzalama anahtarı " +
+        "token'ların taklit edilmesini kolaylaştırır.");
+
+// Token ömürleri de açılışta denetleniyor. Sır değiller ama aynı kusuru taşıyorlardı:
+// TokenService ve AuthService bunları int.Parse(...!) ile okuyor, yani eksik ya da
+// sayı olmayan bir değer ilk giriş denemesinde patlardı.
+foreach (var key in new[] { "Jwt:AccessTokenMinutes", "Jwt:RefreshTokenDays" })
+    if (!int.TryParse(builder.Configuration[key], out var value) || value <= 0)
+        throw new InvalidOperationException(
+            $"'{key}' pozitif bir tam sayı olmalı (bulunan: '{builder.Configuration[key]}').");
+
 // Add services to the container.
 
 builder.Services.AddDbContext<AppDbContext>(options =>
@@ -21,6 +71,12 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IPlatformAuthService, PlatformAuthService>();
+
+// Giriş denemesi sınırı. Sayaç veritabanında duruyor (yeniden başlatma sıfırlamasın) ve
+// iki giriş kapısına da aynı servis hizmet ediyor — bkz. LoginThrottle.
+builder.Services.Configure<LoginThrottleOptions>(
+    builder.Configuration.GetSection("Security:Login"));
+builder.Services.AddScoped<ILoginThrottle, LoginThrottle>();
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IAccountTokenService, AccountTokenService>();
 builder.Services.AddScoped<ITenantProvisioner, TenantProvisioner>();
@@ -157,7 +213,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidAudience = jwt["Audience"],
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt["Key"]!))
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
         };
 
         // SignalR bağlantısı için token'ı adres satırından da kabul et.
@@ -196,12 +252,45 @@ builder.Services.AddAuthorizationBuilder()
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
-// CORS: Flutter web istemcisi ayrı bir origin'den (localhost:farklı-port) istek atar;
-// tarayıcı aksi halde engeller. Kimlik Bearer header ile taşındığından (cookie değil)
-// AllowAnyOrigin güvenli. Yalnızca geliştirme için gevşek tutuldu.
+// ---------------------------------------------------------------------------
+// CORS.
+//
+// İki Flutter web istemcisi (müşteri paneli ve platform paneli) API'den AYRI birer
+// origin'de çalışıyor; tarayıcı, sunucu izin vermedikçe bu isteklere cevabı vermez.
+//
+// Eskiden AllowAnyOrigin'di ve gerekçesi "kimlik cookie değil Bearer başlığıyla
+// taşınıyor, o yüzden güvenli" idi. Doğru ama YETERSİZ bir gerekçe: cookie olmadığı için
+// tarayıcının oturumu otomatik eklemesi (CSRF) gerçekten mümkün değil, ama açık origin
+// listesi başka bir şeyi mümkün kılıyor — herhangi bir web sayfası, ziyaretçisinin
+// tarayıcısından bu API'ye istek atıp CEVABI OKUYABİLİR. Token'ı olmayan bir sayfa için
+// bu yalnız 401 demek; token'ı bir şekilde ele geçirmiş (ör. XSS ile aynı makinede
+// çalışan) bir sayfa için ise verinin dışarı taşınacağı hazır bir kapı.
+//
+// Liste AYARDAN okunuyor, koda gömülmüyor: teslim alan kişi paneli başka bir portta ya
+// da makinede çalıştırdığında derlemeye değil ayar dosyasına (ya da
+// Cors__AllowedOrigins__0 ortam değişkenine) dokunacak.
+//
+// AllowCredentials BİLİNÇLİ OLARAK YOK: kimlik Bearer başlığında taşınıyor, tarayıcının
+// kendiliğinden göndereceği bir cookie/kimlik yok. Açılsaydı CSRF yüzeyi bedavaya açılırdı.
+// ---------------------------------------------------------------------------
+const string CorsPolicy = "client";
+
+var allowedOrigins = builder.Configuration
+    .GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
+
 builder.Services.AddCors(options =>
-    options.AddPolicy("dev", policy =>
-        policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
+    options.AddPolicy(CorsPolicy, policy =>
+    {
+        if (allowedOrigins.Length == 0)
+        {
+            // Liste boşsa hiçbir çapraz-origin isteğe izin verilmez. Sessizce "hepsine
+            // izin ver"e düşmek, ayarı unutan kurulumu en gevşek hâle sokmak olurdu;
+            // güvenlik ayarlarının varsayılanı en dar seçenek olmalı.
+            return;
+        }
+
+        policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod();
+    }));
 
 builder.Services.AddControllers();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
@@ -223,7 +312,12 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-app.UseCors("dev");
+app.UseCors(CorsPolicy);
+
+if (allowedOrigins.Length == 0)
+    app.Logger.LogWarning(
+        "Cors:AllowedOrigins boş — tarayıcıdan gelen çapraz-origin istekler reddedilecek. " +
+        "Web paneli kullanılacaksa panelin adresi bu listeye eklenmeli.");
 
 app.UseAuthentication();
 app.UseAuthorization();
@@ -281,6 +375,13 @@ if (app.Configuration.GetValue("Hangfire:RunServer", true))
     // silmeyen bir sorguyu günde 24 kez tekrarlamak olurdu.
     recurring.AddOrUpdate<IWatchRunCleaner>(
         "watch-run-cleanup", c => c.CleanAsync(), Cron.Daily);
+
+    // Giriş sayaçlarının bakımı da GÜNLÜK. Sayaç satırları normal kullanımda zaten
+    // başarılı girişte siliniyor; biriken şey, var olmayan e-postalara yapılmış
+    // denemelerden kalan artıklar. Bakım olmasaydı rastgele adres deneyen bir saldırgan
+    // tabloyu istediği kadar büyütebilirdi.
+    recurring.AddOrUpdate<ILoginThrottle>(
+        "login-attempt-cleanup", t => t.CleanAsync(), Cron.Daily);
 }
 
 // Geliştirmede: uygulama ayağa kalkınca varsayılan tarayıcıyı Swagger'a aç.

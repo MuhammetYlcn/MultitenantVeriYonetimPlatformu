@@ -37,6 +37,10 @@ public class AppDbContext : DbContext
     public DbSet<PlatformAdmin> PlatformAdmins => Set<PlatformAdmin>();
     public DbSet<PlatformAuditLog> PlatformAuditLogs => Set<PlatformAuditLog>();
 
+    // Giriş denemesi sayacı. Bu da filtresiz: kayıt, henüz kimlik doğrulanmamışken —
+    // yani tenant bağlamı yokken — yazılıyor (bkz. LoginAttempt).
+    public DbSet<LoginAttempt> LoginAttempts => Set<LoginAttempt>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Tenant>(tenant =>
@@ -70,6 +74,21 @@ public class AppDbContext : DbContext
 
             // En yeni kayıt en üstte listelendiği için tarihe göre indeks.
             log.HasIndex(l => l.CreatedAt);
+        });
+
+        modelBuilder.Entity<LoginAttempt>(attempt =>
+        {
+            attempt.Property(a => a.Scope).HasMaxLength(20);
+            attempt.Property(a => a.Email).HasMaxLength(320);
+
+            // Kapı + e-posta başına TEK satır. Benzersizlik burada yalnız düzen değil
+            // doğruluk meselesi: iki satır olsaydı sayaç ikiye bölünür ve sınır iki katına
+            // çıkardı. Sorgular da hep bu iki alanla yapılıyor, yani indeks aynı zamanda
+            // arama indeksi.
+            attempt.HasIndex(a => new { a.Scope, a.Email }).IsUnique();
+
+            // Bakım "şu tarihten eski" diye tarıyor.
+            attempt.HasIndex(a => a.LastFailedAt);
         });
 
         modelBuilder.Entity<User>(user =>

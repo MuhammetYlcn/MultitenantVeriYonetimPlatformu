@@ -208,7 +208,15 @@ public class DocumentVisionService : IDocumentVisionService
         if (parsed is null)
         {
             // Boş bir belge uydurmuyoruz: okunamadıysa okunamadı denir.
-            _logger.LogWarning("Belge çıkarımı ayrıştırılamadı. Ham yanıt: {Raw}", call?.Response);
+            //
+            // Ham yanıt Debug'a alındı (26.08 log gözden geçirmesi): buradaki metin
+            // faturanın KENDİSİ — müşteri adı, tutar, vergi numarası. Uyarı seviyesinde
+            // yazılınca, hiçbir firma filtresinden geçmeyen bir log dosyası belge
+            // içeriğinin ikinci bir kopyasına dönüşüyordu. Olayın kendisi (ayrıştırma
+            // başarısız) yine uyarı; içeriği görmek için Debug açılır.
+            _logger.LogWarning("Belge çıkarımı ayrıştırılamadı ({Length} karakterlik yanıt).",
+                call?.Response?.Length ?? 0);
+            _logger.LogDebug("Ayrıştırılamayan belge yanıtı: {Raw}", call?.Response);
             throw new InvalidQueryException(
                 "Belge okunamadı; görüntü net değilse daha iyi bir çekim deneyin.");
         }

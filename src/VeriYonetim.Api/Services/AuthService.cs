@@ -25,14 +25,16 @@ public class AuthService : IAuthService
     private readonly ITokenService _tokenService;
     private readonly IConfiguration _config;
     private readonly ITenantProvisioner _provisioner;
+    private readonly ILoginThrottle _throttle;
 
     public AuthService(AppDbContext db, ITokenService tokenService, IConfiguration config,
-        ITenantProvisioner provisioner)
+        ITenantProvisioner provisioner, ILoginThrottle throttle)
     {
         _db = db;
         _tokenService = tokenService;
         _config = config;
         _provisioner = provisioner;
+        _throttle = throttle;
     }
 
     public async Task<AuthResult> RegisterAsync(RegisterRequest request)
@@ -80,6 +82,14 @@ public class AuthService : IAuthService
 
     public async Task<AuthResult> LoginAsync(LoginRequest request)
     {
+        // Kaba kuvvet sınırı ŞİFRE KONTROLÜNDEN ÖNCE: kilitliyken doğrulama hiç
+        // çalıştırılmıyor. Yalnızca hız değil, doğruluk meselesi — kilitli hesapta doğru
+        // şifreyle giriş yapılabilseydi, saldırganın bulduğu şifre kilide takılmadan
+        // işini görürdü, yani kilit hiçbir şey korumamış olurdu.
+        var locked = await _throttle.GetLockAsync(LoginScopes.Tenant, request.Email);
+        if (locked is not null)
+            return new AuthResult(false, LoginThrottle.LockMessage(locked.Value));
+
         // E-posta global benzersiz → tek başına kullanıcıyı bulmaya yeter. Login token
         // öncesi olduğundan tenant context yok; IgnoreQueryFilters ile global aranır.
         var user = await _db.Users
@@ -88,13 +98,28 @@ public class AuthService : IAuthService
             .FirstOrDefaultAsync(u => u.Email == request.Email);
 
         if (user is null || !BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
-            return new AuthResult(false, "E-posta veya şifre hatalı.");
+        {
+            var justLocked = await _throttle.RecordFailureAsync(LoginScopes.Tenant, request.Email);
+
+            // Kilidi AÇAN deneme de kilit mesajını görür. "Hatalı şifre" deyip susmak,
+            // kullanıcıyı bir sonraki denemesinde beklenmedik bir duvara toslatırdı.
+            return new AuthResult(false, justLocked is not null
+                ? LoginThrottle.LockMessage(justLocked.Value)
+                : "E-posta veya şifre hatalı.");
+        }
 
         // Firma platform yöneticisi tarafından askıya alınmışsa kimse giriş yapamaz.
         // Kimlik doğrulamasından SONRA kontrol edilir: aksi hâlde yanlış şifre girenler
         // de bu mesajı görüp hangi firmaların askıda olduğunu öğrenebilirdi.
+        //
+        // Sayaç burada TEMİZLENMİYOR: şifre doğru olsa da giriş yapılmadı. Askıdaki bir
+        // firmanın hesabını sonsuz deneme için serbest kürsü hâline getirmemek gerekir.
         if (!user.Tenant.IsActive)
             return new AuthResult(false, SuspendedMessage);
+
+        // Giriş başarılı → sayaç sıfırlanır. Aksi hâlde günler içinde birikmiş dört yanlış
+        // deneme, araya başarılı girişler girse bile kullanıcıyı beşincide kilitlerdi.
+        await _throttle.ClearAsync(LoginScopes.Tenant, request.Email);
 
         var refreshRaw = CreateRefreshToken(user);
         await _db.SaveChangesAsync();

@@ -204,16 +204,36 @@ public class QueryPlannerService : IQueryPlannerService
         }
         catch (JsonException ex)
         {
-            // format=json'a rağmen ayrıştırılamıyorsa yanıtı loglayıp anlaşılır hata veriyoruz.
-            _logger.LogWarning(ex, "Model ayrıştırılamayan plan üretti. Yanıt: {Raw}", raw);
+            // format=json'a rağmen ayrıştırılamıyorsa olayın kendisi UYARI seviyesinde,
+            // yanıtın METNİ ise ayrı bir Debug satırında (bkz. aşağıdaki not).
+            _logger.LogWarning(ex, "Model ayrıştırılamayan plan üretti ({Model}, {Length} karakter).",
+                selected, raw?.Length ?? 0);
+            _logger.LogDebug("Ayrıştırılamayan yanıt: {Raw}", raw);
+
             throw new QueryPlannerException("Yapay zekâ geçerli bir sorgu planı üretemedi.", ex);
         }
 
         if (plan is null)
             throw new QueryPlannerException("Yapay zekâ geçerli bir sorgu planı üretemedi.");
 
-        _logger.LogInformation("Sorgu planı üretildi ({Model}, {Ms} ms): {Raw}",
-            selected, stopwatch.ElapsedMilliseconds, raw);
+        // ---------------------------------------------------------------------
+        // NEDEN BU SATIR Information DEĞİL Debug (26.08 log gözden geçirmesi).
+        //
+        // Ham plan, kullanıcının sorusundan çıkan FİLTRE DEĞERLERİNİ taşıyor:
+        // "Ahmet Yılmaz'ın faturaları" sorusu plana bir müşteri adı olarak giriyor.
+        // Information seviyesinde yazıldığında bu, her soruda çalışan bir satırdı — yani
+        // müşteri verisinin, projenin bütün izolasyon düzeneğinin (tenant filtreleri,
+        // şema ayrımı) DIŞINDA duran ikinci bir kopyası düz metin bir log dosyasında
+        // birikiyordu. Üstelik gereksiz bir kopya: soru da üretilen plan da zaten
+        // AskMessages tablosunda, firmasına bağlı olarak saklanıyor.
+        //
+        // Tanı yeteneği kaybolmuyor, VARSAYILAN OLARAK KAPANIYOR: geliştirme makinesinde
+        // Logging:LogLevel:VeriYonetim = "Debug" yazıldığında bu satırlar aynen geri gelir
+        // (bkz. appsettings.Development.example.json).
+        // ---------------------------------------------------------------------
+        _logger.LogInformation("Sorgu planı üretildi ({Model}, {Ms} ms).",
+            selected, stopwatch.ElapsedMilliseconds);
+        _logger.LogDebug("Üretilen plan: {Raw}", raw);
 
         return new PlanResult(plan, raw, (int)stopwatch.ElapsedMilliseconds, selected);
     }

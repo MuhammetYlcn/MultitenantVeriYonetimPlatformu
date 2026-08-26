@@ -186,8 +186,13 @@ public class AskController : ControllerBase
         catch (InvalidQueryException ex)
         {
             // Model plan üretti ama plan tutarsız. Kullanıcı soruyu değiştirerek çözebilir.
-            _logger.LogInformation("Geçersiz plan: {Message}. Soru: {Question}. Plan: {Plan}",
-                ex.Message, request.Question, planResult.RawJson);
+            //
+            // Sorunun METNİ ve plan Debug'a alındı (26.08 log gözden geçirmesi): ikisi de
+            // müşteri verisi taşıyor ve ikisi de zaten AskMessages tablosunda, firmasına
+            // bağlı olarak duruyor. Loga kalan, verinin kendisi değil olayın sebebi.
+            _logger.LogInformation("Geçersiz plan: {Message}", ex.Message);
+            _logger.LogDebug("Geçersiz planın kaynağı — soru: {Question}. Plan: {Plan}",
+                request.Question, planResult.RawJson);
 
             return Problem(statusCode: StatusCodes.Status400BadRequest, title: ex.Message);
         }
@@ -204,8 +209,13 @@ public class AskController : ControllerBase
         {
             // Cevaplanamayan sorular KAYDA GEÇER. Sırada hangi yeteneğin eksik olduğu
             // tahminle değil gerçek kullanımla belirlensin diye.
-            _logger.LogInformation("CEVAPLANAMADI. Soru: {Question}. Gerekçe: {Reason}",
-                question, plan.Reason);
+            //
+            // Kayda geçen GEREKÇE; sorunun metni Debug'a alındı (26.08 log gözden
+            // geçirmesi). Bu satırın amacı zaten "hangi yetenek eksik" sorusunu
+            // cevaplamak ve buna gerekçe yetiyor — sorunun içindeki müşteri adları,
+            // tutarlar gerekmiyor.
+            _logger.LogInformation("CEVAPLANAMADI. Gerekçe: {Reason}", plan.Reason);
+            _logger.LogDebug("Cevaplanamayan soru: {Question}", question);
 
             return new AskResponse(
                 Question: question,

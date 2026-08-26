@@ -31,26 +31,45 @@ public class PlatformAuthService : IPlatformAuthService
     private readonly AppDbContext _db;
     private readonly ITokenService _tokenService;
     private readonly IConfiguration _config;
+    private readonly ILoginThrottle _throttle;
     private readonly ILogger<PlatformAuthService> _logger;
 
     public PlatformAuthService(AppDbContext db, ITokenService tokenService,
-        IConfiguration config, ILogger<PlatformAuthService> logger)
+        IConfiguration config, ILoginThrottle throttle, ILogger<PlatformAuthService> logger)
     {
         _db = db;
         _tokenService = tokenService;
         _config = config;
+        _throttle = throttle;
         _logger = logger;
     }
 
     public async Task<PlatformAuthResult> LoginAsync(PlatformLoginRequest request)
     {
+        // Kaba kuvvet sınırı. Bu kapı tenant girişinden DAHA kritik: arkasında tek bir
+        // hesap var, o hesabın şifresi bütün firmaların yönetimini açıyor ve adres
+        // (e-posta) çoğu kurulumda tahmin edilebilir. Ayrı bir kapı olarak sayılıyor —
+        // aynı e-postanın tenant tarafındaki denemeleri buranın kilidini tetiklemesin.
+        var locked = await _throttle.GetLockAsync(LoginScopes.Platform, request.Email);
+        if (locked is not null)
+            return new PlatformAuthResult(false, LoginThrottle.LockMessage(locked.Value));
+
         var admin = await _db.PlatformAdmins
             .FirstOrDefaultAsync(a => a.Email == request.Email);
 
         // Kullanıcı yok ile şifre yanlış AYNI mesajı döner: hangi e-postanın platform
         // yöneticisi olduğu dışarıya sızmasın (hesap sayımı / enumeration).
         if (admin is null || !BCrypt.Net.BCrypt.Verify(request.Password, admin.PasswordHash))
-            return new PlatformAuthResult(false, "E-posta veya şifre hatalı.");
+        {
+            var justLocked = await _throttle.RecordFailureAsync(
+                LoginScopes.Platform, request.Email);
+
+            return new PlatformAuthResult(false, justLocked is not null
+                ? LoginThrottle.LockMessage(justLocked.Value)
+                : "E-posta veya şifre hatalı.");
+        }
+
+        await _throttle.ClearAsync(LoginScopes.Platform, request.Email);
 
         admin.LastLoginAt = DateTime.UtcNow;
 

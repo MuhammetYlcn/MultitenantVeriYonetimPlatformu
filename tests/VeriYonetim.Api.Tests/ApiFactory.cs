@@ -66,7 +66,7 @@ public class ApiFactory : WebApplicationFactory<Program>
             """
             TRUNCATE TABLE "Datasets", "RefreshTokens", "AccountTokens", "Users", "Tenants",
                            "PlatformAdmins", "PlatformAuditLogs", "DocumentJobs",
-                           "DatasetWatches" CASCADE
+                           "DatasetWatches", "LoginAttempts" CASCADE
             """);
 
         // Kolon indeksleri tabloya kurulur, satırlara değil: TRUNCATE onları düşürmez.
