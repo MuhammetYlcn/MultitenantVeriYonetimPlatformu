@@ -91,9 +91,34 @@ public class DocumentJobRunner : IDocumentJobRunner
             return;
         }
 
+        // GEÇİŞ KOŞULLU VE ATOMİK. Yukarıdaki denetim oku-sonra-yaz biçimindeydi: aynı iş
+        // iki işçiye birden düşerse ikisi de `Queued` okuyup geçebilir, ikisi de modeli
+        // çağırır ve ikisi de ResultJson yazar — son yazan kazanır, yani kullanıcı onay
+        // ekranında A tablosuna bakarken tablo B'ye dönüşür. Bugün işçi sayısı bir olduğu
+        // için tetiklenmiyor, ama ayar (`Hangfire:WorkerCount`) ya da ikinci bir API
+        // örneği bunu açardı; "ikinci çalıştırma atlanır" güvencesi o zaman sessizce
+        // bozulurdu. Koşullu UPDATE etkilenen satır sayısını döndürüyor: 0 ise başkası
+        // aldı demektir.
+        var started = DateTime.UtcNow;
+
+        var claimed = await _db.DocumentJobs
+            .IgnoreQueryFilters()
+            .Where(j => j.Id == jobId && j.Status == DocumentJobStatus.Queued)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.Status, DocumentJobStatus.Running)
+                .SetProperty(j => j.StartedAt, started));
+
+        if (claimed == 0)
+        {
+            _logger.LogInformation("Belge işi {JobId} başka bir işçi tarafından alınmış, " +
+                                   "atlanıyor.", jobId);
+            return;
+        }
+
+        // Bellekteki varlık da güncelleniyor: ExecuteUpdate değişiklik takibini bilmiyor.
         job.Status = DocumentJobStatus.Running;
-        job.StartedAt = DateTime.UtcNow;
-        await _db.SaveChangesAsync();
+        job.StartedAt = started;
+
         await _notifier.NotifyAsync(job);
 
         try
@@ -106,6 +131,13 @@ public class DocumentJobRunner : IDocumentJobRunner
             };
 
             job.Status = DocumentJobStatus.Succeeded;
+
+            // Hata alanı da TEMİZLENİYOR. EF yalnız değişen kolonları yazdığı için,
+            // bakım işinin daha önce bastığı "İşlem yarıda kaldı" metni yerinde kalıyordu:
+            // iş gerçekten geç bitince kullanıcı ekranda "başarılı" durumda, altında
+            // "işlem yarıda kaldı" yazan bir kart görüyor ve hangisine güveneceğini
+            // bilemiyordu.
+            job.Error = null;
         }
         catch (InvalidQueryException ex)
         {
@@ -131,7 +163,26 @@ public class DocumentJobRunner : IDocumentJobRunner
 
         // Görüntü BAŞARISIZ işte hemen silinmiyor: kullanıcı onay ekranında "hangi belgeyi
         // yüklemiştim" diye bakabilmeli. Temizlik işi süresi dolanları topluyor.
-        await _db.SaveChangesAsync();
+        //
+        // KAYIT SİLİNMİŞ OLABİLİR. Varlık, 30-300 saniye süren model çağrısı boyunca
+        // izlenir hâlde duruyor; bu arada kullanıcı işi atabilir ("At" düğmesi), ya da
+        // veri seti/kullanıcı silinip cascade ile iş kaydı gidebilir. EF o zaman "1 satır
+        // beklenirken 0 etkilendi" diyerek DbUpdateConcurrencyException fırlatıyordu ve
+        // bu istisna RunAsync'ten dışarı çıkıyordu: AutomaticRetry kapalı olduğu için iş
+        // Hangfire'da kalıcı "Failed" olarak birikiyor, günlüğe kullanıcı hatası değil bir
+        // çökme olarak düşüyordu. Silme, işin bilinçli olarak desteklenen bir sonucu —
+        // sessizce sonlanmalı.
+        try
+        {
+            await _db.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            _logger.LogInformation(
+                "Belge işi {JobId} çalışırken silinmiş; sonuç yazılmadı.", jobId);
+            return;
+        }
+
         await _notifier.NotifyAsync(job);
     }
 

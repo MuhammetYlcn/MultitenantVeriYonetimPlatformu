@@ -31,6 +31,13 @@ class JobHub {
   static final _alerts = StreamController<WatchAlertNotification>.broadcast();
   static Stream<WatchAlertNotification> get watchAlerts => _alerts.stream;
 
+  /// Bağlantı koptuktan sonra yeniden kurulduğunda tetiklenir.
+  ///
+  /// Kopukluk penceresinde gönderilen bildirimler KAYIPTIR; kanal onları tekrarlamaz.
+  /// Bu akışı dinleyen ekranlar durumlarını sunucudan yeniden okuyarak telafi ediyor.
+  static final _reconnected = StreamController<void>.broadcast();
+  static Stream<void> get reconnected => _reconnected.stream;
+
   static bool get isConnected =>
       _connection?.state == HubConnectionState.Connected;
 
@@ -39,7 +46,27 @@ class JobHub {
   /// Hata YUTULUYOR ve bu kasıtlı: bağlantı kurulamaması bir kullanım engeli değil,
   /// yalnızca bildirimlerin gelmemesi demek.
   static Future<void> connect() async {
-    if (_connection != null) return;
+    // KAPALI BAĞLANTI YENİDEN KURULUYOR.
+    //
+    // Eskiden koşul yalnız `_connection != null` idi ve bu kalıcı bir sessizlik üretiyordu:
+    // `withAutomaticReconnect` varsayılan olarak ~30 saniye boyunca dört deneme yapıp pes
+    // eder, ama `_connection` null OLMADIĞI için sonraki bütün `connect()` çağrıları
+    // hiçbir şey yapmadan dönerdi. 40 saniyelik bir ağ kopması (Wi-Fi geçişi, uyku)
+    // sonrasında kullanıcı ekranlar arasında gezinse bile OTURUM BOYUNCA hiçbir iş
+    // bildirimi ve hiçbir izleyici uyarısı daha gelmiyordu — kart "okunuyor"da kalıyor,
+    // kullanıcı ancak sayfayı yenilerse öğreniyordu.
+    final state = _connection?.state;
+
+    if (_connection != null &&
+        state != HubConnectionState.Disconnected &&
+        state != null) {
+      return;
+    }
+
+    if (_connection != null) {
+      // Ölü bağlantı bırakılıyor; aşağıda yenisi kuruluyor.
+      _connection = null;
+    }
 
     final token = await ApiService.hubToken();
     if (token == null) return;
@@ -82,6 +109,16 @@ class JobHub {
       } catch (_) {
         // Bozuk bir bildirim yüzünden kanal kapanmamalı.
       }
+    });
+
+    // YENİDEN BAĞLANINCA KAÇIRILAN DURUM TELAFİ EDİLİYOR.
+    //
+    // Kanal bir kolaylık, doğruluk kaynağı değil — ama kopukluk penceresinde gönderilen
+    // bildirimler tamamen kayboluyordu ve onları telafi eden hiçbir kanca yoktu. İş
+    // kopukluk sırasında bitmişse kart "okunuyor"da kalıyordu. Ekranlar bu akışı dinleyip
+    // durumlarını sunucudan tazeliyor.
+    connection.onreconnected(({connectionId}) {
+      _reconnected.add(null);
     });
 
     try {

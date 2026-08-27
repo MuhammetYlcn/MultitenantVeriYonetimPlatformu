@@ -646,6 +646,100 @@ public class DocumentJobTests : IClassFixture<ApiFactory>, IAsyncLifetime
         Assert.Contains("yarıda kaldı", cleaned.Error);
     }
 
+    [Fact(DisplayName = "Bakım: KUYRUKTA asılı kalmış iş de kapatılır")]
+    public async Task KuyruktaAsiliIsKapatilir()
+    {
+        // Kod incelemesinde bulunan kusur: bakım yalnız `running` işleri tarıyordu.
+        //
+        // İş kaydı ile Hangfire kuyruğu AYRI iki işlemde yazılıyor (önce kayıt, sonra
+        // Enqueue). Enqueue düşerse (bağlantı kopması, sürecin tam o an kapanması) iş
+        // hiçbir zaman çalışmıyor; `StartedAt` null olduğu için bakım onu asılı saymıyor
+        // ve kayıt `queued` olarak kalıyordu. Kullanıcı ekranda sonu gelmeyen bir "sırada"
+        // görüyor, kayıt 30 gün sonra sessizce siliniyordu.
+        var factory = FactoryWith<FakeVisionService>();
+        using var client = factory.CreateClient();
+
+        var admin = await RegisterAsync(client, "is-kuyruk", "a@iskuyruk.com");
+        var dataset = await CreateDatasetAsync(client, admin.Token, "Faturalar",
+            "fatura_no,urun,tutar\nF-1,Kalem,100\n");
+        var queued = await QueueExtractAsync(client, admin.Token, dataset.Id);
+
+        // Kuyruğa hiç girememiş gibi: durum "sırada", oluşturulma zamanı çok eski.
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var job = await db.DocumentJobs.IgnoreQueryFilters()
+                .FirstAsync(j => j.Id == queued.Id);
+
+            job.CreatedAt = DateTime.UtcNow.AddHours(-5);
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = factory.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<IDocumentJobCleaner>().CleanAsync();
+
+        var cleaned = await ReadJobAsync(client, admin.Token, queued.Id);
+
+        Assert.Equal("failed", cleaned.Status);
+        Assert.Contains("yarıda kaldı", cleaned.Error);
+    }
+
+    [Fact(DisplayName = "Bakım: asılı iş kapatılınca KULLANICIYA haber veriliyor")]
+    public async Task AsiliIsKapatilinca_BildirimGider()
+    {
+        // Durumu Running'den Failed'a çeviren ikinci yer bakım işiydi ve oradan hiçbir
+        // bildirim gitmiyordu. Sunucu işin ortasında yeniden başlatılıyor, bir süre sonra
+        // bakım kaydı kapatıyor — ama ekrandaki kart SONSUZA KADAR "okunuyor" kalıyordu.
+        var notifier = new FakeJobNotifier();
+
+        var factory = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services =>
+            {
+                services.AddScoped<IDocumentVisionService, FakeVisionService>();
+                services.AddScoped<IJobNotifier>(_ => notifier);
+            }));
+
+        using var client = factory.CreateClient();
+
+        var admin = await RegisterAsync(client, "is-bildirim", "a@isbildirim.com");
+        var dataset = await CreateDatasetAsync(client, admin.Token, "Faturalar",
+            "fatura_no,urun,tutar\nF-1,Kalem,100\n");
+        var queued = await QueueExtractAsync(client, admin.Token, dataset.Id);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var job = await db.DocumentJobs.IgnoreQueryFilters()
+                .FirstAsync(j => j.Id == queued.Id);
+
+            job.Status = DocumentJobStatus.Running;
+            job.StartedAt = DateTime.UtcNow.AddHours(-3);
+            await db.SaveChangesAsync();
+        }
+
+        notifier.Sent.Clear();
+
+        using (var scope = factory.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<IDocumentJobCleaner>().CleanAsync();
+
+        var bildirim = Assert.Single(notifier.Sent);
+        Assert.Equal(queued.Id, bildirim.Id);
+        Assert.Equal(DocumentJobStatus.Failed, bildirim.Status);
+    }
+
+    /// Bildirimleri toplayan sahte kanal: sınanan şey bildirimin ağdan geçmesi değil,
+    /// doğru anlarda ve doğru durumla ÇAĞRILMASI.
+    private sealed class FakeJobNotifier : IJobNotifier
+    {
+        public List<DocumentJob> Sent { get; } = new();
+
+        public Task NotifyAsync(DocumentJob job, CancellationToken ct = default)
+        {
+            Sent.Add(job);
+            return Task.CompletedTask;
+        }
+    }
+
     [Fact(DisplayName = "Bakım: onaylanmamış eski belgenin görüntüsü düşürülür")]
     public async Task EskiGoruntuDusurulur()
     {

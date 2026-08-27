@@ -106,6 +106,7 @@ class _AskPageState extends State<AskPage> {
   List<DocumentJob> _pendingJobs = [];
 
   StreamSubscription<JobNotification>? _hubSub;
+  StreamSubscription<void>? _reconnectSub;
 
   static const _maxSuggestionTries = 6;
   static const _suggestionRetryDelay = Duration(seconds: 10);
@@ -122,6 +123,11 @@ class _AskPageState extends State<AskPage> {
       // kartlardaki yenileme ile okunur.
       JobHub.connect();
       _hubSub = JobHub.updates.listen(_onJobNotification);
+
+      // Bağlantı koptuğu sürede gönderilen bildirimler KAYIP; kanal onları tekrarlamıyor.
+      // Yeniden bağlanınca liste sunucudan tazeleniyor, yoksa kopukluk sırasında biten
+      // bir iş ekranda sonsuza kadar "okunuyor" olarak kalırdı.
+      _reconnectSub = JobHub.reconnected.listen((_) => _loadPendingJobs());
     }
   }
 
@@ -149,6 +155,7 @@ class _AskPageState extends State<AskPage> {
   @override
   void dispose() {
     _hubSub?.cancel();
+    _reconnectSub?.cancel();
     _input.dispose();
     _inputFocus.dispose();
     _scroll.dispose();
@@ -194,13 +201,22 @@ class _AskPageState extends State<AskPage> {
 
   // Kontrol bekleyen işler: okunmuş ama onaylanmamış olanlar. Sayfa yenilendiğinde
   // sohbetteki kartlar gitse bile iş kaybolmasın diye sunucudan okunuyor.
+  //
+  // BAŞARISIZ İŞLER DE GÖSTERİLİYOR. Şerit yalnız `succeeded` süzüyordu ve başarısız
+  // işlerin sunucuda kalıcı hiçbir gösterim yeri yoktu: onlar sohbet akışındaki geçici
+  // karta bağlıydı, akış ise sayfa yenilenince sıfırlanıyordu. Sonucu şuydu — kullanıcı
+  // faturayı yükleyip sekmeyi kapatıyor, model servisi kapalı olduğu için iş düşüyor,
+  // ertesi gün paneli açtığında şerit boş, akış boş, hiçbir hata görünmüyor. Kullanıcı
+  // belgenin işlendiğini varsayıyor ve belge 30 gün sonra kayıtla birlikte sessizce
+  // gidiyor.
   Future<void> _loadPendingJobs() async {
     try {
       final jobs = await ApiService.listDocumentJobs();
       if (!mounted) return;
       setState(() {
         _pendingJobs = jobs
-            .where((j) => j.status == 'succeeded' && !j.isConfirmed)
+            .where((j) =>
+                (j.status == 'succeeded' && !j.isConfirmed) || j.status == 'failed')
             .toList();
       });
     } catch (_) {

@@ -413,7 +413,16 @@ app.MapControllers();
 
 // Canlı bildirim kanalı. Token'ı sorgu dizesinden okuma izni yalnız bu yol için verildi
 // (bkz. JwtBearerEvents yukarıda).
-app.MapHub<JobsHub>("/hubs/jobs");
+//
+// CloseOnAuthenticationExpiration: kimlik yalnız EL SIKIŞMADA doğrulanıyordu, yani bir
+// kez kurulmuş WebSocket bağlantısı token ömrü dolduktan sonra da açık kalıyor ve grup
+// üyeliği bağlantı yaşadığı sürece sürüyordu. Sonucu şuydu: kullanıcının rolü düşürülse,
+// hesabı silinse ya da firma askıya alınsa bile REST istekleri reddedilirken açık
+// sekmedeki hub bağlantısı kapanmıyor — firma geneline giden izleyici uyarıları ve kendi
+// işlerinin başlıkları (dosya adı, hata metni) sokete akmaya devam ediyordu. Bu ayarla
+// bağlantı, token'ın süresi dolduğu anda kapanıyor; istemci zaten taze token'la yeniden
+// bağlanıyor (accessTokenFactory).
+app.MapHub<JobsHub>("/hubs/jobs", options => options.CloseOnAuthenticationExpiration = true);
 
 // Açılışta migration + eksik tenant şemalarını tamamlama (Spring ApplicationRunner
 // karşılığı). AppDbContext scoped olduğundan istek dışında elle scope açmak gerekir.
