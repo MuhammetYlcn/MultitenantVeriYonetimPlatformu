@@ -1,3 +1,4 @@
+using System.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using VeriYonetim.Api.Data;
@@ -10,6 +11,73 @@ public static class LoginScopes
 {
     public const string Tenant = "tenant";
     public const string Platform = "platform";
+
+    /// <summary>
+    /// Şifre değiştirme uçlarındaki "mevcut şifre" denemeleri. Giriş kapılarından AYRI
+    /// sayılıyor: buradaki başarısız denemeler kullanıcının giriş yapmasını
+    /// engellememeli, ama sınırsız da kalmamalı.
+    ///
+    /// Sınır olmadan uç şu açığı taşıyordu: sızmış bir erişim token'ı (ör. SignalR'ın
+    /// sorgu dizesindeki access_token'ın vekil sunucu günlüğüne düşmesi) 15 dakika
+    /// geçerli. O süre boyunca saldırgan mevcut şifreyi sınırsız hızda deneyip bulursa
+    /// şifreyi değiştirir ve GEÇİCİ erişimi KALICI erişime çevirir. Ucun mevcut şifreyi
+    /// şart koşmasının tek amacı buydu; sınırsız deneme şartın değerini düşürüyordu.
+    /// </summary>
+    public const string PasswordChange = "pwchange";
+}
+
+/// <summary>
+/// E-posta kimliğinin TEK tanımı.
+///
+/// Bu sınıf, iki katmanın aynı kimliği farklı tanımlamasından doğan bir kusuru kapatmak
+/// için açıldı: giriş sayacı e-postayı küçük harfe indirgiyordu, kayıt/davet/giriş
+/// sorguları ise PostgreSQL'in varsayılan harmanlamasıyla büyük-küçük harfe DUYARLI
+/// karşılaştırıyordu. İki somut sonucu vardı:
+///
+///   • <c>ali@firma.com</c> kayıtlıyken <c>Ali@firma.com</c> mükerrerlik denetiminden
+///     geçiyordu — aynı posta kutusuna ait İKİ ayrı hesap açılabiliyordu. Davet akışında
+///     yönetici, kişinin zaten kayıtlı olduğunu göremeden ikinci bir kimlik açıyordu.
+///   • Tersi yönde: <c>Ali@firma.com</c> olarak kayıtlı gerçek kullanıcı adresini küçük
+///     harfle yazıp beş kez denerse, sayaç iki yazımı tek anahtarda birleştirdiği için
+///     KENDİ hesabını 15 dakika kilitliyordu — hiçbir zaman doğru hesaba ulaşamadan.
+///
+/// Kural: e-posta HER ZAMAN normalleştirilmiş biçimde saklanır ve karşılaştırılır.
+/// Böylece <c>Users.Email</c> üzerindeki düz benzersizlik indeksi, fiilen harf
+/// duyarsız bir kısıt hâline gelir.
+/// </summary>
+public static class EmailIdentity
+{
+    /// <summary>Kırpar ve küçük harfe indirger. Boş ya da 320 karakterden uzunsa null.</summary>
+    public static string? Normalize(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email)) return null;
+
+        var key = email.Trim().ToLowerInvariant();
+        return key.Length <= 320 ? key : null;
+    }
+
+    /// <summary>
+    /// Saklama/karşılaştırma için normalleştirir; değer kullanılamazsa kırpılmış özgün
+    /// metni döndürür. Çağıranın ayrıca doğrulama yaptığı yerlerde (DTO'da
+    /// <c>[EmailAddress]</c>) bu yeterli.
+    /// </summary>
+    public static string Canonical(string email) => Normalize(email) ?? email.Trim();
+}
+
+/// <summary>
+/// Kayıtsız e-postada da ödenecek sahte şifre doğrulama maliyeti.
+///
+/// İki giriş kapısı da <c>kullanıcı yoksa || şifre yanlışsa</c> biçiminde yazılmıştı ve
+/// C# kısa devre yaptığı için kayıtsız e-postada BCrypt hiç çalışmıyordu. Mesajlar birebir
+/// aynı olsa bile ~100 ms'lik bu fark ölçülebilir ve "bu adres kayıtlı mı" sorusunu
+/// cevaplar; giriş sayacının kayıtsız e-postaları da sayarak kapattığı hesap sayımı kapısı
+/// sürenin kendisinden yeniden açılırdı. Karma bir kez, gerçek şifrelerle AYNI iş
+/// katsayısıyla üretiliyor — maliyetler ancak böyle eşitlenir.
+/// </summary>
+public static class DummyPassword
+{
+    public static readonly string Hash =
+        BCrypt.Net.BCrypt.HashPassword("zaman-esitleyici-sahte-sifre");
 }
 
 /// <summary>
@@ -114,65 +182,100 @@ public class LoginThrottle : ILoginThrottle
         var key = Normalize(email);
         if (key is null) return null;
 
-        var row = await FindAsync(scope, key);
-        var fresh = row is null;
+        // ARTIRIM TEK BİR ATOMİK İFADEDE.
+        //
+        // Bu, sayacın en kritik yeri. EF ile yazıldığında oku-değiştir-yaz oluyordu ve
+        // iki yarış durumuna birden açıktı: satır YOKKEN iki istek de eklemeye kalkar
+        // (benzersizlik indeksi ikincisini reddeder), satır VARKEN iki istek aynı değeri
+        // okuyup aynı değeri yazar (son yazan kazanır, bir artış kaybolur). İkincisinin
+        // bedeli ağırdı: paralel yirmi istek yollayan bir saldırgan yirmi şifre deneyip
+        // sayacı yalnız BİR artırıyordu, yani beş denemelik sınır fiilen "beş TUR"
+        // sınırına dönüyor ve koruma büyüklük mertebesinde zayıflıyordu.
+        //
+        // `INSERT ... ON CONFLICT DO UPDATE` bunun tamamını veritabanında, satır kilidi
+        // altında yapıyor: okuma ile yazma arasına başka bir işlem giremez. Kilitleme
+        // kararı da aynı ifadenin içinde, çünkü ayrı bir UPDATE'e bırakılsaydı o adım
+        // yeni bir yarışa açık olurdu.
+        //
+        // Pencere dolduysa sayaç 1'den başlar (aylar içinde birikmiş dört yanlış deneme
+        // beşincide masum bir kullanıcıyı kilitlememeli). Sınıra ulaşıldığında kilit
+        // kuruluyor ve sayaç sıfırlanıyor — aksi hâlde kilit bittikten sonraki İLK yanlış
+        // deneme hemen yeni bir kilit açar, süreli kilit fiilen kalıcıya dönerdi.
+        var now = DateTime.UtcNow;
+        var staleBefore = now.AddMinutes(-_options.WindowMinutes);
+        var lockUntil = now.AddMinutes(_options.LockMinutes);
 
-        if (row is null)
-        {
-            row = new LoginAttempt { Id = Guid.NewGuid(), Scope = scope, Email = key };
-            _db.LoginAttempts.Add(row);
-        }
+        const string sql = """
+            INSERT INTO "LoginAttempts"
+                ("Id", "Scope", "Email", "FailedCount", "LastFailedAt", "LockedUntil")
+            VALUES (@id, @scope, @email,
+                    CASE WHEN 1 >= @max THEN 0 ELSE 1 END,
+                    @now,
+                    CASE WHEN 1 >= @max THEN @lockUntil ELSE NULL END)
+            ON CONFLICT ("Scope", "Email") DO UPDATE SET
+                "FailedCount" = CASE
+                    WHEN (CASE
+                            WHEN "LoginAttempts"."FailedCount" > 0
+                             AND "LoginAttempts"."LastFailedAt" < @staleBefore THEN 1
+                            ELSE "LoginAttempts"."FailedCount" + 1
+                          END) >= @max THEN 0
+                    ELSE (CASE
+                            WHEN "LoginAttempts"."FailedCount" > 0
+                             AND "LoginAttempts"."LastFailedAt" < @staleBefore THEN 1
+                            ELSE "LoginAttempts"."FailedCount" + 1
+                          END)
+                END,
+                "LastFailedAt" = @now,
+                "LockedUntil" = CASE
+                    WHEN (CASE
+                            WHEN "LoginAttempts"."FailedCount" > 0
+                             AND "LoginAttempts"."LastFailedAt" < @staleBefore THEN 1
+                            ELSE "LoginAttempts"."FailedCount" + 1
+                          END) >= @max THEN @lockUntil
+                    ELSE "LoginAttempts"."LockedUntil"
+                END
+            RETURNING "FailedCount", "LockedUntil"
+            """;
 
-        var locked = Advance(row, scope, key);
+        var connection = _db.Database.GetDbConnection();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        AddParameter(command, "id", Guid.NewGuid());
+        AddParameter(command, "scope", scope);
+        AddParameter(command, "email", key);
+        AddParameter(command, "max", _options.MaxAttempts);
+        AddParameter(command, "now", now);
+        AddParameter(command, "staleBefore", staleBefore);
+        AddParameter(command, "lockUntil", lockUntil);
+
+        // Bağlantıyı açar (açıksa dokunmaz) — dosyanın geri kalanıyla aynı desen.
+        var wasClosed = connection.State != ConnectionState.Open;
+        if (wasClosed) await connection.OpenAsync();
+
+        int failedCount;
+        DateTime? lockedUntil;
 
         try
         {
-            await _db.SaveChangesAsync();
+            await using var reader = await command.ExecuteReaderAsync();
+            if (!await reader.ReadAsync()) return null;
+
+            failedCount = reader.GetInt32(0);
+            lockedUntil = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
         }
-        catch (DbUpdateException) when (fresh)
+        finally
         {
-            // Aynı e-postaya aynı anda gelen iki başarısız deneme: ikisi de satırı
-            // bulamayıp ikisi de eklemeye kalkar, benzersizlik indeksi ikincisini
-            // reddeder. Sayacın burada kaybolması, sınırın paralel istek yollayarak
-            // atlatılabilmesi demek olurdu — o yüzden satır yeniden okunup artırılıyor.
-            // Eklenmiş ama kaydedilememiş varlık önce takipten çıkarılmalı, aksi hâlde
-            // sonraki SaveChanges aynı hatayı tekrar verir.
-            _db.Entry(row).State = EntityState.Detached;
-
-            row = await FindAsync(scope, key);
-            if (row is null) throw; // hata mükerrerlikten değilmiş: yutma, yukarı taşı
-
-            locked = Advance(row, scope, key);
-            await _db.SaveChangesAsync();
+            if (wasClosed) await connection.CloseAsync();
         }
 
-        return locked;
-    }
+        // Sayaç sıfırlanmışken dolu duran kilit, "bu deneme kilidi AÇTI" demektir.
+        // Kilidi açan denemeye de kilit mesajı gösteriliyor: "hatalı şifre" deyip susmak,
+        // kullanıcıyı bir sonraki denemesinde beklenmedik bir duvara toslatırdı.
+        if (failedCount != 0 || lockedUntil is null) return null;
 
-    /// <summary>
-    /// Sayacı bir artırır ve gerekiyorsa kilidi kurar. Kayıt YAPMAZ — çağıran kaydeder,
-    /// böylece mükerrerlik çakışmasından sonra aynı mantık ikinci kez uygulanabiliyor.
-    /// </summary>
-    private TimeSpan? Advance(LoginAttempt row, string scope, string key)
-    {
-        var now = DateTime.UtcNow;
-
-        // Pencere dolduysa sayaç baştan başlar: aylar içinde birikmiş dört yanlış deneme,
-        // beşincisinde masum bir kullanıcıyı kilitlememeli.
-        var stale = row.FailedCount > 0
-                    && row.LastFailedAt < now.AddMinutes(-_options.WindowMinutes);
-
-        row.FailedCount = stale ? 1 : row.FailedCount + 1;
-        row.LastFailedAt = now;
-
-        if (row.FailedCount < _options.MaxAttempts) return null;
-
-        row.LockedUntil = now.AddMinutes(_options.LockMinutes);
-
-        // Sayaç kilitle birlikte sıfırlanır: aksi hâlde kilit bittikten sonraki İLK yanlış
-        // deneme (sayaç hâlâ sınırın üstünde olduğu için) hemen yeni bir kilit açar ve
-        // süreli kilit fiilen kalıcıya dönerdi.
-        row.FailedCount = 0;
+        var remaining = lockedUntil.Value - now;
+        if (remaining <= TimeSpan.Zero) return null;
 
         // Kilit UYARI seviyesinde loglanıyor: bu, birinin şifre denediğine dair sunucuda
         // kalan tek iz. E-posta yazılıyor (kimin hesabı hedef alınmış), DENENEN ŞİFRE
@@ -182,7 +285,16 @@ public class LoginThrottle : ILoginThrottle
             "({Attempts} başarısız deneme).",
             scope, key, _options.LockMinutes, _options.MaxAttempts);
 
-        return TimeSpan.FromMinutes(_options.LockMinutes);
+        return remaining;
+    }
+
+    private static void AddParameter(System.Data.Common.DbCommand command, string name,
+        object value)
+    {
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = name;
+        parameter.Value = value;
+        command.Parameters.Add(parameter);
     }
 
     public async Task ClearAsync(string scope, string email)
@@ -244,11 +356,5 @@ public class LoginThrottle : ILoginThrottle
     /// e-posta da sayılmaz: kolon 320 karakterlik ve bunu aşan bir değer, sayaç
     /// tablosunu şişirmek için gönderilmiş çöpten başka bir şey olamaz.
     /// </summary>
-    private static string? Normalize(string? email)
-    {
-        if (string.IsNullOrWhiteSpace(email)) return null;
-
-        var key = email.Trim().ToLowerInvariant();
-        return key.Length <= 320 ? key : null;
-    }
+    private static string? Normalize(string? email) => EmailIdentity.Normalize(email);
 }

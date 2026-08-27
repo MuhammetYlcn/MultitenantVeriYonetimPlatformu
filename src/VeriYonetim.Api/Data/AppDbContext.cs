@@ -89,6 +89,14 @@ public class AppDbContext : DbContext
 
             // Bakım "şu tarihten eski" diye tarıyor.
             attempt.HasIndex(a => a.LastFailedAt);
+
+            // NOT: sayaç artırımı bilerek EF üzerinden YAPILMIYOR. Oku-değiştir-yaz
+            // biçiminde yazıldığında aynı anda gelen yirmi başarısız deneme aynı değeri
+            // okuyup aynı değeri yazıyordu — yirmi deneme karşılığında sayaç bir artıyor,
+            // beş denemelik sınır fiilen "beş TUR" sınırına dönüyordu. Artırım
+            // LoginThrottle içinde tek bir atomik SQL ifadesine taşındı; oradaki yorumlara
+            // bakın. (Eşzamanlılık damgası denendi ve ELENDİ: `xmin` PostgreSQL'in sistem
+            // kolonu olduğu hâlde EF onu gerçek bir kolon sanıp AddColumn üretiyor.)
         });
 
         modelBuilder.Entity<User>(user =>

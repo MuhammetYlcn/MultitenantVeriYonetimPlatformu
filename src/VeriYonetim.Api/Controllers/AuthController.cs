@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using VeriYonetim.Api.Models.Dtos;
 using VeriYonetim.Api.Services;
 
@@ -19,7 +20,10 @@ public class AuthController : ControllerBase
         _accountTokens = accountTokens;
     }
 
+    // Kimlik doğrulamasız ve KALICI kaynak (firma + PostgreSQL şeması) yaratan tek uç.
+    // Sınırın iki işi var: hesap sayımını yavaşlatmak ve şema/CPU tüketimini kesmek.
     [HttpPost("register")]
+    [EnableRateLimiting(AuthPolicies.RegisterRateLimit)]
     public async Task<IActionResult> Register(RegisterRequest request)
     {
         var result = await _authService.RegisterAsync(request);

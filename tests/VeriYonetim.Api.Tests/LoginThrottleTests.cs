@@ -173,6 +173,91 @@ public class LoginThrottleTests : IClassFixture<ApiFactory>, IAsyncLifetime
         Assert.Contains("dakika", await MessageOfAsync(response));
     }
 
+    // ---- Eşzamanlılık: sayaç paralel istekle sulandırılamaz ----
+
+    [Fact(DisplayName = "Paralel başarısız denemeler sayacı SULANDIRAMIYOR: " +
+                        "yirmi eşzamanlı deneme yirmi kez sayılıyor")]
+    public async Task ParallelFailures_AreAllCounted()
+    {
+        // Kod incelemesinde bulunan kusurun testi. Artırım oku-değiştir-yaz biçiminde
+        // yazıldığında aynı anda gelen istekler aynı değeri okuyup aynı değeri yazıyordu:
+        // yirmi şifre denemesi karşılığında sayaç yalnız BİR artıyor, beş denemelik sınır
+        // fiilen "beş TUR" sınırına dönüyordu. Artırım tek atomik SQL ifadesine taşındı.
+        await RegisterTenantAsync("paralel", "admin@paralel.com", "Sifre123!");
+
+        const int paralelDeneme = 20;
+
+        // Hepsi AYNI ANDA yollanıyor — sıralı gönderim bu kusuru göstermez.
+        var istekler = Enumerable.Range(0, paralelDeneme)
+            .Select(i => LoginAsync("admin@paralel.com", $"Yanlis{i}!"))
+            .ToArray();
+
+        await Task.WhenAll(istekler);
+        foreach (var istek in istekler) (await istek).Dispose();
+
+        // Yirmi denemenin beşincisi kilidi açar, sayaç sıfırlanır ve sayım yeniden başlar.
+        // Sayaç kaybolmadıysa hesap kilitli olmalı: DOĞRU şifre bile geçmemeli.
+        var response = await LoginAsync("admin@paralel.com", "Sifre123!");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Contains("dakika", await MessageOfAsync(response));
+    }
+
+    // ---- Şifre değiştirme kapısı ----
+
+    [Fact(DisplayName = "Şifre değiştirmede mevcut şifre sınırsız denenemiyor")]
+    public async Task ChangePassword_IsThrottled()
+    {
+        // Sızmış bir erişim token'ının 15 dakikalık ömrü, sınır yokken mevcut şifreyi
+        // kaba kuvvetle aramaya yetiyordu; bulunursa geçici erişim KALICI erişime dönerdi.
+        await RegisterTenantAsync("pw", "admin@pw.com", "Sifre123!");
+
+        var login = await LoginAsync("admin@pw.com", "Sifre123!");
+        var token = (await login.Content.ReadFromJsonAsync<TokenResponse>())!.Token;
+
+        using var authed = _factory.CreateClient();
+        authed.DefaultRequestHeaders.Authorization = new("Bearer", token);
+
+        for (var i = 0; i < MaxAttempts; i++)
+            await authed.PostAsJsonAsync("/api/auth/change-password",
+                new { currentPassword = $"Yanlis{i}!", newPassword = "YeniSifre123!" });
+
+        // Sınır aşıldı: artık DOĞRU mevcut şifre de kabul edilmiyor.
+        var response = await authed.PostAsJsonAsync("/api/auth/change-password",
+            new { currentPassword = "Sifre123!", newPassword = "YeniSifre123!" });
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+    }
+
+    // ---- E-posta kimliği tek tanımlı ----
+
+    [Fact(DisplayName = "Aynı e-posta farklı harf büyüklüğüyle İKİNCİ kez kaydolamıyor")]
+    public async Task Email_IsCaseInsensitiveForRegistration()
+    {
+        // Sayaç e-postayı küçük harfe indirgerken kayıt sorgusu duyarlı karşılaştırıyordu:
+        // aynı posta kutusuna ait iki ayrı hesap açılabiliyordu.
+        await RegisterTenantAsync("harfbir", "ali@harf.com", "Sifre123!");
+
+        var ikinci = await _client.PostAsJsonAsync("/api/auth/register",
+            new { tenantName = "harfiki", email = "Ali@Harf.com", password = "Sifre123!" });
+
+        Assert.Equal(HttpStatusCode.Conflict, ikinci.StatusCode);
+    }
+
+    [Fact(DisplayName = "Kullanıcı adresini farklı harf büyüklüğüyle yazınca " +
+                        "KENDİ hesabına giriyor (kilitlemiyor)")]
+    public async Task Email_CaseDifference_StillLogsIn()
+    {
+        // Kusurun ters yönü: "Ali@x.com" olarak kayıtlı kullanıcı küçük harfle yazınca
+        // hesabını bulamıyor, beş denemede sayaç aynı anahtarı kullandığı için KENDİ
+        // hesabını kilitliyordu.
+        await RegisterTenantAsync("harfuc", "Veli@Harf.com", "Sifre123!");
+
+        var response = await LoginAsync("veli@harf.com", "Sifre123!");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
     // ---- İki kapının ayrılığı ----
 
     [Fact(DisplayName = "Platform girişi ayrı sayılıyor: firma tarafındaki kilit onu kapatmıyor")]

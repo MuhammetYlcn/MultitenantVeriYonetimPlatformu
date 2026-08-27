@@ -21,4 +21,10 @@ public static class AuthPolicies
 
     /// <summary>Tenant token'ındaki firma kimliği claim'i.</summary>
     public const string TenantIdClaim = "tenant_id";
+
+    /// <summary>
+    /// Kayıt ucundaki IP başına hız sınırı politikası. Kimlik doğrulamasız ve kalıcı
+    /// kaynak (firma + PostgreSQL şeması) yaratan tek uç orası.
+    /// </summary>
+    public const string RegisterRateLimit = "register";
 }

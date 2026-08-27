@@ -45,10 +45,12 @@ public class AccountTokenService : IAccountTokenService
     public const string PurposeReset = "PasswordReset";
 
     private readonly AppDbContext _db;
+    private readonly ILoginThrottle _throttle;
 
-    public AccountTokenService(AppDbContext db)
+    public AccountTokenService(AppDbContext db, ILoginThrottle throttle)
     {
         _db = db;
+        _throttle = throttle;
     }
 
     public async Task<ServiceResult<AccountTokenResponse>> InviteAsync(Guid tenantId,
@@ -57,14 +59,21 @@ public class AccountTokenService : IAccountTokenService
         // E-posta GLOBAL benzersiz. Global query filter kendi tenant'ıyla sınırlar;
         // IgnoreQueryFilters olmadan başka tenant'taki mükerrer e-posta görülemez ve
         // kullanıcı daveti kabul ettiği anda DB unique index hatası (500) alınırdı.
+        // Karşılaştırma ve saklama normalleştirilmiş kimlik üzerinden. Duyarlı
+        // karşılaştırmayla "Ali@x.com", kayıtlı "ali@x.com"u göremiyordu: yönetici
+        // kişinin zaten var olduğunu bilmeden ikinci bir kimlik açıyordu.
+        var email = EmailIdentity.Canonical(request.Email);
+
         var emailTaken = await _db.Users.IgnoreQueryFilters()
-            .AnyAsync(u => u.Email == request.Email);
+            .AnyAsync(u => u.Email == email);
         if (emailTaken)
             return Fail<AccountTokenResponse>("Bu e-posta zaten kayıtlı.", 409);
 
         // Aynı e-postaya duran açık bir davet varsa onu geçersizleştir: her zaman
         // tek bir geçerli bağlantı olsun (eski bağlantı elden ele dolaşmasın).
-        await InvalidateOpenTokensAsync(tenantId, request.Email, PurposeInvite);
+        // Normalleştirilmiş adresle aranıyor — aksi hâlde farklı yazımdaki eski davet
+        // bağlantısı açık kalırdı.
+        await InvalidateOpenTokensAsync(tenantId, email, PurposeInvite);
 
         var raw = NewRawToken();
         var token = new AccountToken
@@ -72,7 +81,7 @@ public class AccountTokenService : IAccountTokenService
             Id = Guid.NewGuid(),
             Purpose = PurposeInvite,
             TenantId = tenantId,
-            Email = request.Email,
+            Email = email,
             Role = request.Role,
             TokenHash = Sha256(raw),
             ExpiresAt = DateTime.UtcNow.Add(InviteLifetime),
@@ -191,10 +200,28 @@ public class AccountTokenService : IAccountTokenService
         if (user is null)
             return Fail<string>("Kullanıcı bulunamadı.", 404);
 
+        // Mevcut şifre denemeleri de sayılıyor. Şart tek başına yetmiyordu: sınır yokken
+        // sızmış bir token'ın 15 dakikalık ömrü, mevcut şifreyi kaba kuvvetle aramaya
+        // yetecek kadar denemeye izin veriyordu — bulunursa geçici erişim kalıcıya döner.
+        var locked = await _throttle.GetLockAsync(LoginScopes.PasswordChange, user.Email);
+        if (locked is not null)
+            return Fail<string>(LoginThrottle.LockMessage(locked.Value), 429);
+
         // Mevcut şifre şart: çalınmış bir token'la şifrenin değiştirilip erişimin
         // kalıcı hâle getirilmesini engeller.
         if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, user.PasswordHash))
-            return Fail<string>("Mevcut şifre hatalı.", 400);
+        {
+            var justLocked = await _throttle.RecordFailureAsync(
+                LoginScopes.PasswordChange, user.Email);
+
+            return Fail<string>(justLocked is not null
+                ? LoginThrottle.LockMessage(justLocked.Value)
+                : "Mevcut şifre hatalı.", justLocked is not null ? 429 : 400);
+        }
+
+        // Doğru şifre sayacı sıfırlar: kendi şifresini bilen kullanıcı, daha önce yanlış
+        // yazdığı için sonraki denemesinde duvara toslamamalı.
+        await _throttle.ClearAsync(LoginScopes.PasswordChange, user.Email);
 
         if (BCrypt.Net.BCrypt.Verify(request.NewPassword, user.PasswordHash))
             return Fail<string>("Yeni şifre eskisiyle aynı olamaz.", 400);

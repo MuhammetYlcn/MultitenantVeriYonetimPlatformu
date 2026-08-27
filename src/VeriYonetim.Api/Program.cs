@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using Hangfire;
 using Hangfire.PostgreSql;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -34,8 +36,31 @@ var builder = WebApplication.CreateBuilder(args);
 // ---------------------------------------------------------------------------
 static string RequiredSetting(IConfiguration config, string key, string hint)
 {
+    // Örnek dosyalardaki bütün yer tutucular bu önekle başlıyor. Arama `Contains` ile
+    // yapılıyor, `StartsWith` ile değil: bağlantı dizesinde yer tutucu değer başta değil
+    // `...;Password=BURAYA-YEREL-DB-SIFRESI` gibi ortada duruyor.
+    const string PlaceholderPrefix = "BURAYA-";
+
     var value = config[key];
-    if (!string.IsNullOrWhiteSpace(value)) return value;
+
+    if (!string.IsNullOrWhiteSpace(value))
+    {
+        // YER TUTUCU REDDİ. Denetim "eksik" ve (aşağıda) "kısa" hâllerini yakalıyordu ama
+        // yakalamak istediği ASIL senaryoyu kaçırıyordu: kurulumu yapan kişinin örnek
+        // dosyayı kopyalayıp doldurmayı unutması. Depodaki yer tutucu 50 karakter, yani
+        // 32 baytlık eşiği rahatça aşıyor ve uygulama hiç uyarmadan açılıyordu. O
+        // durumda imzalama anahtarı herkese açık depoda YAZILI BİR SABİT olur: anahtarı
+        // bilen kendi token'ını üretip `tenant_id`'yi istediği firmaya, rolü Admin'e
+        // koyar — kilit, karma ve kiracı izolasyonu devreye bile girmez, çünkü kimlik
+        // doğrulaması hiç yapılmaz. Eksik ayardan tehlikeli olan, doldurulmuş görünen ayar.
+        if (value.Contains(PlaceholderPrefix, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"'{key}' hâlâ örnek dosyadaki yer tutucu değeri taşıyor. {hint} " +
+                "Bu değer depoda yazılı olduğu için sır sayılmaz; gerçek bir değer üretin " +
+                "(ör. `openssl rand -base64 48`).");
+
+        return value;
+    }
 
     throw new InvalidOperationException(
         $"Zorunlu ayar eksik: '{key}'. {hint} " +
@@ -55,6 +80,15 @@ if (Encoding.UTF8.GetByteCount(jwtKey) < 32)
     throw new InvalidOperationException(
         "Jwt:Key en az 32 karakter (256 bit) olmalı — kısa bir imzalama anahtarı " +
         "token'ların taklit edilmesini kolaylaştırır.");
+
+// Issuer/Audience sır değil ama eksik olmaları aynı sınıftan bir kusur taşıyordu:
+// TokenService bunları null yazabiliyor, doğrulama ise ValidateIssuer/ValidateAudience
+// ile eşleşme arıyor. Sonuç, açılan ama HER girişte 401 üreten bir kurulum olurdu —
+// denetimin bütün amacı bu hatayı ilk isteğe değil açılışa çekmek.
+RequiredSetting(builder.Configuration, "Jwt:Issuer",
+    "Token'ın kim tarafından üretildiğini bildirir ve doğrulamada eşleşmesi aranır.");
+RequiredSetting(builder.Configuration, "Jwt:Audience",
+    "Token'ın kimin için üretildiğini bildirir ve doğrulamada eşleşmesi aranır.");
 
 // Token ömürleri de açılışta denetleniyor. Sır değiller ama aynı kusuru taşıyorlardı:
 // TokenService ve AuthService bunları int.Parse(...!) ile okuyor, yani eksik ya da
@@ -292,6 +326,55 @@ builder.Services.AddCors(options =>
         policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod();
     }));
 
+// ---------------------------------------------------------------------------
+// KAYIT UCUNDA HIZ SINIRI
+//
+// `POST /api/auth/register` kimlik doğrulamasız, ve giriş sayacından bağımsızdı. İki
+// ayrı kusuru birden taşıyordu:
+//
+// 1. HESAP SAYIMI: var olan bir e-posta için 409 + "Bu e-posta zaten kayıtlı." dönüyor,
+//    sorgu da IgnoreQueryFilters ile bütün firmalarda arıyor. Yani uç, "bu adres
+//    platformda kayıtlı mı" sorusuna sınırsız hızda cevap veren bir araçtı. Giriş
+//    tarafında hesap sayımı özenle kapatılmışken (sayaç kayıtsız e-postaları da tutuyor)
+//    aynı bilgi buradan bedavaya alınabiliyordu — üstelik elde edilen geçerli adres
+//    listesi, bilinçli olarak kabul edilmiş olan password spraying'in tam da girdisi.
+// 2. KAYNAK TÜKETME: her çağrı bir Tenant, bir User ve GERÇEK bir PostgreSQL şeması
+//    açıyor. Temizleyen bir bakım işi yok; açılıştaki şema eşitlemesi hepsini taradığı
+//    için uygulama giderek yavaş açılır. Ayrıca her çağrı ~100 ms'lik BCrypt maliyeti.
+//
+// Sınır IP başına: burada IP'ye bağlamak doğru, çünkü giriş sayacının aksine korunacak
+// bir "hesap" yok — henüz var olmayan bir hesap açılıyor. Kapatılabilir olması şart:
+// testler tek IP'den yüzlerce kayıt yapıyor.
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.AddPolicy(AuthPolicies.RegisterRateLimit, http =>
+    {
+        // Ayar İSTEK anında okunuyor, `builder.Configuration` üzerinden açılışta değil.
+        // Sebebi somut: Program.cs gövdesi `builder.Build()`'den ÖNCE koşuyor, test
+        // altyapısının ayar geçersiz kılmaları ise ondan SONRA uygulanıyor. Açılışta
+        // okunduğunda testlerin "sınırı kapat" ayarı görülmüyor ve testler birbirinin
+        // kotasını yiyip 429 alıyordu.
+        var config = http.RequestServices.GetRequiredService<IConfiguration>();
+
+        if (!config.GetValue("Security:Register:Enabled", true))
+            return RateLimitPartition.GetNoLimiter("disabled");
+
+        // Vekil sunucu arkasında bütün istekler tek IP'den görünebilir; o kurulumda
+        // sınır bir bütün olarak uygulanır. Bilinen kısıt, gizlenmiyor.
+        var key = http.Connection.RemoteIpAddress?.ToString() ?? "bilinmeyen";
+
+        return RateLimitPartition.GetFixedWindowLimiter(key, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = config.GetValue("Security:Register:MaxPerWindow", 5),
+            Window = TimeSpan.FromMinutes(
+                config.GetValue("Security:Register:WindowMinutes", 15)),
+            QueueLimit = 0
+        });
+    });
+});
+
 builder.Services.AddControllers();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
@@ -311,6 +394,10 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+
+// Hız sınırı kimlik doğrulamasından ÖNCE: korunan uç zaten kimlik doğrulamasız, ve
+// sınırın amacı isteği mümkün olan en erken noktada elemek.
+app.UseRateLimiter();
 
 app.UseCors(CorsPolicy);
 

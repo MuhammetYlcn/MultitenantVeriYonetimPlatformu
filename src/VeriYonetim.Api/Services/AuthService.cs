@@ -41,8 +41,14 @@ public class AuthService : IAuthService
     {
         // E-posta global benzersiz olmalı. Kayıt sırasında tenant context yok, o yüzden
         // IgnoreQueryFilters ile tüm tenant'lar arasında kontrol edilir.
+        //
+        // Karşılaştırma normalleştirilmiş kimlik üzerinden: aksi hâlde "ali@x.com"
+        // kayıtlıyken "Ali@x.com" bu denetimden geçer ve aynı posta kutusuna ait ikinci
+        // bir hesap açılırdı (bkz. EmailIdentity).
+        var email = EmailIdentity.Canonical(request.Email);
+
         var emailTaken = await _db.Users.IgnoreQueryFilters()
-            .AnyAsync(u => u.Email == request.Email);
+            .AnyAsync(u => u.Email == email);
         if (emailTaken)
             return new AuthResult(false, "Bu e-posta zaten kayıtlı.");
 
@@ -60,7 +66,7 @@ public class AuthService : IAuthService
         var user = new User
         {
             Id = Guid.NewGuid(),
-            Email = request.Email,
+            Email = email,
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
             Role = "Admin",
             Tenant = tenant
@@ -92,12 +98,27 @@ public class AuthService : IAuthService
 
         // E-posta global benzersiz → tek başına kullanıcıyı bulmaya yeter. Login token
         // öncesi olduğundan tenant context yok; IgnoreQueryFilters ile global aranır.
+        // Arama normalleştirilmiş kimlikle: kayıt da böyle sakladığı için "Ali@x.com"
+        // yazan kullanıcı kendi hesabını bulur (ve sayaç aynı anahtarı kullandığı için
+        // kendi hesabını yanlışlıkla kilitlemez).
+        var loginEmail = EmailIdentity.Canonical(request.Email);
+
         var user = await _db.Users
             .IgnoreQueryFilters()
             .Include(u => u.Tenant)
-            .FirstOrDefaultAsync(u => u.Email == request.Email);
+            .FirstOrDefaultAsync(u => u.Email == loginEmail);
 
-        if (user is null || !BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
+        // ZAMAN KANALI KAPATILIYOR. `user is null || !Verify(...)` yazımı kısa devre yapar:
+        // kayıtsız e-postada BCrypt HİÇ çalışmaz, kayıtlıda ~100 ms çalışır. Mesajlar
+        // birebir aynı olsa bile bu fark ölçülebilir ve "bu adres kayıtlı mı" sorusunu
+        // cevaplar — sayacın kayıtsız e-postaları da sayarak kapattığı hesap sayımı kapısı,
+        // sürenin kendisinden yeniden açılırdı. Kullanıcı yoksa sahte bir karma üzerinde
+        // aynı maliyet ödeniyor, böylece iki yolun süresi eşitleniyor.
+        // Doğrulama koşuldan ÖNCE ve koşulsuz çalışıyor — maliyeti eşitleyen şey bu.
+        var hash = user?.PasswordHash ?? DummyPassword.Hash;
+        var passwordOk = BCrypt.Net.BCrypt.Verify(request.Password, hash);
+
+        if (user is null || !passwordOk)
         {
             var justLocked = await _throttle.RecordFailureAsync(LoginScopes.Tenant, request.Email);
 

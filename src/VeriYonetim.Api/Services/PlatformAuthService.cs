@@ -59,7 +59,17 @@ public class PlatformAuthService : IPlatformAuthService
 
         // Kullanıcı yok ile şifre yanlış AYNI mesajı döner: hangi e-postanın platform
         // yöneticisi olduğu dışarıya sızmasın (hesap sayımı / enumeration).
-        if (admin is null || !BCrypt.Net.BCrypt.Verify(request.Password, admin.PasswordHash))
+        //
+        // Mesajı eşitlemek tek başına yetmiyordu: kısa devre yüzünden kayıtsız adreste
+        // BCrypt hiç çalışmıyor, kayıtlıda ~100 ms çalışıyordu. Bu kapıda farkın bedeli
+        // ağır — tablo tipik olarak TEK satır taşır, yani tek bir süre ölçümü "bu adres
+        // platform yöneticisidir" demeye yeter. Kullanıcı yoksa sahte karma üzerinde aynı
+        // maliyet ödeniyor.
+        // Doğrulama koşuldan ÖNCE ve koşulsuz çalışıyor — maliyeti eşitleyen şey bu.
+        var hash = admin?.PasswordHash ?? DummyPassword.Hash;
+        var passwordOk = BCrypt.Net.BCrypt.Verify(request.Password, hash);
+
+        if (admin is null || !passwordOk)
         {
             var justLocked = await _throttle.RecordFailureAsync(
                 LoginScopes.Platform, request.Email);
@@ -91,8 +101,23 @@ public class PlatformAuthService : IPlatformAuthService
         if (admin is null)
             return new PlatformAuthResult(false, "Yönetici bulunamadı.");
 
+        // Mevcut şifre denemeleri sayılıyor — sızmış bir platform token'ının 15 dakikalık
+        // ömrü içinde şifrenin kaba kuvvetle aranıp kalıcı erişime çevrilmesini keser.
+        var locked = await _throttle.GetLockAsync(LoginScopes.PasswordChange, admin.Email);
+        if (locked is not null)
+            return new PlatformAuthResult(false, LoginThrottle.LockMessage(locked.Value));
+
         if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, admin.PasswordHash))
-            return new PlatformAuthResult(false, "Mevcut şifre hatalı.");
+        {
+            var justLocked = await _throttle.RecordFailureAsync(
+                LoginScopes.PasswordChange, admin.Email);
+
+            return new PlatformAuthResult(false, justLocked is not null
+                ? LoginThrottle.LockMessage(justLocked.Value)
+                : "Mevcut şifre hatalı.");
+        }
+
+        await _throttle.ClearAsync(LoginScopes.PasswordChange, admin.Email);
 
         if (BCrypt.Net.BCrypt.Verify(request.NewPassword, admin.PasswordHash))
             return new PlatformAuthResult(false, "Yeni şifre eskisiyle aynı olamaz.");
@@ -123,6 +148,16 @@ public class PlatformAuthService : IPlatformAuthService
                                "platform yöneticisi oluşturulmadı.");
             return false;
         }
+
+        // Ayar EKSİKSE yönetici hiç oluşmuyor, yani güvenli tarafa düşülüyor. Tehlikeli
+        // olan hâl doldurulmuş görünen ayar: örnek dosyadaki yer tutucu bırakılırsa
+        // platformun en yetkili hesabı DEPODA YAZILI bir şifreyle açılır. Açılışı
+        // durduruyoruz, çünkü bu hesabın şifresi bütün firmaların yönetimini açıyor.
+        if (password.Contains("BURAYA-", StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                "'PlatformAdmin:Password' hâlâ örnek dosyadaki yer tutucu değeri taşıyor. " +
+                "Bu şifre depoda yazılı olduğu için sır sayılmaz; gerçek bir değer verin " +
+                "ya da ayarı tamamen boş bırakın (o zaman yönetici oluşturulmaz).");
 
         if (await _db.PlatformAdmins.AnyAsync(a => a.Email == email))
             return false;

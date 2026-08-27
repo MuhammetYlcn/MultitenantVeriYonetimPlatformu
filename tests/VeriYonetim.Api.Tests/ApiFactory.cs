@@ -47,7 +47,13 @@ public class ApiFactory : WebApplicationFactory<Program>
                 // Mailpit'e gidiyor), ama testin sonucu makinede bir posta sunucusunun
                 // ayakta olup olmamasına bağlı olmamalı. Gönderimi sınayan testler
                 // IEmailSender'ın yerine sahtesini koyup mesajın kendisine bakıyor.
-                ["Email:Host"] = ""
+                ["Email:Host"] = "",
+
+                // Kayıt hız sınırı testlerde KAPALI. Sınır IP başına ve testlerin hepsi
+                // tek IP'den (bellek içi sunucu) yüzlerce firma açıyor; açık bırakılsaydı
+                // testler birbirinin kotasını yiyip sıralarına göre düşerlerdi. Sınırın
+                // KENDİSİ ayrıca sınanıyor — o test bu ayarı kendi fabrikasında açıyor.
+                ["Security:Register:Enabled"] = "false"
             });
         });
     }
