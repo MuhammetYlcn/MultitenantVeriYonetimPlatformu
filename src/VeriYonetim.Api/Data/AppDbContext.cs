@@ -327,7 +327,6 @@ public class AppDbContext : DbContext
         {
             watch.Property(w => w.Title).HasMaxLength(200);
             watch.Property(w => w.Question).HasMaxLength(500);
-            watch.Property(w => w.Model).HasMaxLength(100);
             watch.Property(w => w.Summary).HasMaxLength(1000);
             watch.Property(w => w.ConditionKind).HasMaxLength(20);
             watch.Property(w => w.ConditionOp).HasMaxLength(10);

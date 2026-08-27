@@ -51,8 +51,11 @@ public class DatasetWatch
     /// </summary>
     public string PlanJson { get; set; } = null!;
 
-    /// Planı üreten model. Ölçüm sonradan tartışılırsa hangi modelin yorumu olduğu bilinsin.
-    public string Model { get; set; } = string.Empty;
+    // NOT: burada bir `Model` alanı vardı ("planı üreten model, ölçüm sonradan
+    // tartışılırsa hangi modelin yorumu olduğu bilinsin"). Kod incelemesinde ölü olduğu
+    // görüldü: Create onu hiç yazmıyordu ve AskMessage'da da böyle bir alan yok, yani
+    // kolon her satırda boştu. Bir izlenebilirlik güvencesini kodda karşılığı olmadan
+    // vaat etmektense alanı kaldırmak doğru — belgede de bu şekilde anlatılıyor.
 
     /// <summary>
     /// Planın düz Türkçe okunuşu ("şöyle anladım") — kurulduğu andaki hâliyle saklanır.
@@ -97,8 +100,31 @@ public class DatasetWatch
     /// ne görmüştük" sorusunun cevabı kırıldıktan sonra da lazım.
     public decimal? LastValue { get; set; }
 
-    /// Bir önceki koşunun değeri — değişim yüzdesi bununla hesaplanır.
+    /// <summary>
+    /// Bir önceki ÖLÇÜLEBİLEN koşunun değeri.
+    ///
+    /// Değişim yüzdesi koşu sırasında <c>LastValue</c> ile hesaplanır (o an henüz
+    /// güncellenmemiştir); bu alan ekranda "önceki değer" olarak gösterilir ve izleyici
+    /// düzenlendiğinde durumun yeniden değerlendirilmesinde "önceki" olarak kullanılır.
+    /// Eski yorumu ("değişim yüzdesi bununla hesaplanır") yanlıştı.
+    ///
+    /// Tanımsız ölçüm (boş kümede ortalama) bu ikiliyi KAYDIRMAZ: taban silinirse
+    /// sonraki gerçek sıçrama karşılaştırmasız kalır ve sessizce yutulur.
+    /// </summary>
     public decimal? PreviousValue { get; set; }
+
+    /// <summary>
+    /// Peş peşe kaç koşunun ölçülemediği.
+    ///
+    /// Tek bir başarısız koşu izleyiciyi kırık saymıyor. Sayıyordu ve bedeli tek bir olay
+    /// için üç uyarıydı: eşik aşıldı (uyarı 1) → bir koşuda veritabanı bağlantısı titredi,
+    /// kırık (uyarı 2) ve eşik durumu sıfırlandı → bir sonraki koşuda değer hâlâ aynı,
+    /// "yeni geçiş" sanıldı (uyarı 3). Veride hiçbir şey değişmeden kullanıcı üç e-posta
+    /// alıyordu; günde birkaç kez titreyen bir bağlantıda bu, alarmın kendisini
+    /// gürültüye çeviriyordu. Ayrıca o uyarılar okunmamış olarak biriktiği ve bakım işi
+    /// okunmamışları hiç silmediği için 500 koşuluk tavan da fiilen deliniyordu.
+    /// </summary>
+    public int ConsecutiveFailures { get; set; }
 
     /// <summary>
     /// Şu an eşiğin İÇİNDE mi. Bildirim KENAR TETİKLEMELİ: uyarı yalnız durum

@@ -1107,6 +1107,10 @@ String _plainNumber(double v) =>
 /// yüz, diğeri bir buçuk. Ayrım noktadan SONRAKİ hane sayısında — üç haneyse binlik
 /// ayracıdır. Bu ayrım yapılmasa "1.500" sessizce 1,5 olurdu ve kullanıcı eşiğini bin kat
 /// yanlış kurduğunu ancak alarm hiç çalmayınca fark ederdi.
+/// Binlik ayracıyla yazılmış bir tam sayı: "1.500", "12.345.678".
+/// Baştaki grup sıfırla başlayamaz — "0.125" bu kalıba UYMAZ, ondalıktır.
+final RegExp _binlikNoktasi = RegExp(r'^-?[1-9]\d{0,2}(\.\d{3})+$');
+
 double? parseUserNumber(String input) {
   var text = input.trim().replaceAll(' ', '');
   if (text.isEmpty) return null;
@@ -1114,10 +1118,20 @@ double? parseUserNumber(String input) {
   if (text.contains(',')) {
     // Virgül varsa ondalık ayracı odur; nokta ise binlik ayracı olabilir ancak.
     text = text.replaceAll('.', '').replaceAll(',', '.');
-  } else {
-    final dot = text.lastIndexOf('.');
-    // "1.500" → binlik; "1.5" ve "1.50" → ondalık.
-    if (dot > 0 && text.length - dot - 1 == 3) text = text.replaceAll('.', '');
+  } else if (_binlikNoktasi.hasMatch(text)) {
+    // Nokta ancak GERÇEKTEN binlik ayracı gibi duruyorsa siliniyor.
+    //
+    // Eski kural yalnız "noktadan sonra üç hane var mı" diye bakıyordu ve bu, üç
+    // ondalıklı gerçek sayıları ters yönde bozuyordu: "0.125" → "0125" → 125. Kullanıcı
+    // hata oranı için 0,125 eşiği kuruyor, sunucuya 125 gidiyor ve alarm hiç çalmıyordu
+    // — üstelik belirtisi, yorumda anlatılan "bin kat yanlış eşik ancak alarm hiç
+    // çalmayınca fark edilir" cümlesinin birebir kendisi. Aynısı 0.500 ve 1.250 gibi
+    // para/oran değerlerinde de oluyordu.
+    //
+    // Yeni kural binlik yazımın TAMAMINI arıyor: ilk grup 1-3 hane, sonraki her grup tam
+    // 3 hane, ve baştaki grup sıfırla başlamıyor. "1.500" ve "12.345.678" binlik sayılır;
+    // "0.125", "1.5", "1.50" ondalık kalır.
+    text = text.replaceAll('.', '');
   }
 
   return double.tryParse(text);

@@ -29,6 +29,10 @@ public class WatchesController : ControllerBase
     /// Ayrıntı ekranındaki değer geçmişi grafiği için taşınacak koşu sayısı.
     private const int HistoryLimit = 60;
 
+    /// Bildirim kutusunun tek seferde çektiği en fazla uyarı. Okunmamış uyarılar bakım
+    /// işi tarafından bilerek hiç silinmiyor, yani bu liste sınırsız büyüyebilir.
+    private const int MaxAlerts = 200;
+
     private readonly AppDbContext _db;
     private readonly ITenantContext _tenantContext;
     private readonly IWatchEvaluator _evaluator;
@@ -75,7 +79,13 @@ public class WatchesController : ControllerBase
             .Take(HistoryLimit)
             .ToListAsync(ct);
 
-        var unread = runs.Count(r => r.Notified && r.ReadAt == null);
+        // Okunmamış sayısı TABLONUN TAMAMINDAN sayılıyor, elimizdeki 60'lık pencereden
+        // değil. Eskiden pencereden sayılıyordu ve liste ucu (tablonun tamamından sayan)
+        // ile ayrıntı ucu aynı izleyici için FARKLI sayı döndürüyordu: 80 okunmamış uyarısı
+        // olan bir kartta kullanıcı ekrana girip çıkıyor, rozet "20 yeni" olarak kalıyor
+        // ve neden temizlenmediğini anlayamıyordu.
+        var unread = await _db.DatasetWatchRuns
+            .CountAsync(r => r.WatchId == id && r.Notified && r.ReadAt == null, ct);
 
         // Grafik eskiden yeniye çizilir; sorgu en yeniden aldığı için burada ters çevriliyor.
         runs.Reverse();
@@ -154,7 +164,15 @@ public class WatchesController : ControllerBase
         // Kurulduğu anda eşiğin dışındaysa durum baştan "aşıldı" olarak yazılır ve uyarı
         // ÜRETİLMEZ: kullanıcı değeri zaten ekranda görüyor. Bildirim kenar tetiklemeli
         // olduğundan bir sonraki gerçek geçişte gelir.
-        watch.IsBreaching = WatchRunner.Evaluate(watch, measurement.Value);
+        //
+        // Önceki değer NULL veriliyor, çünkü kurulumda gerçekten yok. Eskiden LastValue
+        // nesne başlatıcıda (yukarıda) yazıldığı için Evaluate onu "önceki" sanıyor ve
+        // değişimi %0 hesaplıyordu; sıfırın eşiği sağladığı operatörlerde (ör. "%0 ya da
+        // altına inerse uyar") izleyici doğar doğmaz "aşıldı" işaretleniyordu. Kenar
+        // tetikleme yüzünden bir sonraki GERÇEK düşüş de "zaten aşılıydı" sayılıp
+        // yutuluyor, kullanıcı ilk gerçek olayı hiç öğrenmiyordu. Bu, "ilk koşuda
+        // karşılaştırma yapılmaz" kuralının kurulum yolundaki karşılığı.
+        watch.IsBreaching = WatchRunner.Evaluate(watch, measurement.Value, previousValue: null);
         watch.Status = watch.IsBreaching ? WatchStatus.Breaching : WatchStatus.Ok;
 
         // İlk ölçüm geçmişe de yazılır: grafiğin ilk noktası izleyicinin doğduğu andır.
@@ -209,9 +227,19 @@ public class WatchesController : ControllerBase
         // Eşik değişti: eski "aşıldı" hâli artık yeni eşiğe göre doğru olmayabilir.
         // Yeniden değerlendirilir ki bir sonraki koşu yanlış bir geçiş görmesin —
         // ama uyarı üretilmez, çünkü değişikliği yapan kullanıcı zaten ekranın başında.
+        //
+        // ÖNCEKİ DEĞER AÇIKÇA VERİLİYOR. Eskiden `Evaluate(watch, watch.LastValue)`
+        // çağrılıyordu; Evaluate önceki değeri de aynı alandan okuduğu için `change`
+        // izleyicilerinde değişim DAİMA %0 çıkıyordu. Sonucu: eşiği aşmış bir izleyicinin
+        // yalnızca adını değiştirmek (ya da duraklatıp sürdürmek — ikisi de bu PATCH)
+        // IsBreaching'i false yapıyor, bir sonraki koşu aynı sürmekte olan olay için
+        // İKİNCİ kez uyarı ve e-posta üretiyordu. Doğru soru şu: "son koşudaki değişim,
+        // YENİ eşiğe göre aşım sayılır mıydı?" — yani current = LastValue,
+        // previous = PreviousValue.
         if (watch.Status != WatchStatus.Broken)
         {
-            watch.IsBreaching = WatchRunner.Evaluate(watch, watch.LastValue);
+            watch.IsBreaching =
+                WatchRunner.Evaluate(watch, watch.LastValue, watch.PreviousValue);
             watch.Status = watch.IsBreaching ? WatchStatus.Breaching : WatchStatus.Ok;
         }
 
@@ -238,7 +266,10 @@ public class WatchesController : ControllerBase
 
         if (watch is null) return NotFound(id);
 
-        await _runner.ExecuteAsync(watch, ct);
+        // manual: true — ölçer ve gösterir, ama zamanlanmış serinin tabanına, sıradaki
+        // koşu zamanına ve eşik durumuna dokunmaz; uyarı da üretmez (duraklatılmış bir
+        // izleyici bu düğmeyle firmanın tamamına e-posta gönderebiliyordu).
+        await _runner.ExecuteAsync(watch, manual: true, ct);
 
         var unread = await _db.DatasetWatchRuns
             .CountAsync(r => r.WatchId == id && r.Notified && r.ReadAt == null, ct);
@@ -264,9 +295,15 @@ public class WatchesController : ControllerBase
     [HttpGet("alerts")]
     public async Task<IActionResult> Alerts(CancellationToken ct)
     {
+        // SINIR VAR. Uç sınırsızdı ve okunmamış uyarılar bakım işi tarafından bilerek
+        // hiç silinmediği için sınırsız birikebiliyorlar: kimsenin uygulamayı açmadığı
+        // bir tatil boyunca titreyen iki izleyici binlerce satır bırakabilir ve bildirim
+        // kutusu her açılışta hepsini birden çekerdi. Rozet sayısı ayrı sayılıyor, yani
+        // kullanıcı "200'den fazlası var" bilgisini yine görüyor.
         var alerts = await _db.DatasetWatchRuns
             .Where(r => r.Notified && r.ReadAt == null)
             .OrderByDescending(r => r.RanAt)
+            .Take(MaxAlerts)
             .Select(r => new WatchAlertDto(
                 r.Id, r.WatchId, r.Watch.Title, r.RanAt, r.Value, r.Error, r.Error != null))
             .ToListAsync(ct);

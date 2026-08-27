@@ -94,7 +94,30 @@ public class SmtpEmailSender : IEmailSender
     {
         _options = options.Value;
         _logger = logger;
+
+        // ŞİFRESİZ GÖNDERİM SESSİZ KALMIYOR.
+        //
+        // `Security` varsayılanı "none" ve teslimdeki Mailpit için bu doğru — aynı compose
+        // ağının içinde duruyor. Tehlike, kurulumu devralan kişinin `Host`u gerçek bir
+        // SMTP sunucusuna çevirip `Security`yi değiştirmeyi atlaması: varsayılan var, hata
+        // da vermiyor. O andan sonra her uyarı, ölçülen sayıyı ve kullanıcının özgün
+        // sorusunu — yani müşteri verisini — ağ üzerinde şifresiz taşır.
+        //
+        // Yerel adreslerde susuluyor, çünkü orada bilinçli ve doğru tercih bu.
+        if (_options.IsConfigured
+            && string.Equals(_options.Security, "none", StringComparison.OrdinalIgnoreCase)
+            && !IsLocal(_options.Host))
+        {
+            _logger.LogWarning(
+                "E-posta ŞİFRESİZ gönderiliyor: Email:Security 'none' ve sunucu yerel " +
+                "değil. Uyarı e-postaları müşteri verisi taşıyor; 'starttls' ya da 'ssl' " +
+                "kullanın.");
+        }
     }
+
+    private static bool IsLocal(string host) =>
+        host is "localhost" or "127.0.0.1" or "::1" or "mailpit"
+        || host.EndsWith(".local", StringComparison.OrdinalIgnoreCase);
 
     public bool IsEnabled => _options.IsConfigured;
 
@@ -105,12 +128,21 @@ public class SmtpEmailSender : IEmailSender
         var mime = new MimeMessage();
         mime.From.Add(new MailboxAddress(_options.FromName, _options.From));
 
+        // ALICILAR Bcc'DE, To'da DEĞİL.
+        //
+        // Uyarı firmanın TÜM kullanıcılarına tek iletiyle gidiyor. To kullanıldığında her
+        // alıcı, şirketteki herkesin e-posta adresini görüyordu — kimsenin istemediği,
+        // kimsenin fark etmediği bir adres defteri dağıtımı. Bcc ile ileti aynı, adresler
+        // birbirine görünmüyor. To alanına yalnız gönderenin kendisi konuyor, çünkü bazı
+        // posta sunucuları To'su tamamen boş iletileri istenmeyen sayıyor.
+        mime.To.Add(new MailboxAddress(_options.FromName, _options.From));
+
         foreach (var address in message.To)
         {
             // Bozuk bir adres yüzünden BÜTÜN gönderim düşmesin: firmadaki bir kullanıcının
             // adresi elle bozulmuşsa diğerleri uyarıyı almaya devam etmeli.
             if (MailboxAddress.TryParse(address, out var mailbox))
-                mime.To.Add(mailbox);
+                mime.Bcc.Add(mailbox);
             else
             {
                 // Adresin KENDİSİ Debug'a indi: bu bir müşteri kullanıcısının e-postası,
@@ -121,7 +153,7 @@ public class SmtpEmailSender : IEmailSender
             }
         }
 
-        if (mime.To.Count == 0) return;
+        if (mime.Bcc.Count == 0) return;
 
         mime.Subject = message.Subject;
         mime.Body = new TextPart("plain") { Text = message.Body };

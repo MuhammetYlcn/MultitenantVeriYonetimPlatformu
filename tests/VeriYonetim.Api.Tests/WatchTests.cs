@@ -187,12 +187,54 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
             threshold
         }));
 
+    /// <summary>
+    /// Elle koşu ucu — "şimdi kontrol et".
+    ///
+    /// Bu bir SINAMADIR: ölçer ve gösterir, ama zamanlanmış serinin tabanına, sıradaki
+    /// koşu zamanına ve eşik durumuna dokunmaz, uyarı da üretmez. Zamanlanmış koşuyu
+    /// sınayan testler bu ucu DEĞİL <see cref="ScheduledRunAsync"/>'i kullanmalı.
+    /// </summary>
     private static async Task<WatchDto> RunNowAsync(HttpClient client, string token, Guid watchId)
     {
         var response = await client.SendAsync(
             WithToken(HttpMethod.Post, $"/api/watches/{watchId}/run", token));
         response.EnsureSuccessStatusCode();
         return (await response.Content.ReadFromJsonAsync<WatchDto>())!;
+    }
+
+    /// <summary>
+    /// ZAMANLANMIŞ koşuyu gerçek yoldan tetikler: izleyicinin sırası geçmişe çekilir ve
+    /// tarama çalıştırılır.
+    ///
+    /// Testler eskiden bunun yerine elle koşu ucunu kullanıyordu. İkisi ayrıldıktan sonra
+    /// bu artık doğru değil — üstelik ayrılmadan önce de testler üretimde olmayan bir
+    /// karışımı sınıyordu: elle koşuya zamanlanmış koşunun sorumlulukları yüklenmişti.
+    /// Bu yardımcı gerçek zamanlayıcıyı sürdüğü için tenant bağlamı da üretimdeki gibi
+    /// iş kaydından kuruluyor.
+    /// </summary>
+    /// <param name="services">
+    /// Taramanın koşacağı servis sağlayıcı. E-posta testleri kendi fabrikalarını kuruyor
+    /// (sahte IEmailSender ile); tarama sınıf fabrikasından koşarsa o sahteyi hiç görmez
+    /// ve gönderim sessizce gerçek göndericiye gider.
+    /// </param>
+    private async Task<WatchDto> ScheduledRunAsync(HttpClient client, string token, Guid watchId,
+        IServiceProvider? services = null)
+    {
+        services ??= _factory.Services;
+
+        using (var scope = services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            await db.DatasetWatches.IgnoreQueryFilters()
+                .Where(w => w.Id == watchId)
+                .ExecuteUpdateAsync(s => s.SetProperty(
+                    w => w.NextRunAt, DateTime.UtcNow.AddMinutes(-1)));
+        }
+
+        using (var scope = services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<IWatchScheduler>().SweepAsync();
+
+        return await ReadWatchAsync(client, token, watchId);
     }
 
     private static async Task<List<AlertDto>> AlertsAsync(HttpClient client, string token)
@@ -428,7 +470,7 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
             admin.Token, new { values = new Dictionary<string, string?>
                 { ["urun"] = "Masa", ["tutar"] = "5000", ["sehir"] = "Ankara" } }));
 
-        var after = await RunNowAsync(client, admin.Token, created.Id);
+        var after = await ScheduledRunAsync(client, admin.Token, created.Id);
 
         Assert.Equal(WatchStatus.Breaching, after.Status);
         Assert.Equal(5350m, after.LastValue);
@@ -460,12 +502,83 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
         // PATCH durumu zaten yeniden değerlendiriyor ve uyarı ÜRETMİYOR (kullanıcı ekranda).
         Assert.Empty(await AlertsAsync(client, admin.Token));
 
-        await RunNowAsync(client, admin.Token, created.Id);
-        var ikinci = await RunNowAsync(client, admin.Token, created.Id);
+        await ScheduledRunAsync(client, admin.Token, created.Id);
+        var ikinci = await ScheduledRunAsync(client, admin.Token, created.Id);
 
         Assert.Equal(WatchStatus.Breaching, ikinci.Status);
         // İki koşu da eşiğin üstünde bitti ama tek bir uyarı bile doğmadı: durum değişmedi.
         Assert.Empty(await AlertsAsync(client, admin.Token));
+    }
+
+    [Fact(DisplayName = "Değişim izleyicisinde DÜZENLEME durumu sıfırlamıyor: " +
+                        "aynı olay için ikinci uyarı doğmaz")]
+    public async Task DegisimIzleyicisindePatchDurumuSifirlamaz()
+    {
+        // Kod incelemesinde bulunan kusurun testi.
+        //
+        // PATCH durumu yeniden değerlendirirken `Evaluate(watch, watch.LastValue)`
+        // çağırıyordu; Evaluate önceki değeri de AYNI alandan okuduğu için değişim daima
+        // %0 çıkıyordu. Sonucu: eşiği aşmış bir izleyicinin yalnızca ADINI değiştirmek
+        // IsBreaching'i false yapıyor, bir sonraki koşu aynı sürmekte olan olay için
+        // İKİNCİ kez uyarı ve e-posta üretiyordu. Kenar tetiklemenin engellemek için var
+        // olduğu şey, düzenleme düğmesiyle tetikleniyordu.
+        using var client = _factory.CreateClient();
+        var admin = await RegisterAsync(client, "izle-patch", "a@izlepatch.com");
+        var dataset = await CreateDatasetAsync(client, admin.Token);
+
+        var messageId = await SeedMessageAsync(admin.UserId, "toplam tutar nedir", ToplamTutarPlani);
+        var created = (await (await CreateWatchAsync(client, admin.Token, messageId,
+            op: "gt", threshold: 20m, kind: "change")).Content.ReadFromJsonAsync<WatchDto>())!;
+
+        // Toplamı 350 → 5350 yap: %1428 artış, eşiğin çok üstünde.
+        await client.SendAsync(WithToken(HttpMethod.Post, $"/api/datasets/{dataset.Id}/rows/add",
+            admin.Token, new { values = new Dictionary<string, string?>
+                { ["urun"] = "Masa", ["tutar"] = "5000", ["sehir"] = "Ankara" } }));
+
+        var asim = await ScheduledRunAsync(client, admin.Token, created.Id);
+        Assert.Equal(WatchStatus.Breaching, asim.Status);
+        Assert.Single(await AlertsAsync(client, admin.Token));
+
+        // Yalnızca BAŞLIK değişiyor — eşiğe, sıklığa, koşula dokunulmuyor.
+        (await client.SendAsync(WithToken(HttpMethod.Patch, $"/api/watches/{created.Id}",
+            admin.Token, new { title = "Yeni ad" }))).EnsureSuccessStatusCode();
+
+        var patchSonrasi = await ReadWatchAsync(client, admin.Token, created.Id);
+
+        // Durum korunmalı: hiçbir ölçüm yapılmadı, olay hâlâ sürüyor.
+        Assert.Equal(WatchStatus.Breaching, patchSonrasi.Status);
+
+        // Ve bir sonraki koşu İKİNCİ bir uyarı üretmemeli.
+        await ScheduledRunAsync(client, admin.Token, created.Id);
+        Assert.Single(await AlertsAsync(client, admin.Token));
+    }
+
+    [Fact(DisplayName = "Elle koşu tabanı kaydırmıyor ve uyarı üretmiyor")]
+    public async Task ElleKosuTabaniKaydirmaz()
+    {
+        // Elle koşu bir SINAMADIR, zamanlanmış ölçüm serisinin üyesi değil. Ayrılmadan
+        // önce kullanıcının "acaba çalışıyor mu" davranışı ölçümün tanımını değiştiriyordu:
+        // taban kayıyor ve sıradaki koşu ileri atılıyordu. Ayrıca duraklatılmış bir
+        // izleyici bu düğmeyle firmanın TAMAMINA e-posta gönderebiliyordu.
+        using var client = _factory.CreateClient();
+        var admin = await RegisterAsync(client, "izle-elle", "a@izleelle.com");
+        var dataset = await CreateDatasetAsync(client, admin.Token);
+
+        var messageId = await SeedMessageAsync(admin.UserId, "toplam tutar nedir", ToplamTutarPlani);
+        var created = (await (await CreateWatchAsync(client, admin.Token, messageId,
+            "gt", 1000m)).Content.ReadFromJsonAsync<WatchDto>())!;
+
+        await client.SendAsync(WithToken(HttpMethod.Post, $"/api/datasets/{dataset.Id}/rows/add",
+            admin.Token, new { values = new Dictionary<string, string?>
+                { ["urun"] = "Masa", ["tutar"] = "5000", ["sehir"] = "Ankara" } }));
+
+        var elle = await RunNowAsync(client, admin.Token, created.Id);
+
+        // Ölçüm YAPILDI ve eşiğin üstünde — ama uyarı doğmadı.
+        Assert.Empty(await AlertsAsync(client, admin.Token));
+
+        // Taban kaymadı: zamanlanmış seri hâlâ 350'yi "son değer" olarak biliyor.
+        Assert.Equal(350m, elle.LastValue);
     }
 
     [Fact(DisplayName = "Eşik aşılmazsa uyarı doğmaz")]
@@ -479,7 +592,7 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
         var created = (await (await CreateWatchAsync(client, admin.Token, messageId,
             "gt", 1000m)).Content.ReadFromJsonAsync<WatchDto>())!;
 
-        var after = await RunNowAsync(client, admin.Token, created.Id);
+        var after = await ScheduledRunAsync(client, admin.Token, created.Id);
 
         Assert.Equal(WatchStatus.Ok, after.Status);
         Assert.Equal(0, after.UnreadCount);
@@ -508,7 +621,7 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
             admin.Token, new { values = new Dictionary<string, string?>
                 { ["urun"] = "Sandalye", ["tutar"] = "350", ["sehir"] = "Izmir" } }));
 
-        var after = await RunNowAsync(client, admin.Token, created.Id);
+        var after = await ScheduledRunAsync(client, admin.Token, created.Id);
 
         Assert.Equal(WatchStatus.Breaching, after.Status);
         Assert.Equal(700m, after.LastValue);
@@ -574,7 +687,13 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
         (await client.SendAsync(WithToken(HttpMethod.Delete, $"/api/datasets/{dataset.Id}",
             admin.Token))).EnsureSuccessStatusCode();
 
-        var after = await RunNowAsync(client, admin.Token, created.Id);
+        // İKİ koşu gerekiyor: tek bir başarısızlık artık izleyiciyi kırık saymıyor.
+        // Bir koşuluk titremeler (bağlantı düşmesi, anlık kilit) gerçek bir kırılma değil
+        // ve her birine uyarı üretmek tek bir olay için üç e-posta doğuruyordu.
+        var ilk = await ScheduledRunAsync(client, admin.Token, created.Id);
+        Assert.NotEqual(WatchStatus.Broken, ilk.Status);
+
+        var after = await ScheduledRunAsync(client, admin.Token, created.Id);
 
         Assert.Equal(WatchStatus.Broken, after.Status);
         Assert.False(string.IsNullOrWhiteSpace(after.Error));
@@ -604,8 +723,8 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
         (await client.SendAsync(WithToken(HttpMethod.Delete, $"/api/datasets/{dataset.Id}",
             admin.Token))).EnsureSuccessStatusCode();
 
-        await RunNowAsync(client, admin.Token, created.Id);
-        await RunNowAsync(client, admin.Token, created.Id);
+        await ScheduledRunAsync(client, admin.Token, created.Id);
+        await ScheduledRunAsync(client, admin.Token, created.Id);
 
         Assert.Single(await AlertsAsync(client, admin.Token));
     }
@@ -627,7 +746,7 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
             admin.Token, new { values = new Dictionary<string, string?>
                 { ["urun"] = "Masa", ["tutar"] = "5000", ["sehir"] = "Ankara" } }));
 
-        await RunNowAsync(client, admin.Token, created.Id);
+        await ScheduledRunAsync(client, admin.Token, created.Id);
         Assert.Single(await AlertsAsync(client, admin.Token));
 
         var read = await client.SendAsync(WithToken(HttpMethod.Post, "/api/watches/alerts/read",
@@ -961,7 +1080,7 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
     /// Eşiği aşan bir izleyici kurar ve onu koşturur: uyarı doğar.
     private async Task<WatchDto> TriggerBreachAsync(HttpClient client, TokenResponse admin,
-        string tenantSlug)
+        string tenantSlug, IServiceProvider? services = null)
     {
         var dataset = await CreateDatasetAsync(client, admin.Token);
         var messageId = await SeedMessageAsync(admin.UserId, "toplam tutar nedir", ToplamTutarPlani);
@@ -973,7 +1092,7 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
             admin.Token, new { values = new Dictionary<string, string?>
                 { ["urun"] = $"Masa-{tenantSlug}", ["tutar"] = "5000", ["sehir"] = "Ankara" } }));
 
-        return await RunNowAsync(client, admin.Token, created.Id);
+        return await ScheduledRunAsync(client, admin.Token, created.Id, services);
     }
 
     [Fact(DisplayName = "Eşik aşılınca uyarı firmanın TÜM kullanıcılarına e-postayla gider")]
@@ -988,7 +1107,7 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
         // izleyiciyi kurana gönderilseydi, o kişi izinliyken alarm kimseye ulaşmazdı.
         await InviteViewerAsync(client, admin.Token, "izleyen@izleposta.com");
 
-        var after = await TriggerBreachAsync(client, admin, "posta");
+        var after = await TriggerBreachAsync(client, admin, "posta", factory.Services);
         Assert.Equal(WatchStatus.Breaching, after.Status);
 
         var mail = Assert.Single(sender.Sent);
@@ -1014,7 +1133,7 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
         var a = await RegisterAsync(client, "izle-posta-a", "a@izlepostaizole.com");
         await RegisterAsync(client, "izle-posta-b", "b@izlepostaizole.com");
 
-        await TriggerBreachAsync(client, a, "a");
+        await TriggerBreachAsync(client, a, "a", factory.Services);
 
         var mail = Assert.Single(sender.Sent);
         Assert.Equal(new[] { "a@izlepostaizole.com" }, mail.To);
@@ -1036,7 +1155,9 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
         (await client.SendAsync(WithToken(HttpMethod.Delete, $"/api/datasets/{dataset.Id}",
             admin.Token))).EnsureSuccessStatusCode();
 
-        await RunNowAsync(client, admin.Token, created.Id);
+        // İki koşu: tek başarısızlık kırık saymıyor (bkz. WatchRunner.BrokenAfterFailures).
+        await ScheduledRunAsync(client, admin.Token, created.Id, factory.Services);
+        await ScheduledRunAsync(client, admin.Token, created.Id, factory.Services);
 
         var mail = Assert.Single(sender.Sent);
         // Konu satırı ayrı: kullanıcı posta kutusunu açmadan, "eşik aşıldı" ile
@@ -1057,7 +1178,7 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
         // Koşu isteği 200 dönüyor: SMTP sunucusunun ulaşılamaz olması bir VERİ sorunu
         // değil. Düşseydi izleyici "kırık" işaretlenir, kullanıcı verisinde olmayan bir
         // arızayı aramaya başlardı.
-        var after = await TriggerBreachAsync(client, admin, "hata");
+        var after = await TriggerBreachAsync(client, admin, "hata", factory.Services);
 
         Assert.Equal(WatchStatus.Breaching, after.Status);
         Assert.Equal(1, after.UnreadCount);
@@ -1076,7 +1197,7 @@ public class WatchTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
         var admin = await RegisterAsync(client, "izle-posta-kapali", "a@izlepostakapali.com");
 
-        var after = await TriggerBreachAsync(client, admin, "kapali");
+        var after = await TriggerBreachAsync(client, admin, "kapali", factory.Services);
 
         Assert.Equal(WatchStatus.Breaching, after.Status);
         Assert.Empty(sender.Sent);
