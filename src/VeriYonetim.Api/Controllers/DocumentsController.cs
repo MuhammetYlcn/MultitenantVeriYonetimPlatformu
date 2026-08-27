@@ -152,7 +152,21 @@ public class DocumentsController : ControllerBase
             return Problem(statusCode: StatusCodes.Status400BadRequest,
                 title: "Bu veri seti için önce şema tanımlayın (POST /api/datasets/{id}/schema).");
 
-        var table = new ParsedTable(columns, rows);
+        // HÜCRELER NORMALLEŞTİRİLİYOR — kod incelemesinde bulunan sessiz bozulmanın
+        // kapanışı.
+        //
+        // `Normalize` bugüne kadar yalnız MODELİN çıktısına uygulanıyordu (ayrıştırma
+        // anında). Onay ekranı ise hücreleri düzenlenebilir yapıyor ve kullanıcının
+        // yazdığı metin buraya ham geliyordu. Kolonun tip kararı bütün değerlere birden
+        // bakılarak verildiği için tek bir Türkçe yazım bütün kolonu tr-TR'ye çeviriyordu:
+        //
+        //   model "1993.32" ve "721.83" üretti (ikisi de doğru), kullanıcı üçüncü satırı
+        //   "1.234,56" diye düzeltti → kolonda virgül belirdi → kültür Türkçe seçildi →
+        //   dokunulmayan iki satır 199332 ve 72183 olarak yazıldı. Yüz kat sapma, hatasız.
+        //
+        // Bu tehlike DocumentExtraction'ın kendi yorumunda birebir tarif edilmişti; eksik
+        // olan, korumanın İKİNCİ giriş yoluna — kullanıcının klavyesine — uygulanmasıydı.
+        var table = new ParsedTable(columns, NormalizeCells(rows));
 
         // Kullanıcının EKLENMESİNİ istediği kolonlar şemaya burada katılıyor; tipleri
         // değerlerden algılanıyor (dosyadan içe aktarmayla aynı katman, adlar modelden
@@ -185,15 +199,45 @@ public class DocumentsController : ControllerBase
         // kalıcı olduğu için kullanıcı eski bir işi açıp tekrar gönderebilir — o zaman
         // aynı satırlar sete ikinci kez eklenir ve bu sessiz bir mükerrer kayıt olur.
         // Ekran doğruluğun bekçisi olamaz.
-        DocumentJob? job = null;
-        if (request.JobId is { } requestedJobId)
-        {
-            job = await _db.DocumentJobs.FirstOrDefaultAsync(j => j.Id == requestedJobId, ct);
+        // İş kimliği ZORUNLU. Eskiden opsiyoneldi ve denetim `if (request.JobId is ...)`
+        // içinde duruyordu: alan gönderilmediğinde mükerrer koruması tamamen atlanıyordu.
+        // Yani "ekran doğruluğun bekçisi olamaz" diyen denetimin TETİKLENMESİ ekranın
+        // doğru alanı göndermesine bağlıydı. Artık gönderilmezse istek reddediliyor.
+        if (request.JobId is not { } requestedJobId)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Kaydetmek için belge işi kimliği (jobId) gerekli.");
 
-            if (job?.ConfirmedAt is not null)
-                return Problem(statusCode: StatusCodes.Status409Conflict,
-                    title: "Bu belge zaten kaydedilmiş; satırlar ikinci kez eklenmez.");
-        }
+        // İş kaydı KULLANICIYA da daraltılıyor.
+        //
+        // Global query filter yalnız firmayı daraltıyordu; oysa belge işlerinin görünürlüğü
+        // bilinçli olarak KİŞİSEL (DocumentJobsController'ın dört ucu da UserId denetliyor
+        // ve gerekçesi orada yazılı). Bu uç o kuralın dışında kalmıştı ve bedeli ağırdı:
+        // aynı firmadaki B kullanıcısı A'nın jobId'siyle kaydettiğinde kendi satırları
+        // kendi setine yazılıyor, ama A'nın işine `Image = null` + `ConfirmedAt` damgası
+        // basılıyordu. A'nın belgesi geri getirilemez biçimde siliniyor, A ekranda "zaten
+        // kaydedilmiş" görüyordu — oysa onun belgesinden hiçbir satır yazılmamıştı.
+        //
+        // Ayrıca işin BU veri setine ait olduğu ve gerçekten tamamlandığı da denetleniyor;
+        // ikisi de eksikti.
+        if (!Guid.TryParse(User.FindFirstValue("sub"), out var currentUserId))
+            return Problem(statusCode: StatusCodes.Status401Unauthorized,
+                title: "Kullanıcı kimliği bulunamadı.");
+
+        var job = await _db.DocumentJobs
+            .FirstOrDefaultAsync(j => j.Id == requestedJobId && j.UserId == currentUserId, ct);
+
+        // Başkasının işi 403 değil 404 döner — kaydın varlığı sızdırılmıyor (kardeş ucun
+        // kuralıyla aynı).
+        if (job is null)
+            return Problem(statusCode: StatusCodes.Status404NotFound, title: "Belge işi bulunamadı.");
+
+        if (job.ConfirmedAt is not null)
+            return Problem(statusCode: StatusCodes.Status409Conflict,
+                title: "Bu belge zaten kaydedilmiş; satırlar ikinci kez eklenmez.");
+
+        if (job.DatasetId is { } jobDatasetId && jobDatasetId != datasetId)
+            return Problem(statusCode: StatusCodes.Status400BadRequest,
+                title: "Bu belge işi başka bir veri seti için oluşturulmuş.");
 
         // Doğrulama içe aktarmayla BİREBİR aynı katmandan geçiyor: belgeden gelen satır ile
         // CSV'den gelen satır aynı kurallara tabi, yoksa iki kapı iki farklı veri üretirdi.
@@ -240,11 +284,8 @@ public class DocumentsController : ControllerBase
         // Onaylanan belge artık gerekmiyor: görüntü işin ömrüne bağlı bir ara üründü,
         // kalıcı olan az önce yazılan satırlar. Onay damgası ile aynı işlemde yazılıyor —
         // ikisi ayrılırsa "kaydedildi ama işaretlenmedi" hâli mükerrer kayda kapı açardı.
-        if (job is not null)
-        {
-            job.Image = null;
-            job.ConfirmedAt = DateTime.UtcNow;
-        }
+        job.Image = null;
+        job.ConfirmedAt = DateTime.UtcNow;
 
         await _db.SaveChangesAsync(ct);
 
@@ -263,7 +304,11 @@ public class DocumentsController : ControllerBase
     /// Eşleme kuralı sunucuda kalıyor (Türkçe ad çözümlemesi, iyelik eki, tip uyumu);
     /// istemciye taşınsaydı aynı kural iki dilde iki kez yazılır ve zamanla ayrışırdı.
     /// </summary>
+    // Rol kısıtı kardeş uçlarıyla (extract/confirm/discover) aynı. Eksikti: uç salt okuma
+    // olduğu ve Viewer aynı şemayı GET /schema ile zaten görebildiği için sızıntı
+    // doğurmuyordu, ama onay ekranı bir veri GİRİŞİ akışı — niyet tutarlı olmalı.
     [HttpPost("datasets/{datasetId:guid}/document/align")]
+    [Authorize(Roles = "Editor,Admin")]
     public async Task<IActionResult> Align(Guid datasetId, DocumentAlignRequest request,
         CancellationToken ct)
     {
@@ -290,7 +335,12 @@ public class DocumentsController : ControllerBase
 
         // Tipler değerlerden algılanıyor: tip uyuşmazlığını (belgede metin, sette tarih)
         // ancak böyle işaretleyebiliriz. Satır gelmezse her kolon metin sayılır.
-        var discovered = _importService.DetectSchema(new ParsedTable(columns, rows));
+        //
+        // Hücreler Confirm ile AYNI normalleştirmeden geçiyor. İkisi ayrışsaydı ekran bir
+        // tip gösterip kaydetme başka bir tiple yazardı — kullanıcının gördüğü ile
+        // kaydedilenin ayrılması, bu akışta zaten bir kez bulunmuş olan kusur.
+        var discovered = _importService.DetectSchema(
+            new ParsedTable(columns, NormalizeCells(rows)));
 
         return Ok(DocumentAlignment.From(
             new DatasetSchema(datasetId, dataset.Name, schema), discovered));
@@ -373,6 +423,31 @@ public class DocumentsController : ControllerBase
         // 202: "aldım, henüz bitmedi". 200 dönmek, sonucun hazır olduğu izlenimini verirdi.
         return Accepted(DocumentJobMapper.ToResponse(job));
     }
+
+    /// <summary>Onay ekranından gelen hücreleri kanonik biçime çevirir.</summary>
+    ///
+    /// Kod incelemesinde bulunan sessiz bozulmanın kapanışı. <c>Normalize</c> bugüne kadar
+    /// yalnız MODELİN çıktısına, yani ayrıştırma anında uygulanıyordu. Onay ekranı ise
+    /// hücreleri düzenlenebilir yapıyor ve kullanıcının yazdığı metin sunucuya ham
+    /// geliyordu. Kolonun tip/kültür kararı BÜTÜN değerlere birden bakılarak verildiği
+    /// için tek bir Türkçe yazım kolonun tamamını çeviriyordu:
+    ///
+    ///   model "1993.32" ve "721.83" üretti (ikisi de doğru), kullanıcı üçüncü satırı
+    ///   "1.234,56" diye düzeltti → kolonda virgül belirdi → kültür tr-TR seçildi →
+    ///   dokunulmayan iki satır 199332 ve 72183 olarak yazıldı. Yüz kat sapma, tek bir
+    ///   hata mesajı bile çıkmadan.
+    ///
+    /// Tehlike <c>DocumentExtractionParser.Normalize</c>'ın kendi yorumunda birebir tarif
+    /// edilmişti; eksik olan, korumanın İKİNCİ giriş yoluna — kullanıcının klavyesine —
+    /// uygulanmasıydı. CSV'de bu yol yok, çünkü orada bir kolonu tek araç yazar.
+    ///
+    /// Normalize boş/null hücrede null döner; <c>ParsedTable</c> null taşımadığı için boş
+    /// metne indiriliyor — doğrulama katmanı boş hücreyi zaten "değer yok" sayıyor.
+    private static List<string[]> NormalizeCells(IReadOnlyList<string[]> rows) =>
+        rows.Select(r => r
+                .Select(cell => DocumentExtractionParser.Normalize(cell) ?? string.Empty)
+                .ToArray())
+            .ToList();
 
     /// <summary>
     /// Kullanıcının eklenmesini istediği kolonları doğrular ve tiplerini değerlerden algılar.

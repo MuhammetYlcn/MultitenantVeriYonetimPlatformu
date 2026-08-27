@@ -113,12 +113,24 @@ public class DatasetIndexService : IDatasetIndexService
             // Şema kontrolünü geçmiş ama satırda yine de çevrilemeyen bir değer var:
             // şemanın söylediğiyle satırda duranın ayrıştığı tek yer burası olabilir.
             // İsteği çökertmek yerine ne bulunduğu söyleniyor.
-            _logger.LogWarning(ex,
-                "Kolon indekslenemedi, veri tipe uymuyor: {Column}", column.Name);
+            //
+            // İSTİSNANIN KENDİSİ LOGA YAZILMIYOR. PostgreSQL'in bu hata sınıfındaki
+            // mesajı sorunlu değeri metin olarak taşır ("invalid input syntax for type
+            // numeric: ..."), yani `LogWarning(ex, ...)` müşteri hücresini sunucu
+            // günlüğüne düşürüyordu — izolasyon düzeneğinin dışında ikinci bir kopya.
+            // Olay Warning'de kalıyor, İÇERİK Debug'a iniyor: 26.08'de dört yerde
+            // uygulanan ayrımın aynısı (Logging:LogLevel:VeriYonetim = "Debug" geri getirir).
+            _logger.LogWarning(
+                "Kolon indekslenemedi, veri tipe uymuyor: {Column} ({SqlState})",
+                column.Name, ex.SqlState);
+            _logger.LogDebug(ex, "İndekslenemeyen kolonun veritabanı hatası: {Column}",
+                column.Name);
 
+            // Kullanıcıya dönen metinden de çıkarıldı: aynı ham değer 400 gövdesinde
+            // taşınıyordu. Kolon ve tip, sorunu düzeltmek için zaten yeterli.
             return new IndexResult(false,
                 $"'{column.Name}' kolonunda {column.Type} tipine çevrilemeyen bir değer " +
-                $"var: {ex.MessageText}", 0);
+                "var; kolonu düzeltip tekrar deneyin.", 0);
         }
 
         var seconds = (DateTime.UtcNow - started).TotalSeconds;

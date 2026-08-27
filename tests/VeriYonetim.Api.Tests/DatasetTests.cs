@@ -229,6 +229,48 @@ public class DatasetTests : IClassFixture<ApiFactory>, IAsyncLifetime
         return await _client.SendAsync(request);
     }
 
+    [Fact(DisplayName = "Şema: MÜKERRER başlık reddedilir " +
+                        "(geçseydi veri seti kalıcı 500'e düşerdi)")]
+    public async Task SetSchema_RejectsDuplicateHeaders()
+    {
+        // Kod incelemesinde bulunan kusurun testi. Başlıklar hiç denetlenmiyordu:
+        // DetectSchema onları birebir kolona çeviriyor, SetSchema olduğu gibi yazıyordu.
+        // Satır listeleme ve agregasyon uçları ise şemayı ToDictionaryAsync(c => c.Name)
+        // ile okuyor — mükerrer ad orada ArgumentException fırlatıyor.
+        //
+        // Sonuç: POST /schema 200, POST /rows 200, kullanıcı "yüklendi" görüyor; sonra o
+        // veri setini HER açışında 500 alıyor ve silmekten başka çıkışı olmuyor.
+        var t = await RegisterTenantAsync("sch-mukerrer", "a@schmuk.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+
+        var response = await UploadSchemaAsync(t.Token, id, "ad,tutar,tutar\nAli,1,2\n");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("tutar", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact(DisplayName = "Şema: ADSIZ başlık reddedilir (Excel'in sondaki boş sütunları)")]
+    public async Task SetSchema_RejectsEmptyHeaders()
+    {
+        var t = await RegisterTenantAsync("sch-adsiz", "a@schadsiz.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+
+        var response = await UploadSchemaAsync(t.Token, id, "ad,tutar,,\nAli,1,,\n");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact(DisplayName = "Şema: mükerrer başlık HARF BÜYÜKLÜĞÜYLE de gizlenemiyor")]
+    public async Task SetSchema_RejectsDuplicateHeaders_IgnoringCase()
+    {
+        var t = await RegisterTenantAsync("sch-harf", "a@schharf.com");
+        var id = (await CreateDatasetAsync(t.Token, "S")).Id;
+
+        var response = await UploadSchemaAsync(t.Token, id, "ad,Tutar,tutar\nAli,1,2\n");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     [Fact]
     public async Task SetSchema_SavesDetectedColumns()
     {

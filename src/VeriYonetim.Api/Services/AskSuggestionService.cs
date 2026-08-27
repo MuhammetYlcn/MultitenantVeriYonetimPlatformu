@@ -232,7 +232,12 @@ public class AskSuggestionService : IAskSuggestionService
         }
         catch (JsonException)
         {
-            _logger.LogWarning("Aday soru listesi ayrıştırılamadı: {Raw}", raw);
+            // Ham yanıt Debug'a indi: bu metin firmanın kataloğundan (veri seti ve kolon
+            // adları) türetiliyor, yani şema bilgisi taşıyor. Aynı dosyanın başka bir
+            // yerinde bu ayrım zaten doğru uygulanmıştı; burası atlanmış.
+            _logger.LogWarning("Aday soru listesi ayrıştırılamadı ({Length} karakter).",
+                raw?.Length ?? 0);
+            _logger.LogDebug("Ayrıştırılamayan aday soru yanıtı: {Raw}", raw);
             return Array.Empty<string>();
         }
     }

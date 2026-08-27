@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Jpeg;
@@ -43,6 +44,8 @@ public class DocumentColumnMappingTests : IClassFixture<ApiFactory>, IAsyncLifet
         DateTime CreatedAt, DateTime? UpdatedAt);
 
     private record ConfirmDto(Guid DatasetId, int SavedRows, int TotalRows);
+
+    private record InviteDto(string Token, string Email, string? Role);
 
     private record MappingDto(string Discovered, string Target, bool TypeConflict);
 
@@ -101,12 +104,47 @@ public class DocumentColumnMappingTests : IClassFixture<ApiFactory>, IAsyncLifet
         return dataset;
     }
 
-    private Task<HttpResponseMessage> ConfirmAsync(Guid datasetId, string token,
+    /// <summary>
+    /// Onay için kullanılacak bir belge işi kaydı açar.
+    ///
+    /// `jobId` artık ZORUNLU: eskiden opsiyoneldi ve gönderilmediğinde mükerrer kaydetme
+    /// denetimi tamamen atlanıyordu. Testler de o boşluktan geçiyordu — yani üretimde
+    /// olmayan bir yolu sınıyorlardı. Kayıt gerçek alanlarla açılıyor ki uç, işin
+    /// sahibini ve hedef setini gerçekten doğrulayabilsin.
+    /// </summary>
+    private async Task<Guid> NewJobAsync(Guid tenantId, Guid userId, Guid datasetId)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider
+            .GetRequiredService<VeriYonetim.Api.Data.AppDbContext>();
+
+        var job = new VeriYonetim.Api.Models.Entities.DocumentJob
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            UserId = userId,
+            DatasetId = datasetId,
+            Kind = VeriYonetim.Api.Models.Entities.DocumentJobKind.Extract,
+            Status = VeriYonetim.Api.Models.Entities.DocumentJobStatus.Succeeded,
+            CompletedAt = DateTime.UtcNow
+        };
+
+        db.DocumentJobs.Add(job);
+        await db.SaveChangesAsync();
+
+        return job.Id;
+    }
+
+    private async Task<HttpResponseMessage> ConfirmAsync(Guid datasetId, TokenResponse user,
         IEnumerable<string> columns, IEnumerable<string[]> rows,
-        IEnumerable<string>? newColumns = null) =>
-        _client.SendAsync(WithToken(HttpMethod.Post,
-            $"/api/datasets/{datasetId}/document/confirm", token,
-            new { columns, rows, newColumns }));
+        IEnumerable<string>? newColumns = null)
+    {
+        var jobId = await NewJobAsync(user.TenantId, user.UserId, datasetId);
+
+        return await _client.SendAsync(WithToken(HttpMethod.Post,
+            $"/api/datasets/{datasetId}/document/confirm", user.Token,
+            new { columns, rows, newColumns, jobId }));
+    }
 
     private Task<HttpResponseMessage> AlignAsync(Guid datasetId, string token,
         IEnumerable<string> columns, IEnumerable<string[]> rows) =>
@@ -134,7 +172,7 @@ public class DocumentColumnMappingTests : IClassFixture<ApiFactory>, IAsyncLifet
 
         // Modelin gerçekte ürettiği ada yakın bir örnek: "ürün / hizmet" şemadaki
         // "urun_adi" ile ad üzerinden tutmuyor.
-        var response = await ConfirmAsync(dataset.Id, admin.Token,
+        var response = await ConfirmAsync(dataset.Id, admin,
             new[] { "fatura_no", "ürün / hizmet", "tutar" },
             new[] { new[] { "F-1001", "Kalem", "15.00" } });
 
@@ -156,7 +194,7 @@ public class DocumentColumnMappingTests : IClassFixture<ApiFactory>, IAsyncLifet
             "fatura_no,urun_adi,tutar\nF-0,Kalem,1\n");
 
         // Onay ekranı başlıkları eşlemeye göre çevirip gönderiyor: "ürün / hizmet" → "urun_adi".
-        var response = await ConfirmAsync(dataset.Id, admin.Token,
+        var response = await ConfirmAsync(dataset.Id, admin,
             new[] { "fatura_no", "urun_adi", "tutar" },
             new[] { new[] { "F-1001", "Kalem", "15.00" } });
 
@@ -174,7 +212,7 @@ public class DocumentColumnMappingTests : IClassFixture<ApiFactory>, IAsyncLifet
         var dataset = await CreateDatasetAsync(_client, admin.Token, "Faturalar",
             "fatura_no,tutar\nF-0,1\n");
 
-        var response = await ConfirmAsync(dataset.Id, admin.Token,
+        var response = await ConfirmAsync(dataset.Id, admin,
             new[] { "fatura_no", "tutar", "tutar" },
             new[] { new[] { "F-1001", "15.00", "20.00" } });
 
@@ -191,7 +229,7 @@ public class DocumentColumnMappingTests : IClassFixture<ApiFactory>, IAsyncLifet
         var dataset = await CreateDatasetAsync(_client, admin.Token, "Faturalar",
             "fatura_no,tutar\nF-0,1\n");
 
-        var response = await ConfirmAsync(dataset.Id, admin.Token,
+        var response = await ConfirmAsync(dataset.Id, admin,
             new[] { "fatura_no", "tutar", "kdv_orani" },
             new[]
             {
@@ -226,7 +264,7 @@ public class DocumentColumnMappingTests : IClassFixture<ApiFactory>, IAsyncLifet
         var dataset = await CreateDatasetAsync(_client, admin.Token, "Faturalar",
             "fatura_no,tutar\nF-0,1\n");
 
-        var response = await ConfirmAsync(dataset.Id, admin.Token,
+        var response = await ConfirmAsync(dataset.Id, admin,
             new[] { "fatura_no", "tutar", "kdv_orani" },
             new[] { new[] { "F-1001", "sayı değil", "20" } },
             newColumns: new[] { "kdv_orani" });
@@ -248,7 +286,7 @@ public class DocumentColumnMappingTests : IClassFixture<ApiFactory>, IAsyncLifet
         var dataset = await CreateDatasetAsync(_client, admin.Token, "Faturalar",
             "fatura_no,tutar\nF-0,1\n");
 
-        var response = await ConfirmAsync(dataset.Id, admin.Token,
+        var response = await ConfirmAsync(dataset.Id, admin,
             new[] { "fatura_no", "tutar" },
             new[] { new[] { "F-1001", "15.00" } },
             newColumns: new[] { "tutar" });
@@ -264,12 +302,130 @@ public class DocumentColumnMappingTests : IClassFixture<ApiFactory>, IAsyncLifet
         var dataset = await CreateDatasetAsync(_client, admin.Token, "Faturalar",
             "fatura_no,tutar\nF-0,1\n");
 
-        var response = await ConfirmAsync(dataset.Id, admin.Token,
+        var response = await ConfirmAsync(dataset.Id, admin,
             new[] { "fatura_no", "tutar" },
             new[] { new[] { "F-1001", "15.00" } },
             newColumns: new[] { "aciklama" });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    // ---- onay: kullanıcının düzelttiği hücre ----
+
+    [Fact(DisplayName = "Onay: kullanıcının Türkçe yazdığı hücre, DOKUNULMAYAN satırları " +
+                        "bozmuyor (yüz kat sapma)")]
+    public async Task KullaniciDuzeltmesiKolonuBozmaz()
+    {
+        // Kod incelemesinde bulunan sessiz bozulmanın testi.
+        //
+        // `Normalize` yalnız MODELİN çıktısına uygulanıyordu; onay ekranında kullanıcının
+        // yazdığı hücre sunucuya ham geliyordu. Kolonun kültür kararı bütün değerlere
+        // birden bakılarak verildiği için tek bir Türkçe yazım kolonun tamamını tr-TR'ye
+        // çeviriyor ve nokta binlik ayıracı sanılıyordu:
+        //   "1993.32" → 199332, "721.83" → 72183. Hata yok, uyarı yok, yüz kat sapma.
+        var admin = await RegisterAsync(_client, "kultur", "a@kultur.com");
+        var dataset = await CreateDatasetAsync(_client, admin.Token, "Faturalar",
+            "fatura_no,tutar\nF-0,1\n");
+
+        var response = await ConfirmAsync(dataset.Id, admin,
+            new[] { "fatura_no", "tutar" },
+            new[]
+            {
+                new[] { "F-1", "1993.32" },   // model üretti, doğru
+                new[] { "F-2", "721.83" },    // model üretti, doğru
+                new[] { "F-3", "1.234,56" },  // KULLANICI düzeltti, Türkçe yazım
+            });
+
+        response.EnsureSuccessStatusCode();
+
+        var rows = await _client.SendAsync(
+            WithToken(HttpMethod.Get, $"/api/datasets/{dataset.Id}/rows", admin.Token));
+        var govde = await rows.Content.ReadAsStringAsync();
+
+        // Kullanıcının DOKUNMADIĞI iki satır olduğu gibi durmalı.
+        Assert.Contains("1993.32", govde);
+        Assert.Contains("721.83", govde);
+
+        // Ve şişmiş hâlleri hiçbir yerde bulunmamalı.
+        Assert.DoesNotContain("199332", govde);
+        Assert.DoesNotContain("72183", govde);
+
+        // Kullanıcının yazdığı Türkçe değer de doğru okunmuş olmalı.
+        Assert.Contains("1234.56", govde);
+    }
+
+    // ---- onay: iş sahipliği ----
+
+    [Fact(DisplayName = "Onay: BAŞKA kullanıcının belge işiyle kaydedilemiyor (404)")]
+    public async Task BaskasininIsiyleOnaylanamaz()
+    {
+        // Belge işlerinin görünürlüğü bilinçli olarak KİŞİSEL, ama onay ucu bu kuralın
+        // dışında kalmıştı: kayıt yalnız firmaya daraltılıyordu. Sonucu, aynı firmadaki
+        // B'nin A'nın işini "kaydedildi" damgalayıp GÖRÜNTÜSÜNÜ silmesiydi — A'nın
+        // belgesinden hiçbir satır yazılmadan.
+        var admin = await RegisterAsync(_client, "sahiplik", "admin@sahip.com");
+        var dataset = await CreateDatasetAsync(_client, admin.Token, "Faturalar",
+            "fatura_no,tutar\nF-0,1\n");
+
+        // Aynı firmada ikinci bir Editor.
+        var invite = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/users/invite",
+            admin.Token, new { email = "editor@sahip.com", role = "Editor" }));
+        invite.EnsureSuccessStatusCode();
+        var link = (await invite.Content.ReadFromJsonAsync<InviteDto>())!;
+
+        (await _client.PostAsJsonAsync($"/api/invitations/{link.Token}/accept",
+            new { password = "KendiSifrem123!" })).EnsureSuccessStatusCode();
+
+        var login = await _client.PostAsJsonAsync("/api/auth/login",
+            new { email = "editor@sahip.com", password = "KendiSifrem123!" });
+        var editor = (await login.Content.ReadFromJsonAsync<TokenResponse>())!;
+
+        // İş ADMIN'e ait; Editor onunla kaydetmeye çalışıyor.
+        var adminJob = await NewJobAsync(admin.TenantId, admin.UserId, dataset.Id);
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Post,
+            $"/api/datasets/{dataset.Id}/document/confirm", editor.Token,
+            new
+            {
+                columns = new[] { "fatura_no", "tutar" },
+                rows = new[] { new[] { "F-9", "50.00" } },
+                jobId = adminJob
+            }));
+
+        // Varlığı sızdırmadan reddediliyor.
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+
+        // Ve en önemlisi: ADMIN'in işi damgalanmamış olmalı.
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider
+            .GetRequiredService<VeriYonetim.Api.Data.AppDbContext>();
+        var job = await db.DocumentJobs.AsQueryable().IgnoreQueryFilters()
+            .FirstAsync(j => j.Id == adminJob);
+
+        Assert.Null(job.ConfirmedAt);
+    }
+
+    [Fact(DisplayName = "Onay: jobId göndermeden kaydedilemiyor " +
+                        "(mükerrer koruması atlanamaz)")]
+    public async Task JobIdOlmadanOnaylanamaz()
+    {
+        // Mükerrer denetimi `if (request.JobId is ...)` içindeydi: alan gönderilmediğinde
+        // denetim TAMAMEN atlanıyordu. Yani "ekran doğruluğun bekçisi olamaz" diyen
+        // korumanın tetiklenmesi ekranın doğru alanı göndermesine bağlıydı.
+        var admin = await RegisterAsync(_client, "jobsuz", "a@jobsuz.com");
+        var dataset = await CreateDatasetAsync(_client, admin.Token, "Faturalar",
+            "fatura_no,tutar\nF-0,1\n");
+
+        var response = await _client.SendAsync(WithToken(HttpMethod.Post,
+            $"/api/datasets/{dataset.Id}/document/confirm", admin.Token,
+            new
+            {
+                columns = new[] { "fatura_no", "tutar" },
+                rows = new[] { new[] { "F-9", "50.00" } }
+            }));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0, await RowCountAsync(dataset.Id, admin.Token));
     }
 
     // ---- hizalama ucu ----

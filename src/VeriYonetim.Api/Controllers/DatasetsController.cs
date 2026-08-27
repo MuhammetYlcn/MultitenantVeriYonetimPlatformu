@@ -120,6 +120,13 @@ public class DatasetsController : ControllerBase
             return Problem(statusCode: StatusCodes.Status400BadRequest,
                 title: "Dosya okunamadı; biçimi geçersiz olabilir.");
 
+        // Başlıklar şema yazılmadan ÖNCE denetleniyor. Mükerrer ya da adsız başlık
+        // buradan geçerse şema kaydı bozuk yazılır ve kusur çok sonra, satır listeleme
+        // ile agregasyon uçlarında 500 olarak ortaya çıkar — o noktada kullanıcının
+        // veri setini silmekten başka çıkışı kalmıyor.
+        if (_importService.ValidateHeaders(table) is { } headerError)
+            return Problem(statusCode: StatusCodes.Status400BadRequest, title: headerError);
+
         var detected = _importService.DetectSchema(table);
 
         // Yeniden yükleme senaryosu: eski kolonları sil, yenilerini sırayla ekle.

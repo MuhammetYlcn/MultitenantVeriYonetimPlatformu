@@ -112,7 +112,13 @@ public class SmtpEmailSender : IEmailSender
             if (MailboxAddress.TryParse(address, out var mailbox))
                 mime.To.Add(mailbox);
             else
-                _logger.LogWarning("Geçersiz e-posta adresi atlandı: {Address}", address);
+            {
+                // Adresin KENDİSİ Debug'a indi: bu bir müşteri kullanıcısının e-postası,
+                // yani kişisel veri. Warning'de olayın kaydı kalıyor — hangi firmada kaç
+                // adres atlandığı zaten sonraki satırdan izlenebiliyor.
+                _logger.LogWarning("Geçersiz e-posta adresi atlandı.");
+                _logger.LogDebug("Atlanan geçersiz adres: {Address}", address);
+            }
         }
 
         if (mime.To.Count == 0) return;

@@ -141,10 +141,14 @@ public class RelationDetector : IRelationDetector
             var kaynakAdi = match.FromDatasetId == datasetId ? dataset.Name : other.Name;
             var hedefAdi = match.ToDatasetId == datasetId ? dataset.Name : other.Name;
 
+            // Veri seti ve kolon ADLARI Debug'a indi: müşterinin şema bilgisi de müşteri
+            // verisidir (sektörü, hangi alanları tuttuğu oradan okunur). Information'da
+            // olayın ölçülebilir kısmı kalıyor — kaç ilişki, ne kapsamayla bulundu.
             _logger.LogInformation(
-                "İlişki bulundu: {From}.{FromCol} = {To}.{ToCol} (kapsama %{Coverage:F0})",
-                kaynakAdi, match.FromColumn, hedefAdi, match.ToColumn,
-                match.Coverage * 100);
+                "İlişki bulundu (kapsama %{Coverage:F0}).", match.Coverage * 100);
+            _logger.LogDebug(
+                "Bulunan ilişki: {From}.{FromCol} = {To}.{ToCol}",
+                kaynakAdi, match.FromColumn, hedefAdi, match.ToColumn);
 
             found++;
         }

@@ -190,7 +190,13 @@ public class AskController : ControllerBase
             // Sorunun METNİ ve plan Debug'a alındı (26.08 log gözden geçirmesi): ikisi de
             // müşteri verisi taşıyor ve ikisi de zaten AskMessages tablosunda, firmasına
             // bağlı olarak duruyor. Loga kalan, verinin kendisi değil olayın sebebi.
-            _logger.LogInformation("Geçersiz plan: {Message}", ex.Message);
+            // İstisna MESAJI da Debug'a indi. 26.08'de sorunun metni ve plan indirilmişti
+            // ama mesajın kendisi atlanmıştı: InvalidQueryException metinlerinin bir kısmı
+            // plandaki DEĞERİ içine gömüyor ("'Ahmet Yılmaz' geçerli bir sayı değil."),
+            // yani müşteri verisi Information'a buradan sızmaya devam ediyordu.
+            // Information'da yalnız olayın kendisi kalıyor.
+            _logger.LogInformation("Geçersiz plan reddedildi.");
+            _logger.LogDebug("Geçersiz plan sebebi: {Message}", ex.Message);
             _logger.LogDebug("Geçersiz planın kaynağı — soru: {Question}. Plan: {Plan}",
                 request.Question, planResult.RawJson);
 

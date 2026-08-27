@@ -236,11 +236,45 @@ public class DocumentUploadTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
     private record ConfirmDto(Guid DatasetId, int SavedRows, int TotalRows);
 
-    private Task<HttpResponseMessage> ConfirmAsync(Guid datasetId, string token,
-        IEnumerable<string> columns, IEnumerable<string[]> rows) =>
-        _client.SendAsync(WithToken(HttpMethod.Post,
-            $"/api/datasets/{datasetId}/document/confirm", token,
-            new { columns, rows }));
+    /// <summary>
+    /// Onay için gerçek bir belge işi kaydı açar.
+    ///
+    /// `jobId` artık ZORUNLU: eskiden opsiyoneldi ve gönderilmediğinde mükerrer kaydetme
+    /// denetimi tamamen atlanıyordu — yani testler üretimde bulunmayan bir yoldan
+    /// geçiyordu. Her onay kendi işini alıyor, çünkü bir iş yalnız BİR kez onaylanabilir.
+    /// </summary>
+    private async Task<Guid> NewJobAsync(Guid tenantId, Guid userId, Guid datasetId)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider
+            .GetRequiredService<VeriYonetim.Api.Data.AppDbContext>();
+
+        var job = new VeriYonetim.Api.Models.Entities.DocumentJob
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            UserId = userId,
+            DatasetId = datasetId,
+            Kind = VeriYonetim.Api.Models.Entities.DocumentJobKind.Extract,
+            Status = VeriYonetim.Api.Models.Entities.DocumentJobStatus.Succeeded,
+            CompletedAt = DateTime.UtcNow
+        };
+
+        db.DocumentJobs.Add(job);
+        await db.SaveChangesAsync();
+
+        return job.Id;
+    }
+
+    private async Task<HttpResponseMessage> ConfirmAsync(Guid datasetId, TokenResponse user,
+        IEnumerable<string> columns, IEnumerable<string[]> rows)
+    {
+        var jobId = await NewJobAsync(user.TenantId, user.UserId, datasetId);
+
+        return await _client.SendAsync(WithToken(HttpMethod.Post,
+            $"/api/datasets/{datasetId}/document/confirm", user.Token,
+            new { columns, rows, jobId }));
+    }
 
     [Fact(DisplayName = "Onay: satırlar EKLENİR (içe aktarma gibi eskilerin üstüne yazmaz)")]
     public async Task OnaySatirlariEkler()
@@ -249,7 +283,7 @@ public class DocumentUploadTests : IClassFixture<ApiFactory>, IAsyncLifetime
         var dataset = await CreateDatasetAsync(admin.Token, "Faturalar");
         await SetSchemaAsync(admin.Token, dataset.Id, "fatura_no,tutar\nF-0,1\n");
 
-        var ilk = await ConfirmAsync(dataset.Id, admin.Token,
+        var ilk = await ConfirmAsync(dataset.Id, admin,
             new[] { "fatura_no", "tutar" },
             new[] { new[] { "F-1001", "1500.75" }, new[] { "F-1001", "250.00" } });
 
@@ -258,7 +292,7 @@ public class DocumentUploadTests : IClassFixture<ApiFactory>, IAsyncLifetime
         Assert.Equal(2, sonuc.SavedRows);
 
         // İkinci belge birincisini SİLMEMELİ: her belge bir kayıttır.
-        var ikinci = await ConfirmAsync(dataset.Id, admin.Token,
+        var ikinci = await ConfirmAsync(dataset.Id, admin,
             new[] { "fatura_no", "tutar" },
             new[] { new[] { "F-1002", "90.00" } });
 
@@ -282,7 +316,7 @@ public class DocumentUploadTests : IClassFixture<ApiFactory>, IAsyncLifetime
         var dataset = await CreateDatasetAsync(admin.Token, "Faturalar");
         await SetSchemaAsync(admin.Token, dataset.Id, "fatura_no,tutar\nF-0,1\n");
 
-        var response = await ConfirmAsync(dataset.Id, admin.Token,
+        var response = await ConfirmAsync(dataset.Id, admin,
             new[] { "fatura_no", "tutar" },
             new[]
             {
@@ -309,7 +343,7 @@ public class DocumentUploadTests : IClassFixture<ApiFactory>, IAsyncLifetime
         var dataset = await CreateDatasetAsync(admin.Token, "Faturalar");
         await SetSchemaAsync(admin.Token, dataset.Id, "fatura_no,tutar\nF-0,1\n");
 
-        var response = await ConfirmAsync(dataset.Id, admin.Token,
+        var response = await ConfirmAsync(dataset.Id, admin,
             new[] { "fatura_no", "tutar" },
             new[] { new[] { "F-1001" } });
 
@@ -332,12 +366,12 @@ public class DocumentUploadTests : IClassFixture<ApiFactory>, IAsyncLifetime
             new { email = "izleyici@bonayy.com", password = "KendiSifrem123!" });
         var viewer = (await login.Content.ReadFromJsonAsync<TokenResponse>())!;
 
-        var izleyici = await ConfirmAsync(dataset.Id, viewer.Token,
+        var izleyici = await ConfirmAsync(dataset.Id, viewer,
             new[] { "fatura_no", "tutar" }, new[] { new[] { "F-1", "5" } });
         Assert.Equal(HttpStatusCode.Forbidden, izleyici.StatusCode);
 
         var baska = await RegisterAsync("belge-onay-b", "b@bonayy.com");
-        var caprazi = await ConfirmAsync(dataset.Id, baska.Token,
+        var caprazi = await ConfirmAsync(dataset.Id, baska,
             new[] { "fatura_no", "tutar" }, new[] { new[] { "F-1", "5" } });
         Assert.Equal(HttpStatusCode.NotFound, caprazi.StatusCode);
     }

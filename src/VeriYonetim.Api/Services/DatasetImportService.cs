@@ -147,6 +147,12 @@ public interface IDatasetImportService
     Task<ParsedTable> ParseExcelAsync(Stream stream);
     IReadOnlyList<ColumnSchema> DetectSchema(ParsedTable table);
     RowValidationResult ValidateRows(ParsedTable table, IReadOnlyList<ColumnSchema> schema);
+
+    /// <summary>
+    /// Başlık satırını şema yazmaya UYGUN mu diye denetler; uygunsa null, değilse
+    /// kullanıcıya gösterilecek sebebi döndürür.
+    /// </summary>
+    string? ValidateHeaders(ParsedTable table);
 }
 
 public class DatasetImportService : IDatasetImportService
@@ -228,6 +234,51 @@ public class DatasetImportService : IDatasetImportService
         XLDataType.Number => cell.GetDouble().ToString(CultureInfo.InvariantCulture),
         _ => cell.GetString(),
     };
+
+    /// <summary>
+    /// Başlıkların şema yazmaya uygunluğunu denetler. Uygunsa null döner.
+    /// </summary>
+    ///
+    /// Kod incelemesinde bulunan kusurun kapanışı: başlıklar hiç denetlenmiyordu.
+    /// `DetectSchema` onları birebir kolona çeviriyor, `SetSchema` olduğu gibi yazıyor ve
+    /// `DatasetColumn` üzerinde (DatasetId, Name) benzersizlik kısıtı da yok. Ama satır
+    /// listeleme ve agregasyon uçları şemayı `ToDictionaryAsync(c => c.Name, ...)` ile
+    /// okuyor — mükerrer ad orada ArgumentException fırlatıyor.
+    ///
+    /// Sonuç şuydu: "ad,tutar,tutar" başlıklı (ya da Excel'den "ad,tutar,," diye çıkmış)
+    /// bir dosyada POST /schema 200, POST /rows 200 dönüyor, kullanıcı "yüklendi" görüyor;
+    /// sonra o veri setini HER açışında 500 alıyor ve silmekten başka çıkışı olmuyor.
+    /// Aynı çağrı TenantCatalogLoader'da da var, yani doğal dilde sorgu kataloğu da o
+    /// firmada tümden çöküyordu.
+    ///
+    /// Sessizce tekilleştirmek yerine REDDEDİLİYOR: hangi kolonun hangisi olduğuna karar
+    /// vermek kullanıcının işi — "tutar_2" diye uydurulmuş bir ad, veriyi kaybetmenin
+    /// sessiz biçimi olurdu. Bu, akışın geri kalanındaki "eşleşmeyen kolon sessizce
+    /// atılmaz, kullanıcı karar verir" ilkesiyle aynı.
+    public string? ValidateHeaders(ParsedTable table)
+    {
+        var headers = table.Headers;
+
+        if (headers.Count == 0) return "Dosyada başlık satırı bulunamadı.";
+
+        if (headers.Any(string.IsNullOrWhiteSpace))
+            return "Başlık satırında adsız kolon var. Excel'den dışa aktarılan dosyalarda "
+                   + "bu, satırın sonundaki fazladan sütunlardan olabilir; başlıkları "
+                   + "tamamlayıp tekrar yükleyin.";
+
+        // Karşılaştırma harf duyarsız: PostgreSQL'de "Tutar" ve "tutar" ayrı anahtarlar
+        // olsa da kullanıcı için aynı kolon, ve ToDictionary çağrılarının bir kısmı
+        // OrdinalIgnoreCase kullanıyor. Daha DAR olan kural seçiliyor.
+        var duplicate = headers
+            .GroupBy(h => h.Trim(), StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(g => g.Count() > 1);
+
+        if (duplicate is not null)
+            return $"\"{duplicate.Key}\" başlığı birden fazla kolonda geçiyor. Her kolonun "
+                   + "adı benzersiz olmalı; başlıkları ayırt edip tekrar yükleyin.";
+
+        return null;
+    }
 
     public IReadOnlyList<ColumnSchema> DetectSchema(ParsedTable table)
     {
