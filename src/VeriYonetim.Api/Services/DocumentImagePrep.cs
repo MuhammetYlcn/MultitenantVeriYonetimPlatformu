@@ -28,6 +28,16 @@ public record StoredImage(byte[] Bytes, string ContentType);
 // hizalama denemesi, ölçümü geçersiz kılardı.
 public static class DocumentImagePrep
 {
+    /// <summary>
+    /// Kabul edilen en fazla piksel sayısı (50 MP).
+    ///
+    /// Dosya boyutu sınırı bunun yerini tutmuyor: sıkışma oranı yüksek bir görüntü 15 MB
+    /// sınırının altında kalıp çözüldüğünde gigabaytlarca bellek isteyebilir. 50 MP,
+    /// bugünün telefon kameralarının (~12-48 MP) üstünde, yani gerçek bir fatura
+    /// çekimini engellemiyor.
+    /// </summary>
+    private const long MaxPixels = 50_000_000;
+
     // Yazı tipi sırayla aranır. Arial Windows'ta, DejaVu/Liberation ise Linux
     // konteynerlerinde bulunur — dockerize edilirken imaja bir yazı tipi paketi
     // (ör. fonts-dejavu-core) KURULMALI, yoksa şerit sessizce devre dışı kalır.
@@ -95,6 +105,24 @@ public static class DocumentImagePrep
         string originalContentType, int maxLongEdge, CancellationToken ct = default)
     {
         using var input = new MemoryStream(original);
+
+        // PİKSEL SAYISI ÖNCE DENETLENİYOR, çözmeden.
+        //
+        // Yükleme sınırı DOSYA boyutundaydı (15 MB) ama çözülmüş görüntünün bellekteki
+        // boyu dosya boyuyla orantılı değil: yüksek oranda sıkışan 25.000×25.000'lik bir
+        // PNG 15 MB'ın altında kalır ve çözüldüğünde ~2,5 GB ayırmaya kalkar. Üstelik bu
+        // hazırlık İSTEK YOLUNDA, kuyruğa alınmadan önce yapılıyor — yani birkaç eşzamanlı
+        // istek API sürecinin belleğini tüketebilir ve düşen süreç, çalışan belge işlerini
+        // asılı bırakır. `Identify` yalnız başlığı okur, piksel ayırmaz.
+        var info = await Image.IdentifyAsync(input, ct);
+
+        if ((long)info.Width * info.Height > MaxPixels)
+            throw new InvalidQueryException(
+                $"Görüntü çok büyük ({info.Width}×{info.Height}). En fazla " +
+                $"{MaxPixels / 1_000_000} megapiksel kabul ediliyor; daha düşük " +
+                "çözünürlükte bir çekim yükleyin.");
+
+        input.Position = 0;
         using var image = await Image.LoadAsync(input, ct);
 
         // Büyütme yapılmaz: küçük bir fotoğrafı esnetmek dosyayı büyütür, okunabilirliği artırmaz.

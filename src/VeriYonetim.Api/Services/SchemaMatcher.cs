@@ -86,12 +86,38 @@ public static class SchemaMatcher
                 if (weight > 0) pairs.Add((s, t, weight));
             }
 
+        // BELİRSİZ KAYNAKLAR EŞLENMİYOR.
+        //
+        // `NameScore` üç değerli (1 / 0,7 / 0) ve 0,7 "biri diğerini kapsıyor" demek.
+        // Birden çok hedef kolon aynı 0,7'yi alabiliyordu ve berabereyi bozan kural
+        // `ThenBy(TargetIndex)` — yani ŞEMADAKİ SIRA kazanıyordu, anlamla ilgisi olmayan
+        // bir ölçüt. Somut sonucu: sette `odeme_tarihi` ve `fatura_tarihi` varken belgeden
+        // çıkan `tarih` kolonu, yalnızca daha küçük ordinal taşıdığı için `odeme_tarihi`ye
+        // yazılıyordu. İkisi de tarih, ikisi de makul göründüğü için kullanıcı onay
+        // ekranında fark etmezse o setteki her tarih bazlı toplam sessizce yanlış olurdu.
+        //
+        // Karar RelationDetector'daki ilkeyle aynı: EMİN DEĞİLSEK BAĞ KURMA. Belirsiz
+        // kolon eşlenmeden bırakılıyor, yani "fazla kolon" olarak onay ekranına düşüyor ve
+        // kullanıcı hangi alana gideceğini kendisi seçiyor. Tam eşleşme (1,0) bu kuraldan
+        // muaf: hedef adları benzersiz olduğu için orada beraberlik oluşamaz.
+        var ambiguous = pairs
+            .GroupBy(p => p.Source)
+            .Where(g =>
+            {
+                var best = g.Max(p => p.Weight);
+                return best < 1.0 && g.Count(p => p.Weight == best) > 1;
+            })
+            .Select(g => g.Key)
+            .ToHashSet();
+
         // Eşit puanlı çiftlerde sıra belgedeki kolon sırasına düşer: sonuç kararlı olsun.
         foreach (var pair in pairs
                      .OrderByDescending(p => p.Weight)
                      .ThenBy(p => p.Source)
                      .ThenBy(p => p.TargetIndex))
         {
+            if (ambiguous.Contains(pair.Source)) continue;
+
             var target = candidate.Columns[pair.TargetIndex];
             if (matchedSources.Contains(pair.Source) || matchedTargets.Contains(target.Name))
                 continue;

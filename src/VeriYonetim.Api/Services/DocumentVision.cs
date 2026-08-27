@@ -223,6 +223,29 @@ public class DocumentVisionService : IDocumentVisionService
 
         warnings.AddRange(parsed.Notes);
 
+        // KALEM TOPLAMI DENETİMİ — güvenlik ağı artık gerçekten bağlı.
+        //
+        // `ToplamUyusmazligi` yazılmış ve test edilmişti ama üretim yolunda HİÇ
+        // çağrılmıyordu: testleri geçiyor olması yanlış bir güven veriyordu. Yakaladığı
+        // şey modelin satır atlaması — 7 kalemlik bir faturada 6 satır okunduğunda
+        // `Suspect` false, not yok, uyarı yok; onay ekranı 6 satırı sorunsuz gösteriyor
+        // ve bir kalem sessizce eksik kaydediliyordu.
+        //
+        // Alan adları sabit değil (şema müşteriden geliyor), bu yüzden aday adlar
+        // aranıyor. Hiçbiri bulunamazsa denetim sessizce atlanıyor: uydurma bir eşleme
+        // yapıp yanlış uyarı üretmek, hiç uyarmamaktan kötü olurdu.
+        if (DocumentExtractionParser.ToplamUyusmazligi(
+                parsed, KalemTutarAlani(parsed), BelgeToplamAlanlari) is { } uyusmazlik)
+            warnings.Add(uyusmazlik);
+
+        // Kalem kolonuyla ad çakıştığı için tabloya alınmayan belge alanları bildiriliyor.
+        // Karar bilinçli, ama düşürmenin kendisi sessizdi: belge düzeyindeki genel toplam
+        // tabloya hiç girmiyor ve kullanıcı bunu hiçbir yerde göremiyordu.
+        foreach (var golgelenen in DocumentExtractionParser.GolgelenenAlanlar(parsed))
+            warnings.Add(
+                $"Belge düzeyindeki '{golgelenen}' alanı, aynı adlı kalem kolonuyla " +
+                "çakıştığı için tabloya alınmadı.");
+
         return new DocumentExtractionResult(
             parsed,
             DocumentExtractionParser.ToParsedTable(parsed),
@@ -234,6 +257,38 @@ public class DocumentVisionService : IDocumentVisionService
             attempt,
             (int)stopwatch.ElapsedMilliseconds,
             warnings);
+    }
+
+    /// <summary>
+    /// Belge düzeyinde "toplam" anlamına gelebilecek alan adları (kalem toplamı denetimi).
+    /// Sıra önemli: en dar anlamlı olan önce denenir.
+    /// </summary>
+    private static readonly string[] BelgeToplamAlanlari =
+        { "ara_toplam", "genel_toplam", "toplam_tutar", "toplam", "tutar" };
+
+    /// <summary>
+    /// Kalem satırındaki tutar kolonunu bulur. Şema müşteriden geldiği için ad sabit
+    /// değil; aday adlar harf duyarsız aranıyor, bulunamazsa boş dönüyor ve denetim
+    /// sessizce atlanıyor.
+    /// </summary>
+    private static string KalemTutarAlani(ExtractedDocument belge)
+    {
+        string[] adaylar = { "tutar", "toplam", "satir_tutari", "kalem_tutari" };
+
+        var kolonlar = belge.Items
+            .SelectMany(k => k.Keys)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var aday in adaylar)
+        {
+            var eslesen = kolonlar.FirstOrDefault(
+                k => string.Equals(k, aday, StringComparison.OrdinalIgnoreCase));
+
+            if (eslesen is not null) return eslesen;
+        }
+
+        return string.Empty;
     }
 
     // İstem bağlamın sonuna dayandıysa Ollama onu sessizce kırpmıştır.
@@ -330,7 +385,10 @@ public class OllamaVisionClient : IOllamaVisionClient
         VisionResponse? response;
         try
         {
-            var http = await _http.PostAsJsonAsync("/api/generate", request, ct);
+            // `using`: yanıt elden çıkarılmıyordu. Belge başına 1-3 çağrı yapılan ve her
+            // istek/yanıt çiftinde base64 görüntü taşıyan bir akışta, gövde akışlarının
+            // GC'ye bırakılması bellek baskısı ve bağlantı iadesinde gecikme demekti.
+            using var http = await _http.PostAsJsonAsync("/api/generate", request, ct);
 
             if (!http.IsSuccessStatusCode)
                 throw new QueryPlannerException(

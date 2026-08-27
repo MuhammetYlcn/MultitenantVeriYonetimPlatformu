@@ -217,12 +217,35 @@ builder.Services.AddScoped<IDocumentJobCleaner, DocumentJobCleaner>();
 // Testlerde sunucu açılmaz (Hangfire:RunServer = false): iş kuyruğa girer ama arka planda
 // kendiliğinden çalışmaz, testler çalıştırıcıyı elle tetikleyip sonucu deterministik
 // olarak sınar. Aksi hâlde testler zamanlamaya bağımlı hâle gelirdi.
+// İKİ AYRI SUNUCU, İKİ AYRI KUYRUK.
+//
+// Önceden tek sunucu vardı, tek işçiyle ve `Queues = { "documents", "default" }` ile —
+// ama hiçbir iş "documents" kuyruğuna ATANMIYORDU (bkz. IDocumentJobRunner.RunAsync,
+// artık [Queue] taşıyor). Yani belge işleri, bakım işleri ve izleyici taraması hepsi tek
+// bir "default" kuyruğunda sıraya giriyordu. Bedeli ölçülebilir bir güvence ihlaliydi:
+// 20 fatura yüklendiğinde işçi ~40 dakika belgelerle meşgul oluyor, bu sürede biriken
+// izleyici taramaları hiç koşmuyor ve "bir izleyici en fazla beş dakika geç çalışır"
+// sözü tutmuyordu.
+//
+// Belge sunucusu TEK işçide kalıyor ve bu bilinçli: darboğaz kuyruk değil, 8 GB'a sığan
+// tek model. İkinci belgeyi paralel işlemek toplam süreyi uzatır. Bakım sunucusu ayrı bir
+// işçi, çünkü yaptığı iş GPU değil birkaç SQL sorgusu.
 if (builder.Configuration.GetValue("Hangfire:RunServer", true))
+{
     builder.Services.AddHangfireServer(options =>
     {
         options.WorkerCount = builder.Configuration.GetValue("Hangfire:WorkerCount", 1);
-        options.Queues = new[] { "documents", "default" };
+        options.Queues = new[] { IDocumentJobRunner.DocumentQueue };
+        options.ServerName = $"{Environment.MachineName}:belge";
     });
+
+    builder.Services.AddHangfireServer(options =>
+    {
+        options.WorkerCount = 1;
+        options.Queues = new[] { "default" };
+        options.ServerName = $"{Environment.MachineName}:bakim";
+    });
+}
 
 // Canlı bildirim: iş bitince kullanıcıya haber verilir. Yoklama (polling) yerine seçildi,
 // çünkü izleyiciler adımı da aynı altyapıya binecek — kurulum bir kez ödeniyor.

@@ -219,6 +219,48 @@ public class SchemaMatcherTests
         Assert.Equal(new[] { "kdv" }, SchemaMatcher.Tokens("KDV"));
     }
 
+    [Fact(DisplayName = "Eşleme: EŞİT puanlı iki hedef varsa bağ KURULMAZ, " +
+                        "kolon kullanıcıya bırakılır")]
+    public void BelirsizEslemeKurulmaz()
+    {
+        // Kod incelemesinde bulunan kusur: NameScore üç değerli (1 / 0,7 / 0) ve 0,7
+        // "biri diğerini kapsıyor" demek. Birden çok hedef aynı 0,7'yi alabiliyordu ve
+        // berabereyi bozan kural ThenBy(TargetIndex) — yani ŞEMADAKİ SIRA kazanıyordu,
+        // anlamla ilgisi olmayan bir ölçüt.
+        //
+        // Somut sonucu: sette `odeme_tarihi` ve `fatura_tarihi` varken belgeden çıkan
+        // `tarih` kolonu, yalnızca daha küçük ordinal taşıdığı için `odeme_tarihi`ye
+        // yazılıyordu. İkisi de tarih, ikisi de makul göründüğü için kullanıcı onay
+        // ekranında fark etmezse o setteki her tarih bazlı toplam sessizce yanlış olurdu.
+        var hedef = Set("Faturalar",
+            ("odeme_tarihi", "date"), ("fatura_tarihi", "date"), ("tutar", "number"));
+
+        var belge = Belge(("tarih", "date"), ("tutar", "number"));
+
+        var match = SchemaMatcher.Score(belge, hedef);
+
+        // `tarih` eşlenmedi: hangi alana gideceğine kullanıcı karar verecek.
+        Assert.DoesNotContain(match.Mappings, m => m.Discovered == "tarih");
+        Assert.Contains("tarih", match.ExtraColumns);
+
+        // Belirsiz olmayan kolon normal biçimde eşleşmeye devam ediyor.
+        Assert.Contains(match.Mappings, m => m.Discovered == "tutar" && m.Target == "tutar");
+    }
+
+    [Fact(DisplayName = "Eşleme: TEK hedef kapsıyorsa bağ kurulmaya devam ediyor")]
+    public void TekAdayEslenir()
+    {
+        // Belirsizlik kuralı fazla geniş olmamalı: tek aday varsa 0,7'lik eşleme
+        // kurulmaya devam etmeli, yoksa kural işe yarar eşlemeleri de keserdi.
+        var hedef = Set("Faturalar", ("fatura_tarihi", "date"), ("tutar", "number"));
+        var belge = Belge(("tarih", "date"), ("tutar", "number"));
+
+        var match = SchemaMatcher.Score(belge, hedef);
+
+        Assert.Contains(match.Mappings,
+            m => m.Discovered == "tarih" && m.Target == "fatura_tarihi");
+    }
+
     [Fact(DisplayName = "Eşleme: belgeden hiç kolon çıkmadıysa aday aranmaz")]
     public void KolonsuzBelgeAdayAramaz() =>
         Assert.Empty(SchemaMatcher.Match(

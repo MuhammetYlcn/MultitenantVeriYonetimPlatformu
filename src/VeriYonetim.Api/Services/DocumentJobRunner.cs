@@ -19,8 +19,21 @@ public interface IDocumentJobRunner
     /// demektir. Üstelik en sık hata (model servisi kapalı, belge okunamadı) tekrarla
     /// düzelmez. Yeniden deneme kullanıcının kararı: ekranda hata mesajını görür ve
     /// isterse yeniden yükler.
+    ///
+    /// KUYRUK AYRIMI. Bu iş ayrı bir kuyrukta ("documents") çalışıyor; öncesinde
+    /// `Queues` ayarında adı geçiyordu ama HİÇBİR ŞEY o kuyruğa atanmıyordu — yani belge
+    /// işleri de, bakım ve izleyici taraması da tek bir "default" kuyruğunda sıraya
+    /// giriyordu. Tek işçiyle bunun bedeli ölçülebilir bir güvence ihlaliydi: kullanıcı
+    /// 20 fatura yüklediğinde işçi ~40 dakika boyunca belgelerle meşgul oluyor, bu sürede
+    /// biriken izleyici taramaları hiç koşmuyor ve "bir izleyici en fazla beş dakika geç
+    /// çalışır" sözü tutmuyordu. Kritik stok uyarısı yarım saatten fazla gecikebiliyordu.
+    [Queue(DocumentQueue)]
     [AutomaticRetry(Attempts = 0)]
     Task RunAsync(Guid jobId);
+
+    /// Belge işlerinin kuyruğu. Hangfire kuyruk adlarında yalnız küçük harf ve alt
+    /// çizgi kabul ediyor.
+    public const string DocumentQueue = "documents";
 }
 
 /// <summary>
@@ -33,9 +46,18 @@ public interface IDocumentJobRunner
 /// </summary>
 public class DocumentJobRunner : IDocumentJobRunner
 {
-    // Keşifte karşılaştırılacak en fazla set sayısı: eşleme ucuz ama sorgu sınırsız
-    // büyümemeli. En son dokunulanlar en olası adaylar.
-    private const int MaxCandidateDatasets = 25;
+    /// <summary>
+    /// Keşifte karşılaştırılacak en fazla set sayısı.
+    ///
+    /// 25'ten 200'e çıkarıldı. Eski sınır sessiz bir yanlış cevap üretiyordu: 40 veri seti
+    /// olan bir firmada aylardır dokunulmamış "Tedarikçi Faturaları" seti son 25'in
+    /// dışında kalıyor, ekran "uyan veri seti bulunamadı" deyip YENİ SET öneriyordu.
+    /// Kullanıcı öneriye güvenip yeni set açınca aynı veri iki sete bölünüyordu — ki bu,
+    /// SchemaMatcher'ın önlemek için yazıldığı durumun ta kendisi. Sıralama (en son
+    /// dokunulan önce) korunuyor, ama sınır artık gerçek bir firmanın ulaşamayacağı bir
+    /// yerde: eşleme bellek içi bir ad karşılaştırması, 200 set için de milisaniyeler.
+    /// </summary>
+    private const int MaxCandidateDatasets = 200;
 
     private static readonly CultureInfo TurkishCulture = new("tr-TR");
 

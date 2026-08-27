@@ -38,13 +38,17 @@ public class WatchesController : ControllerBase
     private readonly IWatchEvaluator _evaluator;
     private readonly IWatchRunner _runner;
 
+    private readonly ILogger<WatchesController> _logger;
+
     public WatchesController(AppDbContext db, ITenantContext tenantContext,
-        IWatchEvaluator evaluator, IWatchRunner runner)
+        IWatchEvaluator evaluator, IWatchRunner runner,
+        ILogger<WatchesController> logger)
     {
         _db = db;
         _tenantContext = tenantContext;
         _evaluator = evaluator;
         _runner = runner;
+        _logger = logger;
     }
 
     // GET /api/watches — firmanın izleyicileri. Kırık olanlar en üstte: dikkat edilmesi
@@ -139,6 +143,21 @@ public class WatchesController : ControllerBase
         {
             return Problem(statusCode: StatusCodes.Status400BadRequest,
                 title: $"Bu soru şu anda çalıştırılamıyor: {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            // Beklenmeyen hata da ANLAŞILIR bir cevaba çevriliyor.
+            //
+            // Yalnız InvalidQueryException yakalanıyordu; oysa aynı ölçüm bir izleyicinin
+            // İÇİNDE koştuğunda WatchRunner her istisnayı yakalayıp "İzleyici
+            // çalıştırılamadı." diyor. İki yol aynı işi yapıp farklı hata sözleşmesi
+            // sunuyordu: büyük bir sette sorgu zaman aşımına uğradığında (Npgsql
+            // istisnası) kullanıcı formda ham 500 metnini görüyordu, oysa aynı sorgu bir
+            // izleyici içinde koşsaydı anlaşılır bir mesaj alacaktı.
+            _logger.LogError(ex, "İzleyici kurulurken ölçüm düştü.");
+
+            return Problem(statusCode: StatusCodes.Status503ServiceUnavailable,
+                title: "Bu soru şu anda ölçülemedi; biraz sonra tekrar deneyin.");
         }
 
         var now = DateTime.UtcNow;

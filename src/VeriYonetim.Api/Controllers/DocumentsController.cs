@@ -42,6 +42,10 @@ public class DocumentsController : ControllerBase
     // yeniden tanımlayamaz: on beş kolonluk bir ek, eşlemenin yanlış gittiğinin işaretidir.
     private const int MaxNewColumns = 15;
 
+    /// Veritabanındaki `DatasetColumn.Name` sınırıyla AYNI (varchar(200)). Burada
+    /// denetlenmezse ihlal SaveChanges'te, sebebi görünmeyen bir 500 olarak çıkıyor.
+    private const int MaxColumnNameLength = 200;
+
     // Saklanan görüntünün uzun kenarı. Modele giden boydan bağımsız: bu değer insan gözüne
     // göre seçildi (fatura kalem satırları okunabilsin), o ise bağlam bütçesine göre.
     private const int StoredImageLongEdge = 2000;
@@ -50,14 +54,19 @@ public class DocumentsController : ControllerBase
     private readonly IDatasetImportService _importService;
     private readonly IBackgroundJobClient _jobs;
     private readonly ITenantContext _tenantContext;
+    private readonly IRelationDetector _relationDetector;
+    private readonly ILogger<DocumentsController> _logger;
 
     public DocumentsController(AppDbContext db, IDatasetImportService importService,
-        IBackgroundJobClient jobs, ITenantContext tenantContext)
+        IBackgroundJobClient jobs, ITenantContext tenantContext,
+        IRelationDetector relationDetector, ILogger<DocumentsController> logger)
     {
         _db = db;
         _importService = importService;
         _jobs = jobs;
         _tenantContext = tenantContext;
+        _relationDetector = relationDetector;
+        _logger = logger;
     }
 
     /// <summary>
@@ -289,6 +298,27 @@ public class DocumentsController : ControllerBase
 
         await _db.SaveChangesAsync(ct);
 
+        // İLİŞKİ ALGILAMA BURADA DA KOŞUYOR.
+        //
+        // `POST /rows` satırları yazdıktan sonra algılamayı çalıştırıyor, onay yolu
+        // çalıştırmıyordu. Profil önbelleği bayatlamıyordu (bu uç `UpdatedAt`i
+        // güncelliyor) ama yeni ilişki hiç KEŞFEDİLMİYORDU: kullanıcı belgeyle bir sete
+        // `musteri_kodu` kolonu eklese ve o kolon "Müşteriler" setine işaret etse bile
+        // hiçbir zaman profillenmiyor, doğal dilde sorgu iki seti birleştiremiyordu —
+        // oysa aynı veri CSV ile yüklenseydi bağ kendiliğinden bulunacaktı. İki kapıdan
+        // giren aynı veri iki farklı sonuç üretmemeli.
+        //
+        // Hata yutuluyor: algılama bir kolaylık, kaydetmeyi BOZMAMALI (içe aktarmadaki
+        // kararın aynısı).
+        try
+        {
+            await _relationDetector.DetectAsync(datasetId, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "İlişki algılama başarısız (kaydetme etkilenmedi).");
+        }
+
         return Ok(new DocumentConfirmResponse(datasetId, validation.ValidRows.Count,
             dataset.RowCount));
     }
@@ -486,6 +516,18 @@ public class DocumentsController : ControllerBase
             {
                 error = Problem(statusCode: StatusCodes.Status400BadRequest,
                     title: "Yeni kolon adı boş olamaz.");
+                return false;
+            }
+
+            // Uzunluk denetimi: kolon adı veritabanında varchar(200). Denetlenmediğinde
+            // uzun bir ad (ör. kutuya yapıştırılmış bir açıklama) doğrulamayı geçiyor ve
+            // SaveChanges "value too long for type character varying(200)" ile düşüyordu —
+            // kullanıcı 400 yerine hangi alanın sorunlu olduğunu söylemeyen bir 500
+            // alıyordu. Veri yazılmıyordu (SaveChanges atomik), ama sebep de görünmüyordu.
+            if (name.Length > MaxColumnNameLength)
+            {
+                error = Problem(statusCode: StatusCodes.Status400BadRequest,
+                    title: $"Kolon adı en fazla {MaxColumnNameLength} karakter olabilir.");
                 return false;
             }
 

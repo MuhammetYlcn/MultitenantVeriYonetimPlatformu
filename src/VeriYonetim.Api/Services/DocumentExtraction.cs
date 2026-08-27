@@ -102,6 +102,31 @@ public static class DocumentExtractionParser
     /// uydurulan tek satır toplamın kendisine eşit olduğu için bu testi geçer — onu
     /// yukarıdaki budama kuralı yakalıyor. Uyuşmazlıkta satır atılmıyor, kullanıcıya
     /// söyleniyor: hangi okumanın doğru olduğuna belgeye bakan kişi karar verir.
+    /// <summary>
+    /// Kalem kolonlarıyla ad çakıştığı için tabloya ALINMAYAN belge alanları.
+    ///
+    /// Gölgeleme kararı bilinçli (satırın kendi değeri, belgenin tekrarlanan değerinden
+    /// daha özeldir) ama düşürmenin kendisi hiçbir yerde bildirilmiyordu — diğer bütün
+    /// müdahalelerin (düzleştirme, kalem düşürme) not bıraktığı hâlde. Somut sonucu:
+    /// model belge düzeyinde "tutar" = genel toplam, kalemlerde de "tutar" = satır tutarı
+    /// döndürdüğünde genel toplam tabloya hiç girmiyor, ne uyarı bandında ne tabloda bir
+    /// iz kalıyordu. Kolon hiç var olmamış gibi görünüyor, kullanıcı sormuyor bile ve o
+    /// alan sette sonsuza dek boş kalıyordu.
+    /// </summary>
+    public static IReadOnlyList<string> GolgelenenAlanlar(ExtractedDocument belge)
+    {
+        if (belge.Items.Count == 0) return Array.Empty<string>();
+
+        var kalemKolonlari = belge.Items
+            .SelectMany(k => k.Keys)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return belge.Fields.Keys
+            .Where(a => kalemKolonlari.Contains(a, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+    }
+
     public static string? ToplamUyusmazligi(
         ExtractedDocument belge, string kalemTutarAlani, params string[] belgeToplamAlanlari)
     {
@@ -142,6 +167,9 @@ public static class DocumentExtractionParser
 
         // Kalem kolonları belge kolonlarını gölgeleyebilir (ikisinde de "tutar" olabilir).
         // Kalem kazanır: satırın kendi değeri, belgenin tekrarlanan değerinden daha özeldir.
+        //
+        // Bu düşürme SESSİZ DEĞİL: gölgelenen alanlar `GolgelenenAlanlar` ile ayrıca
+        // bildiriliyor ve kullanıcıya uyarı olarak gösteriliyor (bkz. DocumentVisionService).
         var kalemKolonlari = belge.Items
             .SelectMany(k => k.Keys)
             .Distinct(StringComparer.OrdinalIgnoreCase)
