@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Threading.RateLimiting;
@@ -127,6 +129,11 @@ builder.Services.Configure<LoginThrottleOptions>(
     builder.Configuration.GetSection("Security:Login"));
 builder.Services.AddScoped<ILoginThrottle, LoginThrottle>();
 builder.Services.AddScoped<ITokenService, TokenService>();
+
+// Elde duran token'ın hâlâ geçerli olup olmadığını denetler (askı, rol değişikliği,
+// silinen kullanıcı). Kısa ömürlü bellek içi snapshot kullanıyor — bkz. TokenGuard.
+builder.Services.AddMemoryCache();
+builder.Services.AddScoped<ITokenGuard, TokenGuard>();
 builder.Services.AddScoped<IAccountTokenService, AccountTokenService>();
 builder.Services.AddScoped<ITenantProvisioner, TenantProvisioner>();
 builder.Services.AddScoped<IDatasetImportService, DatasetImportService>();
@@ -305,6 +312,40 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                     context.Token = token;
 
                 return Task.CompletedTask;
+            },
+
+            // TOKEN, İMZASI GEÇERLİ OLSA BİLE HÂLÂ REDDEDİLEBİLİR.
+            //
+            // JWT kendi kendini doğrular: sunucu onu üretirken bildiklerini taşır ve
+            // süresi dolana kadar hiçbir şey onu geri alamaz. Bunun bedeli üçtü ve
+            // hepsi "en geç 15 dakika" olarak kayıtlıydı — askıya alınan firmanın
+            // kullanıcısı okumaya, Admin'den Viewer'a düşürülen kişi yazmaya, silinen
+            // kullanıcının token'ı çalışmaya devam ediyordu.
+            //
+            // Denetim burada, kimlik doğrulamasının içinde: yetkilendirmeye bırakılsaydı
+            // her politikaya ayrı ayrı eklenmesi gerekirdi ve biri unutulduğunda açık
+            // sessizce geri gelirdi. Yalnız TENANT token'ları için çalışıyor; platform
+            // token'ında tenant_id yok ve o kimlik ayrı bir dünyaya ait.
+            OnTokenValidated = async context =>
+            {
+                var principal = context.Principal;
+                if (principal is null) return;
+
+                var tenantClaim = principal.FindFirst(AuthPolicies.TenantIdClaim)?.Value;
+                var subClaim = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
+
+                if (!Guid.TryParse(tenantClaim, out var tenantId)
+                    || !Guid.TryParse(subClaim, out var userId))
+                    return;
+
+                var guard = context.HttpContext.RequestServices
+                    .GetRequiredService<ITokenGuard>();
+
+                var reason = await guard.RejectReasonAsync(
+                    userId, tenantId, principal.FindFirst(ClaimTypes.Role)?.Value,
+                    context.HttpContext.RequestAborted);
+
+                if (reason is not null) context.Fail(reason);
             }
         };
     });

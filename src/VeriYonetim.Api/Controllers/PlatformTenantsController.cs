@@ -28,9 +28,12 @@ public class PlatformTenantsController : ControllerBase
 {
     private readonly AppDbContext _db;
 
-    public PlatformTenantsController(AppDbContext db)
+    private readonly ITokenGuard _tokenGuard;
+
+    public PlatformTenantsController(AppDbContext db, ITokenGuard tokenGuard)
     {
         _db = db;
+        _tokenGuard = tokenGuard;
     }
 
     /// <summary>Tüm firmalar + metadata sayıları.</summary>
@@ -104,14 +107,24 @@ public class PlatformTenantsController : ControllerBase
             // Askıya almanın ANINDA etkili olması için o firmanın açık oturumlarının
             // refresh token'ları da iptal edilir. Aksi hâlde kullanıcı access token'ı
             // dolduğunda sessizce yenileyip çalışmaya devam edebilirdi.
-            // (Elde duran access token'lar en fazla 15 dk daha geçerli kalır — bu
-            //  bilinçli bir ödünç: her istekte firma durumunu sorgulamak yerine
-            //  kısa token ömrüne güveniyoruz. Rol değişikliğinde de aynı desen.)
             await _db.RefreshTokens
                 .IgnoreQueryFilters()
                 .Where(r => r.User.TenantId == id && r.RevokedAt == null)
                 .ExecuteUpdateAsync(s => s.SetProperty(r => r.RevokedAt, DateTime.UtcNow));
         }
+
+        // ELDE DURAN ACCESS TOKEN'LAR DA ANINDA GEÇERSİZ.
+        //
+        // Buradaki eski not "en fazla 15 dk daha geçerli kalır" diyordu ve bu bilinçli bir
+        // ödünçtü: her istekte firma durumunu sorgulamak yerine kısa token ömrüne
+        // güveniliyordu. Ödüncün bedeli şuydu — "askıya aldım" demek aslında "en geç 15
+        // dakika sonra kapanacak" demekti; o pencerede kullanıcı okumaya devam edebiliyordu.
+        //
+        // TokenGuard bunu her isteğe bir veritabanı sorgusu eklemeden kapatıyor: durum
+        // kısa ömürlü bir snapshot'ta tutuluyor ve BU SATIR o firmanın bütün
+        // kullanıcılarının snapshot'ını tek hamlede düşürüyor. Sürdürmede de çağrılıyor:
+        // askı kalkınca kullanıcı 30 saniye beklememeli.
+        _tokenGuard.InvalidateTenant(id);
 
         _db.PlatformAuditLogs.Add(new PlatformAuditLog
         {

@@ -21,12 +21,15 @@ public class UsersController : ControllerBase
     private readonly ITenantContext _tenantContext;
     private readonly IAccountTokenService _accountTokens;
 
+    private readonly ITokenGuard _tokenGuard;
+
     public UsersController(AppDbContext db, ITenantContext tenantContext,
-        IAccountTokenService accountTokens)
+        IAccountTokenService accountTokens, ITokenGuard tokenGuard)
     {
         _db = db;
         _tenantContext = tenantContext;
         _accountTokens = accountTokens;
+        _tokenGuard = tokenGuard;
     }
 
     // Dikkat: hiçbir Where/tenant kontrolü yok — izolasyonu global query filter sağlıyor.
@@ -100,8 +103,18 @@ public class UsersController : ControllerBase
         user.Role = request.Role;
         await _db.SaveChangesAsync();
 
-        // NOT: rol değişikliği mevcut access token'a yansımaz; kullanıcı bir sonraki
-        // token yenilemesinde (en geç 15 dk) yeni yetkilerle çalışır.
+        // ROL DEĞİŞİKLİĞİ ANINDA ETKİLİ.
+        //
+        // Buradaki eski not "mevcut access token'a yansımaz, en geç 15 dk" diyordu.
+        // Yetki YÜKSELTMENİN gecikmesi bir kolaylık sorunu, ama DÜŞÜRMENİN gecikmesi
+        // güvenlik sorunuydu: Admin'den Viewer'a indirilen kullanıcı, token'ındaki eski
+        // rol claim'iyle 15 dakika daha yazmaya devam edebiliyordu.
+        //
+        // TokenGuard token'daki rolü kayıtlı rolle karşılaştırıyor; bu satır snapshot'ı
+        // düşürerek karşılaştırmanın taze veriyle yapılmasını sağlıyor. Eşleşmeyince token
+        // reddediliyor ve kullanıcı yenilemeye zorlanıyor — yenileme yeni rolü taşır.
+        _tokenGuard.Invalidate(user.Id);
+
         return Ok(new { user.Id, user.Email, user.Role, user.TenantId });
     }
 }

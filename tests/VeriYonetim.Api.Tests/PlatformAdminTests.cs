@@ -295,6 +295,56 @@ public class PlatformAdminTests : IClassFixture<ApiFactory>, IAsyncLifetime
         _output.WriteLine("✓ Askıya alınan firma giriş yapamıyor; diğer firma normal çalışmaya devam ediyor.");
     }
 
+    [Fact(DisplayName = "Askı: ELDE DURAN access token da ANINDA reddedilir " +
+                        "(15 dakikalık pencere kapandı)")]
+    public async Task SuspendedTenant_ExistingAccessTokenIsRejectedImmediately()
+    {
+        // Kod incelemesinde bulunan ve en son kapatılan kalem.
+        //
+        // JWT kendi kendini doğrular: sunucu onu üretirken bildiklerini taşır ve süresi
+        // dolana kadar hiçbir şey onu geri alamaz. Askı giriş, oturum yenileme, davet ve
+        // izleyici taramasının dördünü de kapatıyordu ama ELDEKİ token çalışmaya devam
+        // ediyordu. Yani "askıya aldım" demek aslında "en geç 15 dakika sonra kapanacak"
+        // demekti; o pencerede kullanıcı bütün okuma uçlarını normal biçimde kullanıyordu.
+        var a = await RegisterTenantAsync("aski-token", "ali@askitoken.com");
+        var platform = await PlatformLoginAsync();
+
+        // Askıdan ÖNCE alınmış token gerçekten çalışıyor.
+        var once = await _client.SendAsync(
+            WithToken(HttpMethod.Get, "/api/datasets", a.Token));
+        Assert.Equal(HttpStatusCode.OK, once.StatusCode);
+
+        (await SetStatusAsync(platform.Token, a.TenantId, false)).EnsureSuccessStatusCode();
+
+        // AYNI token, askıdan hemen sonra: artık geçmiyor. Beklemek gerekmiyor.
+        var sonra = await _client.SendAsync(
+            WithToken(HttpMethod.Get, "/api/datasets", a.Token));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, sonra.StatusCode);
+        _output.WriteLine("✓ Askı elde duran access token'ı anında geçersiz kılıyor.");
+    }
+
+    [Fact(DisplayName = "Askı kalkınca aynı token yeniden çalışıyor (sürdürme de anında)")]
+    public async Task ResumedTenant_TokenWorksAgain()
+    {
+        // Snapshot düşürme sürdürmede de çağrılıyor: askı kalkan kullanıcı önbelleğin
+        // süresi dolsun diye 30 saniye beklememeli.
+        var a = await RegisterTenantAsync("aski-geri", "ali@askigeri.com");
+        var platform = await PlatformLoginAsync();
+
+        (await SetStatusAsync(platform.Token, a.TenantId, false)).EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await _client.SendAsync(WithToken(HttpMethod.Get, "/api/datasets", a.Token)))
+                .StatusCode);
+
+        (await SetStatusAsync(platform.Token, a.TenantId, true)).EnsureSuccessStatusCode();
+
+        var geri = await _client.SendAsync(
+            WithToken(HttpMethod.Get, "/api/datasets", a.Token));
+
+        Assert.Equal(HttpStatusCode.OK, geri.StatusCode);
+    }
+
     [Fact(DisplayName = "Askı: oturum YENİLEME de reddedilir (açık oturum sonsuza kadar yaşamaz)")]
     public async Task SuspendedTenant_CannotRefreshToken()
     {

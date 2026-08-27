@@ -272,6 +272,38 @@ public class IsolationTests : IClassFixture<ApiFactory>, IAsyncLifetime
         _output.WriteLine("✓ Kanıt: Admin, Viewer'ı Editor yaptı (200) ve yeni rol ayrı bir istekte de Editor olarak okundu.");
     }
 
+    [Fact(DisplayName = "Rol DÜŞÜRÜLÜNCE elde duran token ANINDA geçersiz " +
+                        "(15 dakikalık yazma penceresi kapandı)")]
+    public async Task RoleDowngrade_InvalidatesExistingTokenImmediately()
+    {
+        // Kod incelemesinde bulunan kusur. Rol claim'i token'ın İÇİNDE taşınıyor ve JWT
+        // geri alınamıyordu; yetki YÜKSELTMENİN gecikmesi bir kolaylık sorunu, ama
+        // DÜŞÜRMENİN gecikmesi güvenlik sorunuydu: Admin'den Viewer'a indirilen kullanıcı,
+        // token'ındaki eski rolle 15 dakika daha YAZMAYA devam edebiliyordu.
+        var admin = await RegisterTenantAsync("rol-anlik", "admin@rolanlik.com");
+        await InviteAndAcceptAsync(admin.Token, "editor@rolanlik.com", "Editor");
+
+        var editor = await LoginAsync("editor@rolanlik.com");
+
+        // Editor'ün token'ı gerçekten yazabiliyor.
+        var once = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/datasets",
+            editor.Token, new { name = "Once", description = (string?)null }));
+        Assert.Equal(HttpStatusCode.Created, once.StatusCode);
+
+        // Admin rolü Viewer'a düşürüyor.
+        (await _client.SendAsync(WithToken(HttpMethod.Put,
+            $"/api/users/{editor.UserId}/role", admin.Token, new { role = "Viewer" })))
+            .EnsureSuccessStatusCode();
+
+        // AYNI token, hemen sonra: artık geçmiyor. 403 değil 401 — token'ın kendisi
+        // reddediliyor, kullanıcı yenilemeye zorlanıyor ve yenileme yeni rolü taşıyor.
+        var sonra = await _client.SendAsync(WithToken(HttpMethod.Post, "/api/datasets",
+            editor.Token, new { name = "Sonra", description = (string?)null }));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, sonra.StatusCode);
+        _output.WriteLine("✓ Rol düşürme elde duran token'ı anında geçersiz kılıyor.");
+    }
+
     [Fact(DisplayName = "Son yöneticinin rolü düşürülemez (409 Conflict)")]
     public async Task LastAdmin_CannotBeDemoted()
     {
