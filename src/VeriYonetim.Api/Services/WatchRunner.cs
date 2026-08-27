@@ -155,7 +155,9 @@ public class WatchRunner : IWatchRunner
             if (value is not null && !manual)
             {
                 watch.PreviousValue = watch.LastValue;
+                watch.PreviousValueAt = watch.LastValueAt;
                 watch.LastValue = value;
+                watch.LastValueAt = now;
             }
 
             // Eşik durumu da yalnız zamanlanmış seride ilerler: elle bir sınama,

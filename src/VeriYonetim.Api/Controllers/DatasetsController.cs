@@ -196,10 +196,21 @@ public class DatasetsController : ControllerBase
     // bedelini de gösterdi. Sayısal filtre 1 milyon satırda 210 ms'den 0,7 ms'ye indi,
     // ama dört indeks içe aktarmayı 2,3 kat yavaşlattı. Her kolona indeks kurmak, hiç
     // aranmayan kolonlar için bu bedeli boşuna ödemek olurdu.
-    [HttpPost("{id:guid}/columns/{name}/index")]
+    //
+    // KOLON ADI SORGU DİZESİNDE, YOL PARÇASINDA DEĞİL.
+    //
+    // Ad CSV başlığından geldiği için serbest metin: `birim/adet` gibi bir başlık yol
+    // ayracıyla çakışıyordu. İstek `/columns/birim/adet/index` adresine gidiyor, hiçbir
+    // route eşleşmiyor ve kullanıcı veri setinin var olmadığını ima eden çıplak bir 404
+    // alıyordu — oysa hem set hem kolon duruyordu. Üstelik `GET /schema` o kolon için
+    // `canIndex: true` demeye devam ettiği için ekran, basıldığında hiçbir zaman
+    // çalışmayan bir düğme gösteriyordu.
+    [HttpPost("{id:guid}/columns/index")]
     [Authorize(Roles = "Editor,Admin")]
-    public async Task<IActionResult> CreateColumnIndex(Guid id, string name)
+    public async Task<IActionResult> CreateColumnIndex(Guid id, [FromQuery] string column)
     {
+        var name = column;
+
         var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
         if (dataset is null) return DatasetNotFound();
 
@@ -212,11 +223,14 @@ public class DatasetsController : ControllerBase
         return Ok(new { column = name, indexed = true, seconds = Math.Round(result.Seconds, 1) });
     }
 
-    // DELETE /api/datasets/{id}/columns/{name}/index — hızlandırmayı geri al.
-    [HttpDelete("{id:guid}/columns/{name}/index")]
+    // DELETE /api/datasets/{id}/columns/index?column=... — hızlandırmayı geri al.
+    // Kolon adı yol parçası DEĞİL (yukarıdaki gerekçe).
+    [HttpDelete("{id:guid}/columns/index")]
     [Authorize(Roles = "Editor,Admin")]
-    public async Task<IActionResult> DropColumnIndex(Guid id, string name)
+    public async Task<IActionResult> DropColumnIndex(Guid id, [FromQuery] string column)
     {
+        var name = column;
+
         var dataset = await _db.Datasets.FirstOrDefaultAsync(d => d.Id == id);
         if (dataset is null) return DatasetNotFound();
 

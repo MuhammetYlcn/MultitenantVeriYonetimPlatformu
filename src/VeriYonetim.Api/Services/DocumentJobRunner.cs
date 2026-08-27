@@ -91,12 +91,34 @@ public class DocumentJobRunner : IDocumentJobRunner
         // koyan yine bu sistemdir.
         var job = await _db.DocumentJobs
             .IgnoreQueryFilters()
+            .Include(j => j.Tenant)
             .FirstOrDefaultAsync(j => j.Id == jobId);
 
         if (job is null)
         {
             // Kullanıcı beklerken seti ya da hesabı silinmiş olabilir; iş de onunla gitmiştir.
             _logger.LogWarning("Belge işi bulunamadı, atlanıyor: {JobId}", jobId);
+            return;
+        }
+
+        // Askıya alınmış firmanın işi ÇALIŞMAZ.
+        //
+        // WatchScheduler bu denetimi yapıyordu, burası yapmıyordu — aynı sistemde iki
+        // farklı kural. Askıdan hemen önce kuyruğa girmiş bir belge askıdan sonra da
+        // çalışıp sonucunu yazıyordu: hesabı kapatılmış bir firma için model çalıştırmak
+        // ve o firmanın setine veri hazırlamak, askının anlamıyla çelişiyor.
+        //
+        // İş SİLİNMİYOR, başarısız işaretleniyor: askı geri alınabilir bir durum ve
+        // kullanıcı geri döndüğünde ne olduğunu görebilmeli.
+        if (!job.Tenant.IsActive)
+        {
+            _logger.LogInformation(
+                "Belge işi {JobId} askıya alınmış firmaya ait, çalıştırılmadı.", jobId);
+
+            job.Status = DocumentJobStatus.Failed;
+            job.Error = "Firma askıya alınmış; belge işlenmedi.";
+            job.CompletedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
             return;
         }
 

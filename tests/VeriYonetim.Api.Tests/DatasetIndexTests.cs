@@ -89,7 +89,7 @@ public class DatasetIndexTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
     private async Task<HttpResponseMessage> IndexAsync(string token, Guid id, string column) =>
         await _client.SendAsync(WithToken(
-            HttpMethod.Post, $"/api/datasets/{id}/columns/{column}/index", token));
+            HttpMethod.Post, $"/api/datasets/{id}/columns/index?column={Uri.EscapeDataString(column)}", token));
 
     private async Task<SchemaResponse> SchemaAsync(string token, Guid id)
     {
@@ -154,6 +154,37 @@ public class DatasetIndexTests : IClassFixture<ApiFactory>, IAsyncLifetime
         // Tarih kolonu için düğme hiç gösterilmemeli.
         Assert.False(schema.Columns.Single(c => c.Name == "tarih").CanIndex);
         Assert.True(schema.Columns.Single(c => c.Name == "ad").CanIndex);
+    }
+
+    [Fact(DisplayName = "İndeks: kolon adında '/' varsa uç yine çalışıyor " +
+                        "(ad yol parçası değil)")]
+    public async Task ColumnNameWithSlash_IsStillIndexable()
+    {
+        // Kod incelemesinde bulunan kusur: kolon adı YOL PARÇASI olarak taşınıyordu ve ad
+        // CSV başlığından geldiği için serbest metin. `birim/adet` gibi bir başlıkta istek
+        // /columns/birim/adet/index adresine gidiyor, hiçbir route eşleşmiyor ve kullanıcı
+        // veri setinin yokluğunu ima eden çıplak bir 404 alıyordu — oysa hem set hem kolon
+        // duruyordu. Üstelik GET /schema o kolon için canIndex: true demeye devam ettiği
+        // için ekran, basıldığında hiçbir zaman çalışmayan bir düğme gösteriyordu.
+        var register = await _client.PostAsJsonAsync("/api/auth/register",
+            new { tenantName = "ix-slash", email = "a@ixslash.com", password = "Sifre123!" });
+        register.EnsureSuccessStatusCode();
+        var t = (await register.Content.ReadFromJsonAsync<TokenResponse>())!;
+
+        var create = await _client.SendAsync(
+            WithToken(HttpMethod.Post, "/api/datasets", t.Token, new { name = "S" }));
+        create.EnsureSuccessStatusCode();
+        var id = (await create.Content.ReadFromJsonAsync<DatasetDto>())!.Id;
+
+        await UploadAsync(t.Token, $"/api/datasets/{id}/schema", "ad,birim/adet\nAli,10");
+        await UploadAsync(t.Token, $"/api/datasets/{id}/rows", "ad,birim/adet\nAli,10\nAyse,20");
+
+        var response = await IndexAsync(t.Token, id, "birim/adet");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var schema = await SchemaAsync(t.Token, id);
+        Assert.True(schema.Columns.Single(c => c.Name == "birim/adet").Indexed);
     }
 
     [Fact]
@@ -295,7 +326,7 @@ public class DatasetIndexTests : IClassFixture<ApiFactory>, IAsyncLifetime
         var indexName = await SingleIndexNameAsync();
 
         var response = await _client.SendAsync(WithToken(
-            HttpMethod.Delete, $"/api/datasets/{id}/columns/ad/index", token));
+            HttpMethod.Delete, $"/api/datasets/{id}/columns/index?column=ad", token));
 
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
         Assert.False((await SchemaAsync(token, id)).Columns.Single(c => c.Name == "ad").Indexed);
@@ -317,12 +348,12 @@ public class DatasetIndexTests : IClassFixture<ApiFactory>, IAsyncLifetime
         var indexName = await SingleIndexNameAsync();
 
         await _client.SendAsync(WithToken(
-            HttpMethod.Delete, $"/api/datasets/{idA}/columns/ad/index", tokenA));
+            HttpMethod.Delete, $"/api/datasets/{idA}/columns/index?column=ad", tokenA));
 
         Assert.True(await IndexExistsAsync(indexName));   // B hâlâ kullanıyor
 
         await _client.SendAsync(WithToken(
-            HttpMethod.Delete, $"/api/datasets/{idB}/columns/ad/index", tokenB));
+            HttpMethod.Delete, $"/api/datasets/{idB}/columns/index?column=ad", tokenB));
 
         Assert.False(await IndexExistsAsync(indexName));  // son kayıt da gitti
     }

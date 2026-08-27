@@ -320,8 +320,28 @@ public class LoginThrottle : ILoginThrottle
                         && (a.LockedUntil == null || a.LockedUntil < DateTime.UtcNow))
             .ExecuteDeleteAsync();
 
-        if (removed > 0)
-            _logger.LogInformation("Giriş sayacı bakımı: {Removed} satır düşürüldü.", removed);
+        // ÖLÜ REFRESH TOKEN'LAR da burada budanıyor.
+        //
+        // Tablo için hiçbir bakım yoktu: iptal edilmiş ve süresi dolmuş satırlar sonsuza
+        // kadar birikiyordu. Güvenlik açığı değil — o satırlar zaten kullanılamıyor — ama
+        // iki gerçek bedeli var: tablo ve benzersizlik indeksi durmadan büyüyor, ve olası
+        // bir veritabanı sızıntısında etki alanı gereğinden geniş oluyor (hiç kimsenin
+        // ihtiyaç duymadığı yıllar öncesine ait oturum özetleri).
+        //
+        // Yalnız ÖLÜ satırlar gidiyor: süresi dolmuş ya da iptal edilmiş. Geçerli bir
+        // token'a dokunulmuyor, yani kimsenin oturumu bakım yüzünden kapanmıyor. Aynı
+        // saklama süresi kullanılıyor: bu satırlar da bir olay kaydı ("bu oturum ne zaman
+        // iptal edildi") ve giriş denemeleriyle aynı ömrü hak ediyor.
+        var deadTokens = await _db.RefreshTokens
+            .IgnoreQueryFilters()
+            .Where(r => (r.RevokedAt != null && r.RevokedAt < cutoff)
+                        || r.ExpiresAt < cutoff)
+            .ExecuteDeleteAsync();
+
+        if (removed > 0 || deadTokens > 0)
+            _logger.LogInformation(
+                "Giriş bakımı: {Removed} sayaç satırı, {Tokens} ölü oturum jetonu düşürüldü.",
+                removed, deadTokens);
     }
 
     /// <summary>

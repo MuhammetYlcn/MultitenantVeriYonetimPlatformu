@@ -577,24 +577,31 @@ class ApiService {
     throw ApiException(_message(res));
   }
 
-  // POST /api/datasets/{id}/columns/{name}/index — kolonu aramada hızlandırır.
+  // POST /api/datasets/{id}/columns/index?column=... — kolonu aramada hızlandırır.
   //
   // Sunucuda ifade indeksi kurulur. Uzun sürebilir (indeks tablonun tamamı üzerinde
   // kurulur), bu yüzden çağıran taraf beklemeyi göstermeli.
+  //
+  // Kolon adı SORGU DİZESİNDE taşınıyor, yol parçasında değil: ad CSV başlığından
+  // geldiği için serbest metin ve `birim/adet` gibi bir başlık yol ayracıyla
+  // çakışıyordu. İstek hiçbir route'a düşmüyor, kullanıcı ise veri setinin yokluğunu
+  // ima eden çıplak bir 404 alıyordu — oysa hem set hem kolon duruyordu.
   static Future<void> indexColumn(String datasetId, String column) async {
     await _ensureFreshToken();
     final res = await http.post(
-      Uri.parse('$baseUrl/api/datasets/$datasetId/columns/${Uri.encodeComponent(column)}/index'),
+      Uri.parse('$baseUrl/api/datasets/$datasetId/columns/index')
+          .replace(queryParameters: {'column': column}),
       headers: _authHeader,
     );
     if (res.statusCode != 200) throw ApiException(_message(res));
   }
 
-  // DELETE /api/datasets/{id}/columns/{name}/index — hızlandırmayı geri alır.
+  // DELETE /api/datasets/{id}/columns/index?column=... — hızlandırmayı geri alır.
   static Future<void> dropColumnIndex(String datasetId, String column) async {
     await _ensureFreshToken();
     final res = await http.delete(
-      Uri.parse('$baseUrl/api/datasets/$datasetId/columns/${Uri.encodeComponent(column)}/index'),
+      Uri.parse('$baseUrl/api/datasets/$datasetId/columns/index')
+          .replace(queryParameters: {'column': column}),
       headers: _authHeader,
     );
     if (res.statusCode != 204) throw ApiException(_message(res));

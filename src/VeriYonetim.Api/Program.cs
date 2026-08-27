@@ -90,6 +90,21 @@ RequiredSetting(builder.Configuration, "Jwt:Issuer",
 RequiredSetting(builder.Configuration, "Jwt:Audience",
     "Token'ın kimin için üretildiğini bildirir ve doğrulamada eşleşmesi aranır.");
 
+// İŞ SAAT DİLİMİ — "bugün"ün nerede başladığını belirler.
+//
+// Sır değil ama açılışta kurulması şart: göreli dönemler ("bugun", "buAy") bu dilime göre
+// hesaplanıyor. Eskiden sunucunun YEREL saati kullanılıyordu ve geliştirme makinesi
+// Türkiye saatinde olduğu için kusur hiç görünmedi — teslim Linux konteynerinde yapılıyor
+// ve orada yerel saat UTC'dir. Türkiye UTC+3 olduğundan gece 00:00-03:00 arasındaki her
+// kayıt "bugün" yerine "dün"e sayılır, yani günlük toplamlar sürekli yanlış olur.
+var timeZoneId = builder.Configuration["App:TimeZone"] ?? "Europe/Istanbul";
+
+if (!RelativePeriod.Configure(timeZoneId))
+    throw new InvalidOperationException(
+        $"'App:TimeZone' tanınmadı: '{timeZoneId}'. Göreli dönemler ('bugün', 'bu ay') " +
+        "bu dilime göre hesaplandığı için sessizce UTC'ye düşmek yanlış güne bakmak " +
+        "demek olurdu. IANA adı bekleniyor (ör. Europe/Istanbul).");
+
 // Token ömürleri de açılışta denetleniyor. Sır değiller ama aynı kusuru taşıyorlardı:
 // TokenService ve AuthService bunları int.Parse(...!) ile okuyor, yani eksik ya da
 // sayı olmayan bir değer ilk giriş denemesinde patlardı.

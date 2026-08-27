@@ -95,6 +95,20 @@ public class WatchEmailNotifier : IWatchNotifier
             lines.Add("");
             lines.Add($"Ölçülen değer: {Number(run.Value)}");
             lines.Add($"Kural: {Describe(watch)}");
+
+            // DEĞİŞİM izleyicisinde karşılaştırmanın hangi ana göre yapıldığı YAZILIYOR.
+            //
+            // Metin sabitti ("önceki ölçüme göre") ama taban keyfî derecede eski
+            // olabiliyor: duraklatma, uzun kırık dönem, firma askısı. Cuma duraklatılıp
+            // Pazartesi sürdürülen saatlik bir izleyici, üç günün artışını "önceki
+            // ölçüme göre" diye sunuyordu — kullanıcı bir saatlik ani sıçrama sanıp
+            // olmayan bir olayı araştırıyordu.
+            if (watch.ConditionKind == WatchConditionKind.Change
+                && watch.PreviousValueAt is { } tabanZamani)
+            {
+                lines.Add($"Karşılaştırılan önceki ölçüm: {LocalTime(tabanZamani)} " +
+                          $"({Number(watch.PreviousValue)})");
+            }
         }
 
         lines.Add($"Ölçüm zamanı: {LocalTime(run.RanAt)}");
@@ -142,18 +156,17 @@ public class WatchEmailNotifier : IWatchNotifier
     /// </summary>
     private string LocalTime(DateTime utc)
     {
-        try
-        {
-            var zone = TimeZoneInfo.FindSystemTimeZoneById(_options.TimeZone);
-            var local = TimeZoneInfo.ConvertTimeFromUtc(
-                DateTime.SpecifyKind(utc, DateTimeKind.Utc), zone);
+        // Dilim ARTIK AYRI BİR AYARDAN OKUNMUYOR: uygulamanın iş saat dilimi ne ise o
+        // (bkz. RelativePeriod.BusinessZone, ayar `App:TimeZone`).
+        //
+        // İki ayarın ayrı olması sessiz bir tutarsızlık üretiyordu: dönem sınırları
+        // sunucunun yerel saatiyle (konteynerde UTC), e-postadaki damga ise Email:TimeZone
+        // ile hesaplanıyordu. Sonuç, "27.08 01:30" damgalı bir uyarıda 26.08'in rakamını
+        // görmekti — kullanıcının fark etmesinin hiçbir yolu yoktu. Tek kaynak olunca
+        // ikisi tanım gereği ayrışamıyor.
+        var local = TimeZoneInfo.ConvertTimeFromUtc(
+            DateTime.SpecifyKind(utc, DateTimeKind.Utc), RelativePeriod.BusinessZone);
 
-            return local.ToString("dd.MM.yyyy HH:mm", CultureInfo.GetCultureInfo("tr-TR"));
-        }
-        catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
-        {
-            _logger.LogWarning("Saat dilimi bulunamadı: {TimeZone}", _options.TimeZone);
-            return utc.ToString("dd.MM.yyyy HH:mm", CultureInfo.GetCultureInfo("tr-TR")) + " (UTC)";
-        }
+        return local.ToString("dd.MM.yyyy HH:mm", CultureInfo.GetCultureInfo("tr-TR"));
     }
 }

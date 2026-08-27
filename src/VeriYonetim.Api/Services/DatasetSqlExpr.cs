@@ -191,7 +191,10 @@ internal static class DatasetSqlExpr
                         $"'inPeriod' yalnızca tarih kolonlarında kullanılır: {f.Column}");
 
                 // Tarih aritmetiği modele değil sunucuya ait (bkz. RelativePeriod).
-                if (!RelativePeriod.TryResolve(f.Value, DateTime.Now, out var start, out var end))
+                // `DateTime.Now` DEĞİL: o sunucunun yerel saati ve teslim konteynerinde
+                // UTC'dir. "Bugün"ün nerede başladığını işin saat dilimi belirler.
+                if (!RelativePeriod.TryResolve(f.Value, RelativePeriod.Now,
+                        out var start, out var end))
                     throw new InvalidQueryException(
                         $"Bilinmeyen dönem: '{f.Value}'. ({string.Join(", ", RelativePeriod.Tokens)})");
 

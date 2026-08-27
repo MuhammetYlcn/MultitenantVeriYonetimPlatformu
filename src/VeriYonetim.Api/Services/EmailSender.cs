@@ -45,15 +45,11 @@ public class EmailOptions
     /// </summary>
     public int TimeoutSeconds { get; set; } = 10;
 
-    /// <summary>
-    /// E-postadaki saatlerin yazılacağı saat dilimi.
-    ///
-    /// Sunucu her şeyi UTC tutuyor ama kullanıcı e-postayı kendi saatine göre okur:
-    /// "14:03'te eşik aşıldı" yazan bir uyarının üç saat kaydırılmış olması, alarmın
-    /// anlattığı olayı yanlış bir ana bağlar. IANA kimliği kullanılıyor çünkü teslim
-    /// Linux konteynerinde yapılacak; .NET bu kimliği Windows'ta da tanıyor.
-    /// </summary>
-    public string TimeZone { get; set; } = "Europe/Istanbul";
+    // NOT: burada bir `TimeZone` ayarı vardı ve KALDIRILDI. E-postadaki saatler artık
+    // uygulamanın iş saat dilimini kullanıyor (`App:TimeZone`, bkz. RelativePeriod).
+    // İki ayrı ayar sessiz bir tutarsızlık üretiyordu: dönem sınırları sunucunun yerel
+    // saatiyle (teslim konteynerinde UTC), e-postadaki damga ise bu ayarla hesaplanıyordu.
+    // Sonuç, "27.08 01:30" damgalı bir uyarıda 26.08'in rakamını görmekti.
 
     /// Sunucu adresi verilmemişse özellik kapalıdır.
     public bool IsConfigured => !string.IsNullOrWhiteSpace(Host);

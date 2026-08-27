@@ -25,6 +25,52 @@ public static class RelativePeriod
         "buYil", "gecenYil"
     };
 
+    /// <summary>
+    /// İş saati dilimi — "bugün"ün nerede başlayıp bittiğini belirleyen şey.
+    ///
+    /// Varsayılan <see cref="TimeZoneInfo.Local"/> DEĞİL, çünkü kusur tam oradaydı:
+    /// dönem sınırları `DateTime.Now` ile, yani SUNUCUNUN yerel saatiyle hesaplanıyordu.
+    /// Geliştirme makinesi Türkiye saatinde olduğu için bu hiç görünmedi; teslim ise Linux
+    /// konteynerinde yapılıyor ve orada yerel saat UTC'dir. Türkiye UTC+3 olduğundan:
+    ///
+    ///   • Gece 01:30'da sorulan "bugünkü ciro" sunucu için hâlâ dün → DÜNÜN cirosu döner.
+    ///   • Daha sinsisi: her gün 00:00-03:00 arasında yapılan kayıtlar "bugün"e değil
+    ///     "dün"e sayılır. Yani günlük toplamlar yalnız gece yarısı değil, SÜREKLİ olarak
+    ///     o üç saatlik dilim kadar yanlış olur.
+    ///
+    /// Aynı kayma izleyicilerde de vardı ve orada daha da gizliydi: e-postadaki zaman
+    /// damgası ayarlanmış saat diliminden (<c>Email:TimeZone</c>) yazıldığı için kullanıcı
+    /// "27.08 01:30" damgalı bir uyarıda dünün rakamını görüyor ve tutarsızlığı fark
+    /// edemiyordu.
+    ///
+    /// Ayar <c>App:TimeZone</c> (IANA adı). Açılışta bir kez kuruluyor; bulunamazsa UTC'ye
+    /// düşülüyor ve uyarı veriliyor — sessizce yanlış güne düşmektense sebebi görünsün.
+    /// </summary>
+    public static TimeZoneInfo BusinessZone { get; private set; } = TimeZoneInfo.Utc;
+
+    /// <summary>Açılışta çağrılır. Bulunamayan dilimde false döner (çağıran uyarır).</summary>
+    public static bool Configure(string? ianaId)
+    {
+        if (string.IsNullOrWhiteSpace(ianaId)) return false;
+
+        try
+        {
+            BusinessZone = TimeZoneInfo.FindSystemTimeZoneById(ianaId);
+            return true;
+        }
+        catch (Exception e) when (e is TimeZoneNotFoundException or InvalidTimeZoneException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// İş saat dilimindeki "şu an". Dönem sınırları BUNUNLA hesaplanmalı —
+    /// <c>DateTime.Now</c> ile değil (bkz. <see cref="BusinessZone"/>).
+    /// </summary>
+    public static DateTime Now =>
+        TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, BusinessZone);
+
     // now dışarıdan verilir: saf fonksiyon olsun ve sabit bir "bugün" ile test edilebilsin.
     public static bool TryResolve(string? token, DateTime now, out DateTime start, out DateTime end)
     {

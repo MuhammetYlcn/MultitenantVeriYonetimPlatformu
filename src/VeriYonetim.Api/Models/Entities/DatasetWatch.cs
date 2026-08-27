@@ -114,6 +114,31 @@ public class DatasetWatch
     public decimal? PreviousValue { get; set; }
 
     /// <summary>
+    /// Tabanın (<see cref="LastValue"/>) ölçüldüğü an.
+    ///
+    /// Değişim yüzdesi iki ölçüm arasındaki SÜREYİ hiç dikkate almıyordu ve taban yalnız
+    /// başarılı koşularda güncellendiği için keyfî derecede eski olabiliyordu: duraklatma,
+    /// uzun kırık dönem, firma askısı, tarama birikmesi. Kullanıcıya gösterilen metin ise
+    /// sabitti — "önceki koşuya göre".
+    ///
+    /// Somut sonucu: Cuma 18:00'de duraklatılan saatlik bir izleyici Pazartesi 09:00'da
+    /// sürdürülüp %40 artış ölçtüğünde "önceki ölçüme göre %20 sınırının üzerine çıktı"
+    /// diyordu. O %40 bir saatin değil ÜÇ GÜNÜN artışıydı; kullanıcı ani bir sıçrama
+    /// sandığı için olmayan bir olayı araştırmaya giriyordu.
+    ///
+    /// Damga saklandığı için uyarı artık karşılaştırmanın hangi ana göre yapıldığını
+    /// söyleyebiliyor. Karşılaştırma ATLANMIYOR: eski bir tabanla ölçmek, hiç ölçmemekten
+    /// iyidir — yeter ki kullanıcı neye baktığını bilsin.
+    /// </summary>
+    public DateTime? LastValueAt { get; set; }
+
+    /// <summary>
+    /// Bir önceki tabanın ölçüldüğü an — koşu sırasında karşılaştırma bu ana göre yapılır
+    /// (<c>LastValue</c> o noktada henüz güncellenmemiş olur).
+    /// </summary>
+    public DateTime? PreviousValueAt { get; set; }
+
+    /// <summary>
     /// Peş peşe kaç koşunun ölçülemediği.
     ///
     /// Tek bir başarısız koşu izleyiciyi kırık saymıyor. Sayıyordu ve bedeli tek bir olay

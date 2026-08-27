@@ -102,6 +102,41 @@ public class RelativePeriodTests
         Assert.False(RelativePeriod.TryResolve(token, Now, out _, out _));
     }
 
+    [Fact(DisplayName = "Dönem sınırları İŞ saat dilimine göre, sunucunun yerel saatine göre DEĞİL")]
+    public void Now_UsesBusinessZone_NotServerLocalTime()
+    {
+        // Kod incelemesinde bulunan kusurun testi ve altı bulgu içinde teslime en yakın
+        // olanı. Göreli dönemler `DateTime.Now` ile hesaplanıyordu, yani SUNUCUNUN yerel
+        // saatiyle. Geliştirme makinesi Türkiye saatinde olduğu için hiç görünmedi;
+        // teslim Linux konteynerinde yapılıyor ve orada yerel saat UTC'dir.
+        //
+        // Türkiye UTC+3 olduğundan sonucu şuydu: gece 01:30'da sorulan "bugünkü ciro"
+        // sunucu için hâlâ dün → dünün cirosu dönüyor. Daha sinsisi, her gün 00:00-03:00
+        // arasındaki kayıtlar sürekli olarak "dün"e sayılıyor — yani günlük toplamlar
+        // yalnız gece yarısı değil, HER ZAMAN o üç saatlik dilim kadar yanlış.
+        Assert.True(RelativePeriod.Configure("Europe/Istanbul"));
+
+        var utc = DateTime.UtcNow;
+        var business = RelativePeriod.Now;
+
+        // Türkiye 2016'dan beri sabit UTC+3 (yaz saati uygulaması yok).
+        var fark = business - utc;
+
+        Assert.InRange(fark.TotalHours, 2.9, 3.1);
+    }
+
+    [Fact(DisplayName = "Tanınmayan saat dilimi SESSİZCE UTC'ye düşmüyor")]
+    public void Configure_RejectsUnknownZone()
+    {
+        // Sessizce UTC'ye düşmek, yanlış güne bakmanın görünmeyen hâli olurdu. Açılış
+        // denetimi bu false'u istisnaya çeviriyor (bkz. Program.cs).
+        Assert.False(RelativePeriod.Configure("Mars/Olympus_Mons"));
+
+        // Ve reddedilen değer yerleşmiyor: önceki dilim korunuyor.
+        RelativePeriod.Configure("Europe/Istanbul");
+        Assert.Equal("Europe/Istanbul", RelativePeriod.BusinessZone.Id);
+    }
+
     [Fact]
     public void Tokens_AreAllResolvable()
     {
