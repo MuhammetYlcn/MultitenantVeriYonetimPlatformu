@@ -129,6 +129,13 @@ public class DatasetsController : ControllerBase
 
         var detected = _importService.DetectSchema(table);
 
+        // Platformdaki kolon indeksleriyle tip çakışması ŞEMA YAZILMADAN önce yakalanıyor.
+        // Yakalanmazsa şema 200 dönüyor, sonra satır yazarken COPY veritabanı tarafında
+        // düşüyor ve kullanıcı sebebi olmayan bir 500 alıyor — o dosyayı bir daha hiç
+        // içeri alamıyor (bkz. DatasetIndexService.SchemaConflictAsync).
+        if (await _indexService.SchemaConflictAsync(detected) is { } indexConflict)
+            return Problem(statusCode: StatusCodes.Status409Conflict, title: indexConflict);
+
         // Yeniden yükleme senaryosu: eski kolonları sil, yenilerini sırayla ekle.
         var existing = await _db.DatasetColumns.Where(c => c.DatasetId == id).ToListAsync();
         _db.DatasetColumns.RemoveRange(existing);

@@ -47,9 +47,29 @@ public class DatasetRowWriter : IDatasetRowWriter
         // önce 1 milyon satırı okuması gerekiyordu.
         //
         // ExecuteDelete query filter'ı uygular; başka bir firmanın satırına dokunamaz.
+        //
+        // TEK İŞLEM GÜVENCESİ BURADA KURULUYOR.
+        //
+        // Arayüzün sözleşmesi "silme ve yazma tek işlemde olur" diyordu ama gerçekte
+        // işlemi açan tek yer ÇAĞIRANDI (DatasetsController). Sözleşme ile uygulama
+        // ayrıştığı için ileride bir arka plan işi bu metodu doğrudan çağırsa ve COPY
+        // ortasında bağlantı düşse, eski satırlar silinmiş yenileri yazılmamış olurdu:
+        // veri seti boşalır, üstelik Dataset.RowCount eski değerinde kalıp sayacı
+        // yalanlardı. Artık ortamda işlem yoksa metot kendi işlemini açıyor; varsa
+        // çağıranınkine katılıyor (iç içe işlem açmak hata olurdu).
+        var ownsTransaction = _db.Database.CurrentTransaction is null;
+
+        await using var transaction = ownsTransaction
+            ? await _db.Database.BeginTransactionAsync(ct)
+            : null;
+
         await _db.DatasetRows.Where(r => r.DatasetId == datasetId).ExecuteDeleteAsync(ct);
 
-        if (rows.Count == 0) return;
+        if (rows.Count == 0)
+        {
+            if (transaction is not null) await transaction.CommitAsync(ct);
+            return;
+        }
 
         var connection = (NpgsqlConnection)_db.Database.GetDbConnection();
 
@@ -77,5 +97,7 @@ public class DatasetRowWriter : IDatasetRowWriter
         {
             if (wasClosed) await connection.CloseAsync();
         }
+
+        if (transaction is not null) await transaction.CommitAsync(ct);
     }
 }

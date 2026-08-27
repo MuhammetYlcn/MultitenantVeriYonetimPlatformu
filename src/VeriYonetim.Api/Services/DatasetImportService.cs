@@ -389,8 +389,18 @@ public class DatasetImportService : IDatasetImportService
                     return true;
                 }
                 break;
-            default: // "text" — her string geçerli
-                value = cell;
+            default: // "text" — her string geçerli, ama NUL karakteri ayıklanıyor
+                // PostgreSQL'in `jsonb` türü ` ` kaçış dizisini REDDEDİYOR ve COPY
+                // tek bir kötü hücrede tamamen düşüyor — üstelik hata satır numarası
+                // taşımıyor, yani kullanıcı boş bir 500'den başka bir şey görmüyor.
+                // Doğrulama katmanı bu hücreyi hiç görmüyordu ("text her string'i geçer"),
+                // dolayısıyla `errors` listesinin de faydası olmuyordu.
+                //
+                // En sık kaynak: UTF-16 olarak kaydedilmiş bir .csv'nin UTF-8 sanılıp
+                // okunması — her karakterin arasına \0 giriyor. Değeri reddetmek yerine
+                // temizliyoruz: NUL taşıyan bir metin hücresinin bilgi değeri yok,
+                // görünür karakterler ise korunuyor.
+                value = cell.Contains('\0') ? cell.Replace("\0", string.Empty) : cell;
                 return true;
         }
 

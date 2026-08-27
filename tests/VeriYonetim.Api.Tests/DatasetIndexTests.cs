@@ -184,7 +184,54 @@ public class DatasetIndexTests : IClassFixture<ApiFactory>, IAsyncLifetime
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
-        Assert.Contains("farklı tipte", body);
+        Assert.Contains("farklı bir tiple", body);
+
+        // MESAJ DİĞER FİRMANIN TİPİNİ SÖYLEMEMELİ.
+        //
+        // Eskiden söylüyordu ("… farklı tipte (text) kullanılıyor") ve bu, platformdaki
+        // bütün firmaların şema metadata'sına karşı bir sorgulama aracıydı: A kendi
+        // setine tek kolonluk bir şema yükleyip indeks isteyerek "bu adda kolon var mı,
+        // tipi ne" sorusunu cevaplatabiliyordu. Kolon adını değiştirerek (vergi_no,
+        // tckn, maas…) bütün ad uzayı taranabilirdi. Kullanıcının yapacağı iş kolonu
+        // yeniden adlandırmak olduğu için tipi bilmesi zaten gerekmiyor.
+        Assert.DoesNotContain("text", body);
+    }
+
+    [Fact(DisplayName = "TERS YÖN: indeks dururken çakışan şema REDDEDİLİR " +
+                        "(yoksa satır yazma boş bir 500'e düşerdi)")]
+    public async Task ConflictingSchema_IsRefusedWhileIndexExists()
+    {
+        // Kod incelemesinde bulunan kusur: çakışma denetimi YALNIZCA indeks kurulurken
+        // yapılıyordu. Ters yön — indeks zaten dururken aynı adı farklı tiple taşıyan
+        // yeni bir şema kaydedilmesi — hiç denetlenmiyordu.
+        //
+        // Sonucu şuydu: A firması `tutar`ı sayı olarak indeksliyor (indeks TABLO GENELİ).
+        // B firması `tutar` sütununda "1.500,50 TL" yazan bir CSV yüklüyor, şema 200
+        // dönüyor. Satırları yazarken COPY, PostgreSQL indeks ifadesini değerlendirdiği
+        // için düşüyor ve B BOŞ BİR 500 alıyor — o dosyayı bir daha asla içeri alamıyor,
+        // sebebini göremiyor, A'nın indeksine de erişemiyor.
+        var (tokenA, idA) = await SeededAsync("ix-ters-a", "a@ixtersa.com");
+
+        // A firması `tutar`ı SAYI olarak indeksliyor.
+        (await IndexAsync(tokenA, idA, "tutar")).EnsureSuccessStatusCode();
+
+        // B firması aynı adı METİN taşıyan bir dosyayla geliyor.
+        var register = await _client.PostAsJsonAsync("/api/auth/register",
+            new { tenantName = "ix-ters-b", email = "b@ixtersb.com", password = "Sifre123!" });
+        register.EnsureSuccessStatusCode();
+        var b = (await register.Content.ReadFromJsonAsync<TokenResponse>())!;
+
+        var create = await _client.SendAsync(
+            WithToken(HttpMethod.Post, "/api/datasets", b.Token, new { name = "TR" }));
+        create.EnsureSuccessStatusCode();
+        var idB = (await create.Content.ReadFromJsonAsync<DatasetDto>())!.Id;
+
+        var schema = await UploadAsync(b.Token, $"/api/datasets/{idB}/schema",
+            "ad,tutar\nAli,1.500 TL");
+
+        // Şema adımında, SEBEBİYLE reddediliyor — satır yazmada boş bir 500 olarak değil.
+        Assert.Equal(HttpStatusCode.Conflict, schema.StatusCode);
+        Assert.Contains("tutar", await schema.Content.ReadAsStringAsync());
     }
 
     [Fact]
