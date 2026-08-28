@@ -472,7 +472,24 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
+// HTTPS'e yönlendirme YALNIZ GELİŞTİRMEDE.
+//
+// Dockerize sırasında ortaya çıktı: konteynerde bu ara katman hiçbir iş yapmıyor ama her
+// açılışta "Failed to determine the https port for redirect" uyarısı basıyordu. Sebebi,
+// konteynerin yalnız HTTP dinlemesi — yönlendirilecek bir HTTPS portu yok, o yüzden
+// istekler olduğu gibi geçiyordu.
+//
+// Uyarıyı susturmak için değil, YANLIŞ ÇALIŞMA İHTİMALİ İÇİN kaldırıldı. Teslim
+// kurulumunda tarayıcıyla konuşan taraf API değil, önündeki nginx: şifreleme oraya
+// konur (sertifika, 443, yenileme hep o katmanın işi), API'ye gelen istek zaten kapalı
+// bir ağın içinde ve HTTP'dir. Bu kurulumda bir gün ortama HTTPS portu tanımlansa,
+// buradaki ara katman nginx'ten gelen her HTTP isteğine 307 yönlendirme dönmeye
+// başlardı — paneller çalışmaz hâle gelirdi ve sebebi çok geç anlaşılırdı.
+//
+// Geliştirmede duruyor: orada `https` profili gerçek bir HTTPS portu açıyor
+// (launchSettings), yani yönlendirmenin bir karşılığı var.
+if (app.Environment.IsDevelopment())
+    app.UseHttpsRedirection();
 
 // Hız sınırı kimlik doğrulamasından ÖNCE: korunan uç zaten kimlik doğrulamasız, ve
 // sınırın amacı isteği mümkün olan en erken noktada elemek.
@@ -508,18 +525,68 @@ app.MapHub<JobsHub>("/hubs/jobs", options => options.CloseOnAuthenticationExpira
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    await db.Database.MigrateAsync(); // taze DB'de (test dahil) tabloları kurar
 
-    var provisioner = scope.ServiceProvider.GetRequiredService<ITenantProvisioner>();
-    var count = await provisioner.SyncAllSchemasAsync();
-    app.Logger.LogInformation("Tenant şema senkronizasyonu: {Count} tenant kontrol edildi.", count);
+    // ---------------------------------------------------------------------------
+    // AÇILIŞ KİLİDİ — aynı anda kalkan kopyaların birbirini ezmemesi için.
+    //
+    // Bu bloktaki üç iş de veritabanının ŞEKLİNİ değiştiriyor: migration tablo kuruyor,
+    // şema senkronizasyonu eksik tenant şemalarını tamamlıyor, tohumlama platform
+    // yöneticisini yazıyor. Tek kopya çalışırken sorun yoktu; teslim konteynerde
+    // yapıldığı için artık "aynı anda iki kopya" olağan bir durum: `docker compose up
+    // --scale api=2`, bir güncellemede eski ve yeni kabın bir an birlikte ayakta olması,
+    // ya da kabın çökmesinden sonraki yeniden başlatma.
+    //
+    // O durumda EF'in kendi davranışı yeterli değil: iki kopya da uygulanmamış göçü
+    // görür, ikisi de CREATE TABLE gönderir, biri "already exists" hatasıyla düşer.
+    // Uygulama açılışta düştüğü için sonuç yalnız gürültü değil, ayağa kalkmayan bir kap.
+    //
+    // pg_advisory_lock: PostgreSQL'in, hiçbir tabloya bağlı olmayan, adı yalnız bir
+    // sayıdan ibaret olan kilidi. İkinci kopya aynı sayıyı istediğinde BEKLER; birinci
+    // kopya işini bitirip kilidi bırakınca devam eder ve göçlerin çoktan uygulandığını
+    // görüp hiçbir şey yapmaz. Beklemenin süresiz olması burada doğru davranış: beklenen
+    // şey tam da yapılmasını istediğimiz iş, yarıda kesmenin bir faydası olmaz.
+    //
+    // Kilit OTURUM düzeyinde, yani onu alan veritabanı BAĞLANTISINA bağlı. Bu yüzden
+    // bağlantı elle açılıp blok boyunca açık tutuluyor: EF her sorgudan sonra bağlantıyı
+    // havuza geri verseydi kilit daha migration başlamadan düşerdi.
+    // ---------------------------------------------------------------------------
 
-    // Platform yöneticisini ayarlardan tohumla. Bilinçli olarak PUBLIC bir kayıt ucu
-    // yok: platform kimliğini yalnızca sunucu ayarına (appsettings.Development.json ya
-    // da PlatformAdmin__Email / PlatformAdmin__Password ortam değişkenleri) erişebilen
-    // kişi belirler.
-    var platformAuth = scope.ServiceProvider.GetRequiredService<IPlatformAuthService>();
-    await platformAuth.EnsureSeedAdminAsync();
+    // Sayı keyfî; tek şartı bütün kopyalarda AYNI olması. Projeye özgü olsun diye
+    // seçildi — başka bir uygulama aynı veritabanında kendi kilidini kullanabilsin.
+    const long StartupLockKey = 20260828;
+
+    var connection = db.Database.GetDbConnection();
+    await connection.OpenAsync();
+
+    try
+    {
+        await db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_lock({0})", StartupLockKey);
+
+        await db.Database.MigrateAsync(); // taze DB'de (test dahil) tabloları kurar
+
+        var provisioner = scope.ServiceProvider.GetRequiredService<ITenantProvisioner>();
+        var count = await provisioner.SyncAllSchemasAsync();
+        app.Logger.LogInformation("Tenant şema senkronizasyonu: {Count} tenant kontrol edildi.", count);
+
+        // Platform yöneticisini ayarlardan tohumla. Bilinçli olarak PUBLIC bir kayıt ucu
+        // yok: platform kimliğini yalnızca sunucu ayarına (appsettings.Development.json ya
+        // da PlatformAdmin__Email / PlatformAdmin__Password ortam değişkenleri) erişebilen
+        // kişi belirler.
+        var platformAuth = scope.ServiceProvider.GetRequiredService<IPlatformAuthService>();
+        await platformAuth.EnsureSeedAdminAsync();
+    }
+    finally
+    {
+        // Kilit AÇIKÇA BIRAKILMIYOR, bağlantı kapatılıyor — oturum kilidi olduğu için
+        // PostgreSQL onu bağlantı kapanırken kendiliğinden düşürür ve sonuç aynı.
+        //
+        // `pg_advisory_unlock` çağrısı bilinçli olarak yazılmadı: bu blok göç hata
+        // verdiğinde de çalışıyor ve o anda veritabanı bağlantısı çoktan bozulmuş
+        // olabilir. Bu durumda unlock çağrısı KENDİ hatasını fırlatır, asıl hatanın
+        // (göçün neden düştüğü) üstünü örterdi — yani hata ayıklamayı zorlaştırmaktan
+        // başka bir işe yaramayan bir satır olurdu.
+        await connection.CloseAsync();
+    }
 }
 
 // Belge işlerinin bakımı: asılı kalmış işleri kapatır, onaylanmamış görüntüleri ve eski

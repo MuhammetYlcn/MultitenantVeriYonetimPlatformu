@@ -20,3 +20,7 @@ class _MemoryStore implements KeyValueStore {
 final KeyValueStore _session = _MemoryStore();
 
 KeyValueStore get sessionStore => _session;
+
+/// VM'de `window` yok, yani ayarlanmış bir adres de yok — çağıran taraf geliştirme
+/// varsayılanına düşer.
+String? get configuredApiBaseUrl => null;

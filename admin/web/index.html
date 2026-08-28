@@ -34,6 +34,12 @@
 </head>
 <body>
   <!--
+    Kurulumun sunucu adresi. `async` YOK ve bootstrap'ten ÖNCE: Dart kodu ilk isteğini
+    atmadan önce adresin yerinde olması gerekiyor (bkz. client/web/index.html).
+  -->
+  <script src="config.js"></script>
+
+  <!--
     You can customize the "flutter_bootstrap.js" script.
     This is useful to provide a custom configuration to the Flutter loader
     or to give the user feedback during the initialization process.

@@ -27,3 +27,16 @@ abstract class KeyValueStore {
   void setItem(String key, String value);
   void removeItem(String key);
 }
+
+// Bu dosyada TANIM olarak durmayan, ama iki gerçeklemenin de sağladığı bir üye daha var:
+//
+//   String? get configuredApiBaseUrl
+//
+// Sunucunun adresi. Tarayıcıda `config.js` dosyasının yazdığı `window.API_BASE_URL`
+// değerinden gelir, Dart VM'de (testlerde) her zaman null'dır. Adres kodda sabit
+// olsaydı imaj bir kez derlendikten sonra başka bir sunucuda kullanılamazdı; ayrıntı
+// için docker/panel-entrypoint.sh'e bakın.
+//
+// Neden burada `abstract` bir tanımı yok: bunlar sınıf değil, üst düzey (top-level)
+// üyeler; koşullu export ikisinden birini seçiyor ve sözleşmeyi derleyici zaten
+// çağrı yerinde denetliyor (aynı yol `localStore`/`sessionStore` için de böyle).

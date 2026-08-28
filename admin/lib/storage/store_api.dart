@@ -11,3 +11,11 @@ abstract class KeyValueStore {
   void setItem(String key, String value);
   void removeItem(String key);
 }
+
+// Burada TANIM olarak durmayan ama iki gerçeklemenin de sağladığı bir üye daha:
+//
+//   String? get configuredApiBaseUrl
+//
+// Sunucunun adresi; tarayıcıda `config.js`in yazdığı `window.API_BASE_URL`, Dart VM'de
+// (testlerde) null. Müşteri panelindeki karşılığıyla aynı gerekçe — adres kodda sabit
+// olsaydı imaj yeniden derlenmeden başka bir sunucuda kullanılamazdı.

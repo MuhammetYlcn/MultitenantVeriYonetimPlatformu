@@ -215,8 +215,21 @@ const Map<String, String> roleDescriptions = {
 // Backend ile tüm HTTP iletişimi tek yerde. Statik: iskelet için basit; ileride
 // gerçek bir state yönetimine (provider vb.) taşınabilir. C# HttpClient sarmalayıcısı gibi.
 class ApiService {
-  // Flutter web tarayıcıda çalışır; backend aynı makinede 5000 portunda dinler.
-  static const String baseUrl = 'http://localhost:5000';
+  // Sunucunun adresi. ÇALIŞMA ANINDA belirleniyor, derleme anında değil.
+  //
+  // Eskiden `const 'http://localhost:5000'` idi. Flutter web'de const bir metin derlenmiş
+  // JavaScript'in içine gömülür; yani teslim edilen imaj yalnızca API'nin geliştirme
+  // makinesinde, o portta durduğu kurulumda çalışırdı. Başka bir sunucuya taşıyan kişinin
+  // adresi değiştirmek için Flutter SDK'sı kurup paneli yeniden derlemesi gerekirdi.
+  //
+  // Artık adres `config.js`ten (yani `window.API_BASE_URL`) okunuyor; o dosyayı panel
+  // konteyneri her açılışta ortam değişkenine göre yazıyor. Değer yoksa — geliştirmede
+  // olduğu gibi — aşağıdaki varsayılana düşülüyor, böylece `flutter run` tarafında
+  // hiçbir şey değişmedi.
+  //
+  // `final`, `const` değil: değer artık derleme anında bilinmiyor. Uygulama ömrü boyunca
+  // bir kez hesaplanıp sabit kalıyor.
+  static final String baseUrl = configuredApiBaseUrl ?? 'http://localhost:5000';
 
   // Access token (JWT, ~15 dk). Bellekte tutulur (hızlı erişim); kaynak doğruluk tarayıcı
   // deposudur. Refresh token (uzun ömür) access dolunca yenileme için saklanır.

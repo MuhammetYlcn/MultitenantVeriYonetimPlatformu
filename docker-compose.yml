@@ -1,3 +1,23 @@
+# Projenin tamamı: veritabanı, posta yakalayıcı, API ve iki panel.
+#
+#   docker compose up -d --build
+#
+# ÖNCESİNDE paneller yerelde derlenmiş olmalı (bkz. docker/panelleri-derle.ps1) ve
+# `.env` doldurulmuş olmalı (bkz. .env.example).
+#
+# Açılan adresler:
+#   http://localhost:5200  müşteri paneli
+#   http://localhost:5300  platform paneli
+#   http://localhost:5000  API (Swagger yalnız geliştirmede açık)
+#   http://localhost:8025  yakalanan e-postalar (Mailpit)
+#
+# KONTEYNER DIŞINDA KALAN TEK PARÇA: Ollama (yapay zekâ modeli). Bilinçli — model GPU
+# istiyor ve Windows'ta Docker'a GPU geçirmek WSL2 + NVIDIA container toolkit gerektiriyor;
+# 8 GB'lık bir kartta çıkarımı konteynerin içine sokmak, kazandırdığından çok risk getirirdi.
+# API konteyneri modele host.docker.internal üzerinden, yani ana makinede zaten koşan
+# Ollama'ya bağlanıyor. "Yapay zekâ yerelde çalışır, veri kurum dışına çıkmaz" savunması
+# değişmiyor: model yine aynı makinede.
+
 services:
   postgres:
     image: postgres:16
@@ -10,6 +30,17 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # Sağlık denetimi dockerize'la eklendi. Olmadan API, PostgreSQL'in KABI ayağa kalkar
+    # kalkmaz bağlanmayı deniyordu; oysa kap ile "bağlantı kabul eden veritabanı" arasında
+    # birkaç saniye var. API o aralıkta açılış göçünü koşamayıp düşerdi. `pg_isready`
+    # sürecin gerçekten sorgu kabul ettiğini söylüyor, ve aşağıdaki `service_healthy`
+    # koşulu API'yi o ana kadar bekletiyor.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
 
   # Yerel posta yakalayıcı.
   #
@@ -26,6 +57,85 @@ services:
     ports:
       - "1025:1025"
       - "8025:8025"
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    container_name: veriyonetim-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Geliştirme değil: Swagger kapanır, ayrıntılı hata sayfaları kapanır, tarayıcı
+      # açma denemesi yapılmaz ve appsettings.Development.json okunmaz.
+      ASPNETCORE_ENVIRONMENT: Production
+
+      # --- Sırlar: .env dosyasından, depodan DEĞİL ---
+      # Çift alt çizgi, ASP.NET'te iç içe ayar demek: Jwt__Key -> Jwt:Key.
+      ConnectionStrings__DefaultConnection: ${ConnectionStrings__DefaultConnection}
+      Jwt__Key: ${Jwt__Key}
+      PlatformAdmin__Email: ${PlatformAdmin__Email}
+      PlatformAdmin__Password: ${PlatformAdmin__Password}
+
+      # --- Konteyner ağındaki komşuların adresleri ---
+      # Posta sunucusu "localhost" değil, compose'daki servis adı: konteynerin kendi
+      # localhost'u kendisidir, Mailpit ayrı bir kap.
+      Email__Host: mailpit
+      Email__Port: "1025"
+      Email__Security: none
+      Email__From: veriyonetim@localhost
+      Email__FromName: Veri Yönetim
+
+      # Model ANA MAKİNEDE koşuyor (yukarıdaki açıklama). host.docker.internal, konteynerin
+      # içinden ana makineyi gösteren addır.
+      Ollama__BaseUrl: ${Ollama__BaseUrl:-http://host.docker.internal:11434}
+
+      # Panellerin adresleri. Teslim kurulumunda CORS aslında hiç devreye girmiyor —
+      # paneller API'ye kendi nginx'leri üzerinden, yani aynı adresten ulaşıyor. Liste
+      # yine de doğru tutuluyor: API'ye doğrudan 5000'den bağlanan bir panel (ör.
+      # geliştiricinin `flutter run` ile açtığı kopya) çalışabilsin diye.
+      Cors__AllowedOrigins__0: ${PANEL_ORIGIN:-http://localhost:5200}
+      Cors__AllowedOrigins__1: ${ADMIN_ORIGIN:-http://localhost:5300}
+
+    # Linux'ta host.docker.internal kendiliğinden tanımlı DEĞİL (Docker Desktop'ta öyle).
+    # Bu satır, projeyi bir Linux sunucusuna taşıyan kişinin Ollama bağlantısının sessizce
+    # kopmasını önlüyor: ad her iki işletim sisteminde de ana makineyi gösteriyor.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  client:
+    build:
+      context: .
+      dockerfile: docker/panel.Dockerfile
+      args:
+        PANEL_DIR: client
+    container_name: veriyonetim-client
+    depends_on:
+      - api
+    ports:
+      # Geliştirmedeki portla aynı (flutter run -d web-server --web-port 5200), böylece
+      # "panel 5200'de" bilgisi teslimde de doğru kalıyor.
+      - "5200:80"
+    restart: unless-stopped
+
+  admin:
+    build:
+      context: .
+      dockerfile: docker/panel.Dockerfile
+      args:
+        PANEL_DIR: admin
+    container_name: veriyonetim-admin
+    depends_on:
+      - api
+    ports:
+      - "5300:80"
+    restart: unless-stopped
 
 volumes:
   postgres_data:

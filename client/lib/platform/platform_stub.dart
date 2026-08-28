@@ -39,3 +39,9 @@ final KeyValueStore _session = _MemoryStore();
 
 KeyValueStore get localStore => _local;
 KeyValueStore get sessionStore => _session;
+
+/// VM'de `window` diye bir şey yok, yani ayarlanmış bir adres de yok.
+///
+/// null döndürmek "ayar verilmedi" demek; çağıran taraf (`ApiService.baseUrl`)
+/// geliştirme varsayılanına düşüyor. Testler zaten gerçek bir sunucuya bağlanmıyor.
+String? get configuredApiBaseUrl => null;

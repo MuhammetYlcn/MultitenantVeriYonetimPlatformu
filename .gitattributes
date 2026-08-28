@@ -1,0 +1,21 @@
+# Satır sonlarının konteyner dosyalarında BOZULMAMASI için.
+#
+# Bu makinede git `core.autocrlf=true` ile çalışıyor: depoya yazarken satır sonlarını
+# LF'e, çalışma dizinine çıkarırken CRLF'e çeviriyor. Windows araçları için doğru
+# davranış, ama Linux konteynerine giren dosyalar için yıkıcı: kabuk betiğinin satır
+# sonundaki `\r` komutun bir parçası sayılır ve betik
+#   "/docker-entrypoint.d/40-api-base-url.sh: line 2: $'\r': command not found"
+# diyerek düşer. Panelin sunucu adresini yazan betik bu olduğu için sonuç, açılan ama
+# API'sini bulamayan bir paneldir — ve sebebi kodun kendisinde görünmez.
+#
+# Kusur bu makinede fark edilmez, çünkü dosyalar burada zaten LF olarak yazıldı.
+# TAZE BİR KLONDA ortaya çıkar; yani tam olarak teslim alan kişinin yapacağı şeyde.
+
+# Metin dosyalarının tespiti git'e bırakılıyor (varsayılan davranış korunur)…
+* text=auto
+
+# …ama konteynere giren dosyalar HER ZAMAN LF.
+*.sh          text eol=lf
+*.Dockerfile  text eol=lf
+Dockerfile    text eol=lf
+*.conf        text eol=lf

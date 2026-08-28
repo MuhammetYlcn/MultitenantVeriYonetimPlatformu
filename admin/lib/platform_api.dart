@@ -109,7 +109,11 @@ const Map<String, String> actionLabels = {
 /// Oturum: platform token'ının refresh'i YOKTUR (bilinçli — en yetkili kimliğe
 /// en kısa tasma). Süresi dolunca giriş ekranına dönülür.
 class PlatformApi {
-  static const String baseUrl = 'http://localhost:5000';
+  // Sunucunun adresi ÇALIŞMA ANINDA belirleniyor (bkz. store_web.dart ve
+  // docker/panel-entrypoint.sh). Eskiden const'tu; o hâliyle adres derlenmiş
+  // JavaScript'e gömülüyordu, yani imaj yalnız geliştirme makinesindeki adreste
+  // çalışırdı. Değer verilmemişse geliştirme varsayılanına düşülüyor.
+  static final String baseUrl = configuredApiBaseUrl ?? 'http://localhost:5000';
 
   static String? _token;
   static String? _email;

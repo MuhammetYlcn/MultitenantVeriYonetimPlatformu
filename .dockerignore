@@ -1,0 +1,51 @@
+# Derleme bağlamına (build context) GİRMEYECEK olanlar.
+#
+# İki işi birden yapıyor:
+#  1. Bağlamı küçültmek — `docker build` önce bütün bağlamı arka plana kopyalar; buradaki
+#     dizinler (özellikle training/, data/, .git/) yüzlerce megabayt tutar ve imajda hiçbir
+#     karşılığı yoktur.
+#  2. SIRLARIN İMAJA GİRMESİNİ ÖNLEMEK. appsettings.Development.json ve .env depoya
+#     girmiyor ama GELİŞTİRME MAKİNESİNDE dururlar; `COPY src/ src/` onları sessizce imaja
+#     taşırdı. Konteyner Production ortamında koştuğu için dosya okunmazdı bile — yani
+#     kimse fark etmeden imajda gerçek bir veritabanı şifresi taşınırdı.
+
+.git
+.gitignore
+.dockerignore
+
+# Sırlar
+.env
+**/appsettings.Development.json
+**/appsettings.*.Development.json
+
+# .NET ara çıktıları — imaj kendi derlemesini yapıyor, yereldeki bin/obj yalnız
+# kafa karıştırır (farklı hedef işletim sistemi için derlenmiş olabilir).
+**/bin
+**/obj
+
+# Panel imajları YALNIZ `build/web` çıktısını kopyalar; Flutter'ın geri kalanı gereksiz.
+client/.dart_tool
+client/android
+client/ios
+client/linux
+client/macos
+client/windows
+client/test
+admin/.dart_tool
+admin/android
+admin/ios
+admin/linux
+admin/macos
+admin/windows
+admin/test
+
+# API imajıyla ilgisi olmayan ağır dizinler
+training
+data
+olcumler
+ogrenme
+raporlar
+tests
+tools
+*.md
+*.html

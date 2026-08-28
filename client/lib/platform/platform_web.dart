@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 
 import 'package:web/web.dart' as web;
 
@@ -87,3 +88,28 @@ KeyValueStore get localStore => _WebStore(web.window.localStorage);
 
 /// Yenilemede kalır ama sekme kapanınca uçar — işaretsiz mod.
 KeyValueStore get sessionStore => _WebStore(web.window.sessionStorage);
+
+/// Sunucunun adresi — `config.js`in yazdığı `window.API_BASE_URL` değeri.
+///
+/// Değişken tanımsızsa (geliştirmede: depodaki config.js hiçbir şey tanımlamaz) null
+/// döner ve çağıran taraf geliştirme varsayılanına düşer. Konteynerde dosyayı açılışta
+/// panel imajı üretiyor, bu yüzden değer orada her zaman dolu olur.
+///
+/// `getProperty` ile okunuyor, `external` bir bildirimle değil: tanımsız bir genel
+/// değişkeni `external` üye olarak okumak çalışma anında hata verirdi, oysa "değişken
+/// yok" burada geçerli bir durum — geliştirmede beklenen durum.
+String? get configuredApiBaseUrl {
+  final value = globalContext.getProperty<JSAny?>('API_BASE_URL'.toJS);
+  if (value == null) return null;
+
+  // Boş metin de "ayarlanmadı" sayılıyor: config.js'te `"" || window.location.origin`
+  // yazıyor, yani boş değer zaten sayfanın kendi adresine dönüşür. Buraya boş bir
+  // metnin gelmesi ancak dosyanın elle bozulmasıyla mümkün; o hâlde de sessizce
+  // geçersiz bir adrese istek atmaktansa varsayılana düşmek doğru davranış.
+  final text = (value as JSString).toDart.trim();
+  if (text.isEmpty) return null;
+
+  // Sondaki '/' düşürülüyor: adresler '$baseUrl/api/...' diye kuruluyor, aksi hâlde
+  // '//api/...' oluşur.
+  return text.endsWith('/') ? text.substring(0, text.length - 1) : text;
+}
